@@ -126,6 +126,9 @@
     <ClCompile Include="dd_fx.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="dd_savemgr.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Text Include="Media\Copy Assets Here.txt">
@@ -245,6 +248,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="dd_fx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_savemgr.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

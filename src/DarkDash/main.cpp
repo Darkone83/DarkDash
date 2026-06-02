@@ -32,6 +32,7 @@
 #include "dd_calib.h"
 #include "dd_select.h"
 #include "dd_fx.h"
+#include "dd_savemgr.h"
 #include "dd_net.h"
 #include "dd_ftp.h"
 #include "dd_sysinfo.h"
@@ -51,6 +52,7 @@
 #define SCR_LAUNCH  1   /* shared app browser (Applications/Games/Homebrew/Emulators) */
 #define SCR_FILEMAN 2   /* file manager */
 #define SCR_SETTINGS 3  /* settings */
+#define SCR_SAVEMGR 4   /* savegame manager */
 
 /* orb glitch transition length, milliseconds */
 #define TRANS_MS 400            /* = RECT_OUT_MS + SWING_OUT_MS: screen cuts when
@@ -65,9 +67,9 @@
 #define IDLE_GAP_MIN   4000
 #define IDLE_GAP_RAND  7000
 
-#define MENU_COUNT 6
+#define MENU_COUNT 7
 static const char* k_menu[MENU_COUNT] = {
-    "APPLICATIONS", "GAMES", "HOMEBREW", "EMULATORS", "FILE MANAGER", "SETTINGS"
+    "APPLICATIONS", "GAMES", "HOMEBREW", "EMULATORS", "FILE MANAGER", "SAVE MANAGER", "SETTINGS"
 };
 
 /* which LauncherConfig a menu row opens, or NULL if it isn't a browser row */
@@ -194,8 +196,8 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
     int   gg = (int)((glow >> 8) & 0xFF);
     int   gb = (int)(glow & 0xFF);
     float menuX = 352.0f, menuY = 48.0f;
-    /* 6 rows centred inside the frame interior; rowY0/rowDY are the dials */
-    float rowY0 = 132.0f, rowDY = 44.0f;
+    /* 7 rows centred inside the frame interior; rowY0/rowDY are the dials */
+    float rowY0 = 112.0f, rowDY = 40.0f;
     int i;
 
     /* --- ambient theme lighting: shared green bloom (same on every screen) --- */
@@ -438,6 +440,13 @@ void __cdecl main(void) {
                 Swing_StartIn();
             }
         }
+        else if (screen == SCR_SAVEMGR) {
+            if (SaveMgr_Update(pressed, btn)) {      /* B -> back to main */
+                screen = SCR_MAIN;
+                trans = 2; transStart = GetTickCount();
+                Swing_StartIn();
+            }
+        }
         else if (tuning) {
             if (btn & BTN_DPAD_UP)    Iso_NudgeAngles(0.6f, 0.0f);
             if (btn & BTN_DPAD_DOWN)  Iso_NudgeAngles(-0.6f, 0.0f);
@@ -460,7 +469,11 @@ void __cdecl main(void) {
                     trans = 1; transStart = GetTickCount(); transTarget = SCR_FILEMAN;
                     Swing_Start();
                 }
-                else if (sel == 5) {               /* SETTINGS */
+                else if (sel == 5) {               /* SAVE MANAGER */
+                    trans = 1; transStart = GetTickCount(); transTarget = SCR_SAVEMGR;
+                    Swing_Start();
+                }
+                else if (sel == 6) {               /* SETTINGS */
                     trans = 1; transStart = GetTickCount(); transTarget = SCR_SETTINGS;
                     Swing_Start();
                 }
@@ -537,6 +550,7 @@ void __cdecl main(void) {
                 if (transTarget == SCR_LAUNCH)  Launcher_Enter(pendingCfg);
                 else if (transTarget == SCR_FILEMAN) FileMan_Enter();
                 else if (transTarget == SCR_SETTINGS) Settings_Enter();
+                else if (transTarget == SCR_SAVEMGR) SaveMgr_Enter();
                 trans = 0; glitch = 0;
             }
         }
@@ -580,6 +594,7 @@ void __cdecl main(void) {
         if (screen == SCR_LAUNCH)       Launcher_Render();
         else if (screen == SCR_FILEMAN) FileMan_Render();
         else if (screen == SCR_SETTINGS) Settings_Render();
+        else if (screen == SCR_SAVEMGR) SaveMgr_Render();
         else                            DrawSplash(sel, glowA, glitch);
         /* ambient overlays, over all content: CRT scanlines + roll, then the
            SFX-synced edge flash. The boot intro (if active) tops everything.

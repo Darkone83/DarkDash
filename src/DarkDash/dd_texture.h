@@ -27,6 +27,10 @@ extern "C" {
        Returns 1 on success (out filled), 0 on failure (out zeroed). */
     int  Texture_LoadPNG(const char* path, Texture* out);
 
+    /* Load an XPR0 (.xbx) texture (TitleImage.xbx / SaveImage.xbx). Handles DXT1
+       and 32-bit A8R8G8B8 / X8R8G8B8 (swizzled or linear). 1 on success. */
+    int  Texture_LoadXPR(const char* path, Texture* out);
+
     /* Build a soft radial glow texture (white, radial alpha falloff) of size x size
        (size should be power-of-two, e.g. 128). Draw it large + additive, tinted by
        the theme colour, for subtle ambient lighting. Returns 1 on success. */
