@@ -1,5 +1,17 @@
 # DarkDash
 
+<div align=center>
+
+<img src="https://github.com/Darkone83/DarkDash/blob/main/img/dash.png" width=400><img src="https://github.com/Darkone83/DarkDash/blob/main/img/apps.png" width=400>
+
+</div>
+
+<div align=center>
+
+<img src="https://github.com/Darkone83/DarkDash/blob/main/img/Darkone83.png">
+
+</div>
+
 A lightweight, native dashboard for the original Xbox.
 
 DarkDash is a clean, themeable replacement dashboard for the OG Xbox. It boots
