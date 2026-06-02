@@ -13,6 +13,7 @@
       LT + RT + BACK  exit to system dashboard
 ---------------------------------------------------------------------------*/
 #include <xtl.h>
+#include <math.h>
 #include <string.h>
 #include "dd_gfx.h"
 #include "dd_ui.h"
@@ -28,6 +29,9 @@
 #include "dd_mount.h"
 #include "dd_disc.h"
 #include "dd_egg.h"
+#include "dd_calib.h"
+#include "dd_select.h"
+#include "dd_fx.h"
 #include "dd_net.h"
 #include "dd_ftp.h"
 #include "dd_sysinfo.h"
@@ -239,6 +243,22 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
             UI_DrawSprite(orb, 44.0f, 168.0f, 272.0f, 234.0f, 0xFFFFFFFF, 0);
             UI_DrawSprite(orb, 44.0f, 168.0f, 272.0f, 234.0f,
                 UI_ARGB(glowAlpha, 255, 255, 255), 1);
+            /* rare specular shimmer: the orb briefly catches light every ~38s.
+               Re-draw the orb additively with the glow tint, ramping up then
+               down (~900ms) -- respects the orb's shape (it IS the orb sprite)
+               and reads as a glint rather than a flat flash. Gated by DD_FX_IDLE. */
+            if (Data_FxOn(DD_FX_IDLE)) {
+                DWORD st = GetTickCount();
+                DWORD cyc = st % 38000;            /* one shimmer per ~38s */
+                if (cyc < 900) {
+                    float p = (float)cyc / 900.0f;            /* 0..1         */
+                    float hump = 4.0f * p * (1.0f - p);        /* 0->1->0      */
+                    int   a = (int)(120.0f * hump);
+                    if (a > 0)
+                        UI_DrawSprite(orb, 44.0f, 168.0f, 272.0f, 234.0f,
+                            UI_ARGB(a, gr, gg, gb), 1);
+                }
+            }
         }
     }
 
@@ -288,14 +308,16 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
         else if (rectA > 0 && glowOn) {
             /* not turning (at rest, or a rect-fade phase): draw the highlight
                flat over the console at its current fade level. Honors the
-               theme [glow] block (enable + intensity + dedicated color). */
+               theme [glow] block (enable + intensity + dedicated color).
+               The Y eases toward the selected row with a pop + chromatic tick. */
             float gy = rowY0 + rowDY * (float)sel - 6.0f;
             int   ha = (70 + glowAlpha) * rectA / 255;
             ha = ha * glowI / 100;
             Iso_Begin();
+            Select_Begin(0x1000, gy);
             if (ha > 0)
-                Iso_FillRect(menuX + 18.0f, gy, 210.0f, 36.0f,
-                    UI_ARGB(ha, gr, gg, gb), 1);
+                Select_DrawGlow(menuX + 18.0f, gy, 210.0f, 36.0f,
+                    UI_ARGB(ha, gr, gg, gb));
             Iso_End();
         }
     }
@@ -323,6 +345,7 @@ void __cdecl main(void) {
     Data_Load();             /* load prefs first: Gfx_Init reads videoRes from it */
     if (!Gfx_Init()) return;
     UI_Init(Gfx_Width(), Gfx_Height());
+    Calib_Apply();           /* apply saved overscan insets (zero if uncalibrated) */
     Font_Init(Gfx_Device());
     InitInput();
     Mount_HddPartitions();   /* map C/E/F/G/X/Y/Z before anything scans them */
@@ -354,6 +377,7 @@ void __cdecl main(void) {
         if (!loaded) Theme_Load(DARKDASH_THEME_ROOT);   /* default failsafe */
     }
     Backdrop_Init();
+    Fx_Init();               /* CRT scanline texture + overlay effects */
     Audio_Init();
     {
         DD_Settings* st = Data_Get();
@@ -368,6 +392,13 @@ void __cdecl main(void) {
     Ftp_Init();
     if (Data_Get()->ftpEnabled)
         Ftp_Want(1);
+
+    /* first boot: run screen calibration so the user can fix overscan up front.
+       Everything it needs (font, audio, backdrop) is initialised by now. */
+    if (Calib_NeedsRun())
+        Calib_Run();
+
+    Fx_BootBegin();          /* power-on flourish on the first frames */
 
     while (running) {
         WORD btn, pressed;
@@ -419,6 +450,7 @@ void __cdecl main(void) {
             if (pressed & BTN_A) {
                 const LauncherConfig* cfg = MenuConfig(sel);
                 Audio_PlaySfx(SFX_SELECT);
+                Fx_FlashEdge();                      /* edge-glow pulse on select */
                 if (cfg) {                           /* a browser row: glitch out, then open */
                     pendingCfg = cfg;
                     trans = 1; transStart = GetTickCount(); transTarget = SCR_LAUNCH;
@@ -461,6 +493,20 @@ void __cdecl main(void) {
         phase = (int)((t >> 3) & 255);
         tri = (phase < 128) ? phase : (255 - phase);
         glowA = 24 + (tri >> 2);
+
+        /* idle life: slow ambient sway of the whole iso stage so the screen
+           breathes even at rest. Subtle (~+/-0.8 pitch, +/-1.2 yaw) on long
+           coprime periods so it never visibly loops. Added on top of the tuned
+           angles, so the WHITE+DPAD tuning egg still works. Gated by DD_FX_IDLE. */
+        if (Data_FxOn(DD_FX_IDLE)) {
+            float ap = (float)(t % 19000) / 19000.0f * 6.2831853f;  /* ~19s */
+            float ay = (float)(t % 27000) / 27000.0f * 6.2831853f;  /* ~27s */
+            Iso_SetBreathe(0.8f * (float)sin((double)ap),
+                1.2f * (float)sin((double)ay));
+        }
+        else {
+            Iso_SetBreathe(0.0f, 0.0f);
+        }
 
         /* advance the menu door-swing (real per-frame delta, clamped) */
         {
@@ -535,10 +581,17 @@ void __cdecl main(void) {
         else if (screen == SCR_FILEMAN) FileMan_Render();
         else if (screen == SCR_SETTINGS) Settings_Render();
         else                            DrawSplash(sel, glowA, glitch);
+        /* ambient overlays, over all content: CRT scanlines + roll, then the
+           SFX-synced edge flash. The boot intro (if active) tops everything.
+           Each gated by its DD_FX_* toggle. */
+        if (Data_FxOn(DD_FX_SCANLINES)) Fx_DrawScanlines();
+        if (Data_FxOn(DD_FX_EDGE))      Fx_DrawEdgeGlow();
+        if (Fx_BootActive()) Fx_DrawBoot();
         Gfx_EndFrame();
     }
 
     Ftp_Stop();
+    Fx_Shutdown();
     Egg_Shutdown();
     Audio_Shutdown();
     Backdrop_Shutdown();

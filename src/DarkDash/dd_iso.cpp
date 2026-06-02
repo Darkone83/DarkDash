@@ -17,15 +17,20 @@ typedef struct { float x, y, z; DWORD colour; float u, v; } IsoVert;
 static float s_pitch = 26.0f;   /* tilt the top of the plane away from viewer */
 static float s_yaw = -16.0f;  /* recede the other way, matching the concept  */
 
+/* transient ambient "breathe" added on top of the tuned angles (idle life).
+   Kept separate so it never mutates the persistent tuned base. */
+static float s_breatheP = 0.0f;
+static float s_breatheY = 0.0f;
+
 static D3DXMATRIX s_world, s_view, s_proj, s_combined;
 
 static void iso_build(void) {
     D3DXMATRIX rx, ry, tmp;
     D3DXVECTOR3 eye, at, up;
 
-    /* world: rotate the (centred) layout plane: yaw then pitch */
-    D3DXMatrixRotationX(&rx, D3DXToRadian(s_pitch));
-    D3DXMatrixRotationY(&ry, D3DXToRadian(s_yaw));
+    /* world: rotate the (centred) layout plane: yaw then pitch (+ breathe) */
+    D3DXMatrixRotationX(&rx, D3DXToRadian(s_pitch + s_breatheP));
+    D3DXMatrixRotationY(&ry, D3DXToRadian(s_yaw + s_breatheY));
     D3DXMatrixMultiply(&s_world, &ry, &rx);
 
     /* view: straight-on ortho camera looking down +Z (left-handed) */
@@ -44,6 +49,7 @@ static void iso_build(void) {
 }
 
 void Iso_SetAngles(float pitchDeg, float yawDeg) { s_pitch = pitchDeg; s_yaw = yawDeg; }
+void Iso_SetBreathe(float dPitch, float dYaw) { s_breatheP = dPitch; s_breatheY = dYaw; }
 void Iso_GetAngles(float* p, float* y) { if (p) *p = s_pitch; if (y) *y = s_yaw; }
 void Iso_NudgeAngles(float dP, float dY) {
     s_pitch += dP; s_yaw += dY;

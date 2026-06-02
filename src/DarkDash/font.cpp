@@ -70,7 +70,13 @@ typedef struct {
 /*    Init / Shutdown                                                          */
 
 /* (re)compute glyph heights + max ascender from whatever s_metrics points at,
-   expressed in VIRTUAL units (atlas-pixel metrics * layout scale). */
+   expressed in VIRTUAL units (atlas-pixel metrics * layout scale).
+
+   IMPORTANT: always assign s_glyph_h / s_max_ascender (never skip), so a prior
+   font's values can't persist when switching fonts. The baked Default font uses
+   a positive-bear_y convention (so -bear_y <= 0 and the ascender clamps to 0,
+   which is how Default is tuned); custom .ddf fonts use negative bear_y (top
+   above baseline) so -bear_y is the upward extent. Clamping at 0 handles both. */
 static void RecomputeMetrics(void) {
     int sz, i;
     for (sz = 0; sz < 3; sz++) {
@@ -79,10 +85,10 @@ static void RecomputeMetrics(void) {
             int asc;
             if (s_metrics[sz][i].h > maxh) maxh = s_metrics[sz][i].h;
             asc = -s_metrics[sz][i].bear_y;
-            if (asc > maxasc) maxasc = asc;
+            if (asc > maxasc) maxasc = asc;   /* maxasc stays >= 0 */
         }
-        if (maxh > 0)   s_glyph_h[sz] = (int)((float)maxh * s_layoutScale[sz]);
-        if (maxasc > 0) s_max_ascender[sz] = (int)((float)maxasc * s_layoutScale[sz]);
+        s_glyph_h[sz] = (int)((float)maxh * s_layoutScale[sz]);
+        s_max_ascender[sz] = (int)((float)maxasc * s_layoutScale[sz]);
     }
 }
 

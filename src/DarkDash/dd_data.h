@@ -25,6 +25,13 @@ extern "C" {
     /* video resolution preference (applied at boot in Gfx_Init) */
     enum { DD_RES_AUTO = 0, DD_RES_480 = 1, DD_RES_720 = 2 };
 
+    /* effect toggle bits packed into DD_Settings.fxFlags (all default ON) */
+#define DD_FX_SCANLINES  0x01    /* CRT scanlines + roll          */
+#define DD_FX_SELECT     0x02    /* selection spring/pop/chromatic */
+#define DD_FX_IDLE       0x04    /* iso breathe + bloom wander + orb shimmer */
+#define DD_FX_EDGE       0x08    /* edge-glow flash on select     */
+#define DD_FX_DEFAULT    (DD_FX_SCANLINES | DD_FX_SELECT | DD_FX_IDLE | DD_FX_EDGE)
+
     typedef struct DD_Settings {
         int  musicVolume;                    /* 0..100                          */
         int  musicCustom;                    /* 1 = use musicPath, 0 = built-in */
@@ -44,8 +51,13 @@ extern "C" {
         char fontName[64];                   /* .ddf basename in D:\fonts (empty = Default) */
         char themeName[64];                  /* folder in D:\themes (empty = default)       */
 
+        int  calibrated;                     /* 1 once screen calibration has been run/saved */
+        int  calibL, calibR, calibT, calibB; /* overscan insets (virtual px, per edge)       */
+
+        int  fxFlags;                        /* effect toggles, bitfield (see DD_FX_*)       */
+
         /* room to grow without bumping the on-disk version every time */
-        int  reserved[8];
+        int  reserved[2];
     } DD_Settings;
 
     /* Load settings.dat into memory (defaults if missing/old/corrupt). Safe to
@@ -58,6 +70,9 @@ extern "C" {
 
     /* Mutable pointer to the live settings (never NULL after Data_Load). */
     DD_Settings* Data_Get(void);
+
+    /* convenience: 1 if the given DD_FX_* effect bit is enabled */
+    int Data_FxOn(int bit);
 
 #ifdef __cplusplus
 }

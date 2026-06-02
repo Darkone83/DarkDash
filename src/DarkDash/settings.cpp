@@ -27,6 +27,8 @@
 #include "dd_osk.h"
 #include "dd_ftp.h"
 #include "dd_update.h"
+#include "dd_calib.h"
+#include "dd_select.h"
 #include "Settings.h"
 #include "dd_version.h"
 
@@ -85,6 +87,15 @@ static char s_fonts[FONT_MAX][64];
 static int  s_fontCount = 0;
 static int  s_fontCursor = 0;
 static int  s_fontMsg = 0;       /* 0 none, 1 applied, 2 failed -> Default */
+
+/* About panel: tick when the screen was entered, so the scroller starts at top */
+static DWORD s_aboutEnter = 0;
+
+/* Video panel Effects sub-menu */
+static int s_fxSub = 0;    /* 0 = Video rows, 1 = Effects sub-menu */
+static int s_fxRow = 0;    /* cursor within the Effects sub-menu   */
+static const int k_fxBits[4] = { DD_FX_SCANLINES, DD_FX_SELECT, DD_FX_IDLE, DD_FX_EDGE };
+static const char* const k_fxNames[4] = { "Scanlines", "Selection FX", "Idle Motion", "Edge Flash" };
 
 /* Theme panel: discovered theme folder names + cursor + apply message */
 #define THEMES_DIR "D:\\themes"
@@ -246,7 +257,8 @@ static void DrawConsole(IDirect3DDevice8* d, const char* const* rows, int count,
     if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
     if (selRow >= 0 && selRow < selectable) {
         float gy = ((pinLast && selRow == count - 1) ? bottomY : rowY0 + rowDY * (float)selRow) - 6.0f;
-        Iso_FillRect(menuX + 18.0f, gy, 210.0f, 34.0f, UI_ARGB(110, ar, ag, ab), 1);
+        Select_Begin(0x5000 + s_view, gy);
+        Select_DrawGlow(menuX + 18.0f, gy, 210.0f, 34.0f, UI_ARGB(110, ar, ag, ab));
     }
     for (i = 0; i < count; i++) {
         DWORD c = (i >= selectable) ? dim : ((i == selRow) ? glow : text);
@@ -262,6 +274,7 @@ void Settings_Enter(void) {
     DD_Settings* st = Data_Get();
     s_cursor = 0; s_view = -1; s_row = 0; s_iconIdx = -1; s_audioPick = 0;
     s_fanAuto = st->fanAuto; s_fanPct = st->fanPercent;
+    Select_Reset();
     LoadIcon(0);
 }
 
@@ -274,6 +287,8 @@ static int UpdateList(WORD pressed) {
     if (pressed & BTN_A) {
         Audio_PlaySfx(SFX_SELECT);
         s_view = s_cursor; s_row = 0; s_audioPick = 0;
+        s_fxSub = 0;   /* video Effects sub-menu starts closed */
+        Select_Reset();   /* snap the highlight to the new panel's first row */
         if (s_view == CAT_CLOCK) { Sys_GetClock(&s_clk); s_clkMsg = 0; }
         if (s_view == CAT_NETWORK) {
             Net_LoadConfig(&s_netMode, &s_netIp, &s_netMask, &s_netGw, &s_netDns1, &s_netDns2);
@@ -293,6 +308,9 @@ static int UpdateList(WORD pressed) {
         if (s_view == CAT_UPDATE) {
             Upd_Init(DARKDASH_VERSION);
             Upd_StartCheck();
+        }
+        if (s_view == CAT_ABOUT) {
+            s_aboutEnter = GetTickCount();   /* start the scroller at the top */
         }
         if (s_view == CAT_THEME) {
             int i, n;
@@ -562,12 +580,28 @@ static void UpdateClock(WORD pressed) {
 
 static void UpdateVideo(WORD pressed) {
     DD_Settings* st = Data_Get();
-    if (pressed & BTN_DPAD_DOWN) { if (s_row < 1) { s_row++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+
+    /* ---- Effects sub-menu: toggle the four effect flags ---- */
+    if (s_fxSub) {
+        if (pressed & BTN_DPAD_DOWN) { if (s_fxRow < 3) { s_fxRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+        if (pressed & BTN_DPAD_UP) { if (s_fxRow > 0) { s_fxRow--; Audio_PlaySfx(SFX_NAV_UP); } }
+        if (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT | BTN_A)) {
+            st->fxFlags ^= k_fxBits[s_fxRow];      /* flip the bit */
+            if (st->fxFlags == 0) st->fxFlags = 0; /* allow all-off in-session */
+            Data_Save();
+            Audio_PlaySfx(SFX_ALT);
+        }
+        if (pressed & BTN_B) { s_fxSub = 0; Select_Reset(); Audio_PlaySfx(SFX_BACK); }
+        return;
+    }
+
+    if (pressed & BTN_DPAD_DOWN) { if (s_row < 3) { s_row++; Audio_PlaySfx(SFX_NAV_DOWN); } }
     if (pressed & BTN_DPAD_UP) { if (s_row > 0) { s_row--; Audio_PlaySfx(SFX_NAV_UP); } }
     if (s_row == 0 && (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT | BTN_A))) {
         st->videoAspect = (st->videoAspect == DD_VIDEO_STRETCH)
             ? DD_VIDEO_PILLARBOX : DD_VIDEO_STRETCH;
         UI_SetStretch(st->videoAspect == DD_VIDEO_STRETCH);   /* live */
+        Calib_Apply();   /* re-fold calibration after the stretch mode changed */
         Audio_PlaySfx(SFX_ALT);
     }
     if (s_row == 1 && (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT | BTN_A))) {
@@ -575,6 +609,13 @@ static void UpdateVideo(WORD pressed) {
         if (pressed & BTN_DPAD_LEFT) st->videoRes = (st->videoRes + 2) % 3;
         else                         st->videoRes = (st->videoRes + 1) % 3;
         Audio_PlaySfx(SFX_ALT);
+    }
+    if (s_row == 2 && (pressed & BTN_A)) {
+        Audio_PlaySfx(SFX_SELECT);
+        Calib_Run();     /* interactive overscan overlay; saves + applies live */
+    }
+    if (s_row == 3 && (pressed & BTN_A)) {
+        s_fxSub = 1; s_fxRow = 0; Select_Reset(); Audio_PlaySfx(SFX_SELECT);   /* open Effects */
     }
 }
 
@@ -615,7 +656,12 @@ int Settings_Update(WORD pressed, WORD held) {
 
     if (s_view == CAT_AUDIO) UpdateAudio(pressed);
     else if (s_view == CAT_FAN) UpdateFan(pressed);
-    else if (s_view == CAT_VIDEO) UpdateVideo(pressed);
+    else if (s_view == CAT_VIDEO) {
+        /* if the Effects sub-menu is open, it owns B (close sub, not Video) */
+        int subWasOpen = s_fxSub;
+        UpdateVideo(pressed);
+        if (subWasOpen) return 0;   /* swallow this frame's input incl. B */
+    }
     else if (s_view == CAT_CLOCK) UpdateClock(pressed);
     else if (s_view == CAT_NETWORK) UpdateNetwork(pressed);
     else if (s_view == CAT_FTP) UpdateFtp(pressed);
@@ -635,6 +681,7 @@ int Settings_Update(WORD pressed, WORD held) {
         }
         if (s_view == CAT_UPDATE) Upd_Cancel();   /* abort any in-flight check */
         s_view = -1; s_row = 0;
+        Select_Reset();   /* snap back to the category list position */
     }
     return 0;
 }
@@ -657,7 +704,8 @@ static void RenderList(IDirect3DDevice8* d) {
     if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
     {
         float gy = rowY0 + rowDY * (float)s_cursor - 6.0f;
-        Iso_FillRect(menuX + 18.0f, gy, 210.0f, 32.0f, UI_ARGB(110, ar, ag, ab), 1);
+        Select_Begin(0x5001, gy);
+        Select_DrawGlow(menuX + 18.0f, gy, 210.0f, 32.0f, UI_ARGB(110, ar, ag, ab));
     }
     for (i = 0; i < SET_COUNT; i++) {
         DWORD c = (i == s_cursor) ? glow : text;
@@ -701,7 +749,7 @@ static void RenderAbout(IDirect3DDevice8* d) {
     lines[nLines][0] = 0; strcat(lines[nLines], "IP        "); strcat(lines[nLines++], Net_Ip());
 
     contentH = (float)nLines * 40.0f + (float)vh;
-    scrollPx = (float)((GetTickCount() / 24) % (DWORD)contentH);
+    scrollPx = (float)(((GetTickCount() - s_aboutEnter) / 24) % (DWORD)contentH);
 
     d->GetViewport(&vpOld);
     vpClip.X = (DWORD)UI_Sx((float)vx); vpClip.Y = (DWORD)UI_Sy((float)vy);
@@ -815,8 +863,32 @@ static void RenderPlaceholder(IDirect3DDevice8* d, const char* name) {
 static void RenderVideo(IDirect3DDevice8* d) {
     DD_Settings* st = Data_Get();
     char aspRow[40], resRow[40], curRow[40], num[8];
-    const char* rows[3];
+    const char* rows[5];
     int  w = Gfx_Width(), h = Gfx_Height();
+
+    /* ---- Effects sub-menu: four On/Off toggles ---- */
+    if (s_fxSub) {
+        char fxRows[4][40];
+        const char* rp[4];
+        int i;
+        for (i = 0; i < 4; i++) {
+            int onoff = (st->fxFlags & k_fxBits[i]) ? 1 : 0;
+            strcpy(fxRows[i], k_fxNames[i]);
+            /* pad to a column, then On/Off */
+            while ((int)strlen(fxRows[i]) < 14) strcat(fxRows[i], " ");
+            strcat(fxRows[i], onoff ? "On" : "Off");
+            rp[i] = fxRows[i];
+        }
+        Chrome(d, "EFFECTS", "A TOGGLE   B BACK");
+        DrawPedestal(d);
+        DrawConsole(d, rp, 4, s_fxRow, 4, 0);
+        {
+            DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
+            Font_DrawText(d, 60.0f, 410.0f, "Customize the dashboard effects",
+                FONT_SIZE_SMALL, dim, 0);
+        }
+        return;
+    }
 
     strcpy(aspRow, "Aspect    ");
     strcat(aspRow, (st->videoAspect == DD_VIDEO_STRETCH) ? "Stretch" : "Pillarbox");
@@ -831,11 +903,12 @@ static void RenderVideo(IDirect3DDevice8* d) {
     IntToText(w, num); strcat(curRow, num); strcat(curRow, "x");
     IntToText(h, num); strcat(curRow, num);
 
-    rows[0] = aspRow; rows[1] = resRow; rows[2] = curRow;
+    rows[0] = aspRow; rows[1] = resRow; rows[2] = "Calibrate Screen";
+    rows[3] = "Effects";  rows[4] = curRow;
 
-    Chrome(d, "VIDEO", "L/R CHANGE   B BACK");
+    Chrome(d, "VIDEO", "L/R CHANGE   A SELECT   B BACK");
     DrawPedestal(d);
-    DrawConsole(d, rows, 3, s_row, 2, 0);   /* Aspect + Resolution selectable; Output read-only */
+    DrawConsole(d, rows, 5, s_row, 4, 0);   /* Aspect/Resolution/Calibrate/Effects selectable; Output read-only */
 
     /* resolution change needs a relaunch -- say so under the console */
     {
@@ -855,7 +928,7 @@ static void RenderNetwork(IDirect3DDevice8* d) {
 
     strcpy(modeRow, "Mode      ");
     strcat(modeRow, (s_netMode == DD_NET_STATIC) ? "Static"
-        : (s_netMode == DD_NET_DHCP_DNS) ? "DHCP + Static DNS" : "DHCP");
+        : (s_netMode == DD_NET_DHCP_DNS) ? "DHCP + DNS" : "DHCP");
     rows[n++] = modeRow;
 
     if (s_netMode == DD_NET_STATIC) {

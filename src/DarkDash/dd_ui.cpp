@@ -13,6 +13,12 @@ static float s_scale_y = 1.0f;
 static float s_off_x = 0.0f;
 static float s_off_y = 0.0f;
 
+/* overscan calibration: inset (in virtual px) applied to all four edges. The
+   full 640x480 virtual canvas is squeezed into the safe-area rect
+   [calibL .. 640-calibR] x [calibT .. 480-calibB] so EVERY screen calibrates
+   at once (all drawing goes through UI_Sx/UI_Sy). */
+static float s_calL = 0.0f, s_calR = 0.0f, s_calT = 0.0f, s_calB = 0.0f;
+
 #define UI_FVF (D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1)
 
 typedef struct {
@@ -38,6 +44,26 @@ static void ui_recalc(void) {
         s_off_x = ((float)s_backW - UI_VIRT_W * s) * 0.5f;
         s_off_y = ((float)s_backH - UI_VIRT_H * s) * 0.5f;
     }
+
+    /* fold in overscan calibration: squeeze the virtual canvas into the safe
+       rect. New scale shrinks by the inset fraction; offset shifts inward so
+       virtual (0,0) lands at the safe-rect corner. */
+    {
+        float availW = UI_VIRT_W - s_calL - s_calR;
+        float availH = UI_VIRT_H - s_calT - s_calB;
+        float fxr = (availW > 1.0f) ? availW / UI_VIRT_W : 1.0f;
+        float fyr = (availH > 1.0f) ? availH / UI_VIRT_H : 1.0f;
+        /* shift origin to the inset corner (in screen px), then shrink */
+        s_off_x = s_off_x + s_calL * s_scale_x;
+        s_off_y = s_off_y + s_calT * s_scale_y;
+        s_scale_x = s_scale_x * fxr;
+        s_scale_y = s_scale_y * fyr;
+    }
+}
+
+void UI_SetCalibration(float l, float r, float t, float b) {
+    s_calL = l; s_calR = r; s_calT = t; s_calB = b;
+    ui_recalc();
 }
 
 void UI_Init(int backW, int backH) {
@@ -131,4 +157,34 @@ void UI_DrawSpriteNative(const Texture* t, float vx, float vy,
 
 void UI_FillRect(float vx, float vy, float vw, float vh, DWORD colour) {
     ui_quad(NULL, vx, vy, vw, vh, colour, 0);
+}
+
+/* additive solid fill (light/glow accents like the orb shimmer) */
+void UI_FillRectAdd(float vx, float vy, float vw, float vh, DWORD colour) {
+    ui_quad(NULL, vx, vy, vw, vh, colour, 1);
+}
+
+/* solid triangle from three virtual-space points (for corner markers etc.) */
+void UI_FillTri(float ax, float ay, float bx, float by, float cx, float cy,
+    DWORD colour) {
+    IDirect3DDevice8* d = Gfx_Device();
+    UiVert t[3];
+    if (!d) return;
+
+    t[0].x = UI_Sx(ax); t[0].y = UI_Sy(ay); t[0].z = 0; t[0].rhw = 1; t[0].colour = colour; t[0].u = 0; t[0].v = 0;
+    t[1].x = UI_Sx(bx); t[1].y = UI_Sy(by); t[1].z = 0; t[1].rhw = 1; t[1].colour = colour; t[1].u = 0; t[1].v = 0;
+    t[2].x = UI_Sx(cx); t[2].y = UI_Sy(cy); t[2].z = 0; t[2].rhw = 1; t[2].colour = colour; t[2].u = 0; t[2].v = 0;
+
+    d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    d->SetRenderState(D3DRS_ZENABLE, FALSE);
+    d->SetRenderState(D3DRS_LIGHTING, FALSE);
+    d->SetTexture(0, NULL);
+    d->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+    d->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+    d->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+    d->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    d->SetVertexShader(UI_FVF);
+    d->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, t, sizeof(UiVert));
 }

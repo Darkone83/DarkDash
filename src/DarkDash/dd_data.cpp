@@ -40,11 +40,17 @@ static void SetDefaults(void) {
     s_set.videoRes = DD_RES_AUTO;         /* follow the console's setting */
     s_set.fontName[0] = '\0';                /* baked Default failsafe */
     s_set.themeName[0] = '\0';               /* default theme */
+    s_set.fxFlags = DD_FX_DEFAULT;       /* all character effects on */
 }
 
 DD_Settings* Data_Get(void) {
     if (!s_loaded) { SetDefaults(); s_loaded = 1; }
     return &s_set;
+}
+
+int Data_FxOn(int bit) {
+    if (!s_loaded) { SetDefaults(); s_loaded = 1; }
+    return (s_set.fxFlags & bit) ? 1 : 0;
 }
 
 int Data_Load(void) {
@@ -82,6 +88,9 @@ int Data_Load(void) {
     if (s_set.ftpUser[0] == '\0') lstrcpynA(s_set.ftpUser, "xbox", DD_FTP_CRED_MAX);
     if (s_set.ftpPass[0] == '\0') lstrcpynA(s_set.ftpPass, "xbox", DD_FTP_CRED_MAX);
     s_set.musicPath[DD_MUSIC_PATH_MAX - 1] = '\0';
+    /* fxFlags lived in the old reserved (zero) region; a stored 0 means "never
+       set" -> default to all effects on rather than silently-all-off. */
+    if (s_set.fxFlags == 0) s_set.fxFlags = DD_FX_DEFAULT;
     return 1;
 }
 

@@ -170,7 +170,6 @@ static HANDLE              s_musicThread = NULL;
 static LONG                s_musicStop = 0;
 static LONG                s_musicEOF = 0;
 static int                 s_musicLoop = 1;
-static int                 s_writeHalf = 0;
 static CRITICAL_SECTION    s_musicCS;
 static int                 s_csReady = 0;
 
@@ -246,24 +245,38 @@ static void FillHalf(int nHalf) {
 }
 
 static DWORD WINAPI MusicThreadProc(LPVOID pParam) {
+    /* StartMusic primes BOTH halves before Play() and the cursor starts in
+       half 0, so the behind-cursor half (1) is already fresh -- start with it
+       marked filled so we don't immediately overwrite unplayed primed audio. */
+    int lastFilled = 1;
     (void)pParam;
     /* DirectSoundDoWork() is owned by the main thread (Audio_Update), so the
-       mixer is serviced even before music starts and SFX always play. This
-       thread only refills the half the play cursor has left behind. */
-    while (!InterlockedCompareExchange(&s_musicStop, 0, 0)) {
-        DWORD dwPlay = 0, dwWrite = 0, dwHalfStart, dwHalfEnd;
+       mixer is serviced even before music starts and SFX always play.
 
-        if (!s_music) { Sleep(4); continue; }
+       Streaming model: the buffer has two halves. Whichever half the PLAY
+       cursor is currently in is "live"; the OTHER half is the one we must keep
+       filled ahead of the cursor. Each tick we read the real play position,
+       work out the half behind the cursor, and (re)fill it once per crossing.
+       Tracking the cursor directly -- rather than a separate toggle that can
+       drift out of sync after a frame hitch -- removes the window where the
+       cursor could lap into a half still holding stale audio (the random pop). */
+    while (!InterlockedCompareExchange(&s_musicStop, 0, 0)) {
+        DWORD dwPlay = 0, dwWrite = 0;
+        int   playHalf, fillHalf;
+
+        if (!s_music) { lastFilled = -1; Sleep(4); continue; }
         if (InterlockedCompareExchange(&s_musicEOF, 1, 1)) { Sleep(4); continue; }
 
-        dwHalfStart = (DWORD)s_writeHalf * AUDIO_STREAM_HALF;
-        dwHalfEnd = dwHalfStart + AUDIO_STREAM_HALF;
-
         s_music->GetCurrentPosition(&dwPlay, &dwWrite);
-        if (dwPlay >= dwHalfStart && dwPlay < dwHalfEnd) { Sleep(4); continue; }
+        playHalf = (dwPlay < (DWORD)AUDIO_STREAM_HALF) ? 0 : 1;
+        fillHalf = 1 - playHalf;     /* the half behind the cursor */
 
-        FillHalf(s_writeHalf);
-        s_writeHalf = 1 - s_writeHalf;
+        /* fill the behind-cursor half once per crossing; re-arm when the
+           cursor moves into the half we just filled. */
+        if (fillHalf != lastFilled) {
+            FillHalf(fillHalf);
+            lastFilled = fillHalf;
+        }
         Sleep(4);
     }
     return 0;
@@ -401,7 +414,6 @@ void Audio_StartMusic(int loop) {
         return;
     }
 
-    s_writeHalf = 0;
     FillHalf(0);
     FillHalf(1);
     if (s_music) s_music->SetVolume(s_musicVolDb);   /* apply persisted level */

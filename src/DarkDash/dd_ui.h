@@ -38,6 +38,10 @@ extern "C" {
        1 = stretch (fill the backbuffer, distorts on 16:9). Recomputes live. */
     void  UI_SetStretch(int stretch);
 
+    /* overscan calibration: inset all four edges by these virtual-px margins.
+       Squeezes the whole 640x480 canvas into the safe rect (all screens at once). */
+    void  UI_SetCalibration(float l, float r, float t, float b);
+
     /* Draw a texture as a flat screen-aligned quad at virtual rect (vx,vy,vw,vh).
        'colour' modulates (use 0xFFFFFFFF for untinted). additive!=0 uses ONE blend
        for glow overlays; otherwise standard src-alpha. */
@@ -50,6 +54,11 @@ extern "C" {
 
     /* Solid colour rectangle in virtual coords. */
     void  UI_FillRect(float vx, float vy, float vw, float vh, DWORD colour);
+    void  UI_FillRectAdd(float vx, float vy, float vw, float vh, DWORD colour);
+
+    /* solid triangle from three virtual-space points (corner markers, etc.) */
+    void  UI_FillTri(float ax, float ay, float bx, float by, float cx, float cy,
+        DWORD colour);
 
 #ifdef __cplusplus
 }

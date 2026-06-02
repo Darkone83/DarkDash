@@ -14,6 +14,7 @@
     <ClCompile Include="applications.cpp" />
     <ClCompile Include="dd_audio.cpp" />
     <ClCompile Include="dd_backdrop.cpp" />
+    <ClCompile Include="dd_calib.cpp" />
     <ClCompile Include="dd_data.cpp" />
     <ClCompile Include="dd_disc.cpp" />
     <ClCompile Include="dd_egg.cpp" />
@@ -29,6 +30,7 @@
     <ClCompile Include="dd_net.cpp" />
     <ClCompile Include="dd_osk.cpp" />
     <ClCompile Include="dd_pedestal.cpp" />
+    <ClCompile Include="dd_select.cpp" />
     <ClCompile Include="dd_swing.cpp" />
     <ClCompile Include="dd_sysinfo.cpp" />
     <ClCompile Include="dd_texture.cpp" />
@@ -37,6 +39,7 @@
     <ClCompile Include="dd_update.cpp" />
     <ClCompile Include="dd_xbe.cpp" />
     <ClCompile Include="emulators.cpp" />
+    <ClCompile Include="dd_fx.cpp" />
     <ClCompile Include="fileman.cpp" />
     <ClCompile Include="font.cpp" />
     <ClCompile Include="games.cpp" />
@@ -54,11 +57,13 @@
     <ClInclude Include="applications.h" />
     <ClInclude Include="dd_audio.h" />
     <ClInclude Include="dd_backdrop.h" />
+    <ClInclude Include="dd_calib.h" />
     <ClInclude Include="dd_data.h" />
     <ClInclude Include="dd_disc.h" />
     <ClInclude Include="dd_egg.h" />
     <ClInclude Include="dd_fileops.h" />
     <ClInclude Include="dd_ftp.h" />
+    <ClInclude Include="dd_fx.h" />
     <ClInclude Include="dd_gfx.h" />
     <ClInclude Include="dd_iso.h" />
     <ClInclude Include="dd_launcher.h" />
@@ -66,6 +71,7 @@
     <ClInclude Include="dd_net.h" />
     <ClInclude Include="dd_osk.h" />
     <ClInclude Include="dd_pedestal.h" />
+    <ClInclude Include="dd_select.h" />
     <ClInclude Include="dd_swing.h" />
     <ClInclude Include="dd_sysinfo.h" />
     <ClInclude Include="dd_texture.h" />

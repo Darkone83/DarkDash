@@ -23,6 +23,7 @@ extern "C" {
 #endif
 
     void Iso_SetAngles(float pitchDeg, float yawDeg);
+    void Iso_SetBreathe(float dPitch, float dYaw);   /* transient idle "breathe" offset */
     void Iso_GetAngles(float* pitchDeg, float* yawDeg);
     void Iso_NudgeAngles(float dPitch, float dYaw);
 
