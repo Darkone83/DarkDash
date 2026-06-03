@@ -1,4 +1,3 @@
-#pragma once
 /*---------------------------------------------------------------------------
     dd_update.h -- inline OTA self-updater for DarkDash.
 
@@ -46,6 +45,12 @@ extern "C" {
     void Upd_Tick(void);                        /* advance the state machine (call each frame) */
     void Upd_Cancel(void);                      /* abort + return to IDLE  */
     void Upd_Relaunch(void);                    /* XLaunchNewImage the new XBE (after UPD_DONE) */
+
+    /* Register a render callback invoked periodically during the blocking download
+       so the progress bar advances on screen (XbDiag pattern). Pass NULL to clear.
+       The callback should draw one full frame (begin/draw/end). */
+    typedef void (*UpdRenderFn)(void);
+    void Upd_SetRenderFn(UpdRenderFn fn);
 
     int  Upd_State(void);                       /* one of UPD_*            */
     const char* Upd_LocalVersion(void);

@@ -45,8 +45,12 @@ int Fileops_IsDir(const char* path) {
 /* ---- single file copy (blocking) ---------------------------------------- */
 
 int Fileops_CopyFile(const char* src, const char* dst) {
+    /* 64KB copy buffer kept OFF the stack: Fileops_CopyTree recurses, and a
+       64KB stack frame per CopyFile on top of nested CopyTree frames overflows
+       the Xbox thread stack -> 0x7F double-fault bugcheck. File-scope static is
+       safe here (file ops run only on the main thread, never reentrant). */
+    static char buf[FILEOPS_COPY_BUF];
     HANDLE hs, hd;
-    char   buf[FILEOPS_COPY_BUF];
     DWORD  nr, nw;
     int    ok = 1;
 
@@ -70,7 +74,9 @@ int Fileops_CopyFile(const char* src, const char* dst) {
 
 /* ---- recursive copy tree (blocking) ------------------------------------- */
 
-int Fileops_CopyTree(const char* src, const char* dst) {
+#define FILEOPS_MAX_DEPTH 40   /* deep enough for any real tree, safe on stack */
+
+static int CopyTreeRec(const char* src, const char* dst, int depth) {
     char            pat[FILEOPS_PATH_MAX + 4];
     WIN32_FIND_DATA fd;
     HANDLE          h;
@@ -78,6 +84,8 @@ int Fileops_CopyTree(const char* src, const char* dst) {
 
     if (!Fileops_IsDir(src))
         return Fileops_CopyFile(src, dst);
+
+    if (depth >= FILEOPS_MAX_DEPTH) return 0;   /* refuse to recurse deeper */
 
     CreateDirectoryA(dst, NULL);     /* mkdir target; ignore exists */
 
@@ -94,15 +102,19 @@ int Fileops_CopyTree(const char* src, const char* dst) {
             (fd.cFileName[1] == 0 || fd.cFileName[1] == '.')) continue;
         FoCopy(s2, sizeof(s2), src); FoJoin(s2, sizeof(s2), fd.cFileName);
         FoCopy(d2, sizeof(d2), dst); FoJoin(d2, sizeof(d2), fd.cFileName);
-        if (!Fileops_CopyTree(s2, d2)) ok = 0;
+        if (!CopyTreeRec(s2, d2, depth + 1)) ok = 0;
     } while (FindNextFile(h, &fd));
     FindClose(h);
     return ok;
 }
 
+int Fileops_CopyTree(const char* src, const char* dst) {
+    return CopyTreeRec(src, dst, 0);
+}
+
 /* ---- recursive delete (blocking) ---------------------------------------- */
 
-int Fileops_Delete(const char* path) {
+static int DeleteRec(const char* path, int depth) {
     char            pat[FILEOPS_PATH_MAX + 4];
     WIN32_FIND_DATA fd;
     HANDLE          h;
@@ -110,6 +122,8 @@ int Fileops_Delete(const char* path) {
 
     if (!Fileops_IsDir(path))
         return DeleteFileA(path) != 0;
+
+    if (depth >= FILEOPS_MAX_DEPTH) return 0;   /* refuse to recurse deeper */
 
     FoCopy(pat, sizeof(pat), path);
     n = FoLen(pat);
@@ -124,12 +138,16 @@ int Fileops_Delete(const char* path) {
                 (fd.cFileName[1] == 0 || fd.cFileName[1] == '.')) continue;
             FoCopy(child, sizeof(child), path);
             FoJoin(child, sizeof(child), fd.cFileName);
-            if (!Fileops_Delete(child)) ok = 0;
+            if (!DeleteRec(child, depth + 1)) ok = 0;
         } while (FindNextFile(h, &fd));
         FindClose(h);
     }
     if (!RemoveDirectoryA(path)) ok = 0;
     return ok;
+}
+
+int Fileops_Delete(const char* path) {
+    return DeleteRec(path, 0);
 }
 
 /* ---- move = copy then delete source (source kept if copy failed) -------- */

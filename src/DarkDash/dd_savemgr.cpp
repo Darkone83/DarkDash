@@ -370,14 +370,26 @@ int SaveMgr_Update(WORD pressed, WORD held) {
 
 /* ---- render ------------------------------------------------------------ */
 
-static void DrawFramedBox(IDirect3DDevice8* d, float x, float y, float w, float h) {
+/* simple themed line border -- the art panel (part of the layout, not a popup) */
+static void DrawArtBorder(IDirect3DDevice8* d, float x, float y, float w, float h) {
     DWORD accent = Theme_Color("accent", 0xFF7FE000);
     int ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
+    (void)d;
     UI_FillRect(x, y, w, h, UI_ARGB(235, 6, 10, 8));
     UI_FillRect(x, y, w, 2.0f, UI_ARGB(255, ar, ag, ab));
     UI_FillRect(x, y + h - 2.0f, w, 2.0f, UI_ARGB(255, ar, ag, ab));
     UI_FillRect(x, y, 2.0f, h, UI_ARGB(255, ar, ag, ab));
     UI_FillRect(x + w - 2.0f, y, 2.0f, h, UI_ARGB(255, ar, ag, ab));
+}
+
+/* themed popup dialog -- dims the scene then draws the menu frame, exactly like
+   FileManager's operation dialogs. */
+static void DrawDialog(IDirect3DDevice8* d, float x, float y, float w, float h) {
+    const Texture* frame = Theme_Asset("frame_menu_v");
+    (void)d;
+    UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(150, 0, 0, 0));
+    if (frame) UI_DrawSprite(frame, x, y, w, h, 0xFFFFFFFF, 0);
+    else       UI_FillRect(x, y, w, h, UI_ARGB(235, 18, 22, 18));
 }
 
 void SaveMgr_Render(void) {
@@ -401,7 +413,7 @@ void SaveMgr_Render(void) {
     if (s_msg[0]) Font_DrawTextRight(d, 624.0f, 16.0f, s_msg, FONT_SIZE_SMALL, glow);
 
     /* --- art panel --- */
-    DrawFramedBox(d, artX - 8.0f, artY - 8.0f, artW + 16.0f, artH + 16.0f);
+    DrawArtBorder(d, artX - 8.0f, artY - 8.0f, artW + 16.0f, artH + 16.0f);
     if (s_art.tex) {
         UI_DrawSprite(&s_art, artX, artY, artW, artH, 0xFFFFFFFF, 0);
     }
@@ -431,7 +443,7 @@ void SaveMgr_Render(void) {
     /* --- overlays --- */
     if (s_state == SM_OPS) {
         float bx = 232.0f, by = 150.0f, bw = 176.0f, bh = 140.0f;
-        DrawFramedBox(d, bx, by, bw, bh);
+        DrawDialog(d, bx, by, bw, bh);
         Font_DrawText(d, bx + 20.0f, by + 16.0f, "ACTIONS", FONT_SIZE_SMALL, accent, 0);
         for (i = 0; i < 3; i++) {
             float ry = by + 44.0f + (float)i * 26.0f;
@@ -444,7 +456,7 @@ void SaveMgr_Render(void) {
     }
     else if (s_state == SM_CONFIRM_DEL) {
         float bx = 200.0f, by = 190.0f, bw = 240.0f, bh = 120.0f;
-        DrawFramedBox(d, bx, by, bw, bh);
+        DrawDialog(d, bx, by, bw, bh);
         Font_DrawText(d, bx + 20.0f, by + 18.0f, "Delete all saves", FONT_SIZE_MEDIUM, accent, 0);
         Font_DrawText(d, bx + 20.0f, by + 48.0f, "for this game?", FONT_SIZE_SMALL, text, 0);
         if (s_count > 0)
@@ -455,7 +467,7 @@ void SaveMgr_Render(void) {
     else if (s_state == SM_DEST) {
         float bx = 180.0f, by = 70.0f, bw = 320.0f, bh = 350.0f;
         char title[SM_PATH];
-        DrawFramedBox(d, bx, by, bw, bh);
+        DrawDialog(d, bx, by, bw, bh);
         SmCopy(title, sizeof(title), "DEST: ");
         SmCat(title, sizeof(title), s_destPath[0] ? s_destPath : "(pick a drive)");
         Font_DrawText(d, bx + 14.0f, by + 10.0f, title, FONT_SIZE_SMALL, accent, (int)(bw - 28.0f));

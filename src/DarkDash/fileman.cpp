@@ -20,6 +20,7 @@
 #include "dd_audio.h"
 #include "dd_backdrop.h"
 #include "dd_fileops.h"
+#include "dd_copyjob.h"
 #include "dd_osk.h"
 #include "dd_mount.h"
 #include "FileMan.h"
@@ -58,7 +59,8 @@ enum {
     FM_CONFIRM_DEL,   /* "delete N items?" dialog                */
     FM_CONFIRM_EXIT,  /* "exit file manager?" dialog             */
     FM_OSK_RENAME,    /* OSK open, renaming the highlighted item */
-    FM_OSK_MKDIR      /* OSK open, naming a new folder           */
+    FM_OSK_MKDIR,     /* OSK open, naming a new folder           */
+    FM_COPYING        /* async copy/move in progress (progress UI) */
 };
 static int s_mode = FM_BROWSE;
 
@@ -70,8 +72,10 @@ static const char* k_opNames[OP_COUNT] = {
 static int s_opCursor = 0;
 
 /* a pending copy/move: which pane is the source, and is it a move? */
+#define CJ_BUILD_MAX 512   /* max top-level items staged for a CopyJob */
 static int s_pendMove = 0;     /* 0 = copy, 1 = move */
 static int s_pendSrc = 0;     /* source pane index   */
+static int s_pendDest = 1;     /* dest pane index (reload after job) */
 
 /* transient status message (e.g. "Copied", "Delete failed") */
 static char s_msg[48] = { 0 };
@@ -143,6 +147,41 @@ static void LoadDriveList(Pane* p) {
     }
 }
 
+/* case-insensitive name compare */
+static int FmNameCmp(const char* a, const char* b) {
+    int i = 0;
+    for (;;) {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'a' && ca <= 'z') ca = (char)(ca - 32);
+        if (cb >= 'a' && cb <= 'z') cb = (char)(cb - 32);
+        if (ca != cb) return (ca < cb) ? -1 : 1;
+        if (ca == 0) return 0;
+        i++;
+    }
+}
+
+/* sort a pane's entries: directories first, then alphabetical within each
+   group (the usual file-manager ordering). Insertion sort -- lists are small. */
+static void SortPane(Pane* p) {
+    int i, j;
+    for (i = 1; i < p->count; i++) {
+        FmEntry tmp = p->ent[i];
+        j = i - 1;
+        while (j >= 0) {
+            FmEntry* e = &p->ent[j];
+            int after;
+            /* tmp should come AFTER e if: e is a dir and tmp isn't (dirs first),
+               or both same kind and e's name sorts before tmp's. */
+            if (e->isDir != tmp.isDir) after = (e->isDir && !tmp.isDir);
+            else                       after = (FmNameCmp(e->name, tmp.name) <= 0);
+            if (after) break;
+            p->ent[j + 1] = p->ent[j];
+            j--;
+        }
+        p->ent[j + 1] = tmp;
+    }
+}
+
 static void LoadDirectory(Pane* p, const char* path) {
     char pat[FM_PATH_MAX + 4];
     WIN32_FIND_DATA fd;
@@ -170,6 +209,7 @@ static void LoadDirectory(Pane* p, const char* path) {
         } while (FindNextFile(h, &fd));
         FindClose(h);
     }
+    SortPane(p);                       /* dirs first, then alphabetical */
 }
 
 /* build the full path of the cursor entry into out */
@@ -272,32 +312,28 @@ static void ReloadPane(Pane* p) {
     if (p->cursor >= p->scroll + FM_VIS_ROWS) p->scroll = p->cursor - FM_VIS_ROWS + 1;
 }
 
-/* run copy or move of the source pane's marked (or highlighted) items into
-   destDir. Returns count succeeded. */
-static int RunPaste(int srcPane, const char* destDir, int isMove) {
+/* build the copy/move item list from the source pane's marked (or highlighted)
+   entries and start an async CopyJob into destDir. Returns 1 if started. */
+static int StartCopyJob(int srcPane, const char* destDir, int isMove) {
     Pane* s = &s_pane[srcPane];
-    int i, ok = 0;
+    int i;
     int useMarks = (MarkedCount(s) > 0);
+    static CopyJobItem items[CJ_BUILD_MAX];
+    int n = 0;
 
-    for (i = 0; i < s->count; i++) {
+    for (i = 0; i < s->count && n < CJ_BUILD_MAX; i++) {
         FmEntry* e = &s->ent[i];
-        char src[FM_PATH_MAX], dst[FM_PATH_MAX];
-        int r;
         if (e->isDrive) continue;
         if (useMarks) { if (!e->marked) continue; }
         else { if (i != s->cursor) continue; }
 
-        FmCopy(src, sizeof(src), s->path);
-        FmJoin(src, sizeof(src), e->name);
-        FmCopy(dst, sizeof(dst), destDir);
-        FmJoin(dst, sizeof(dst), e->name);
-
-        if (isMove)            r = Fileops_Move(src, dst);
-        else if (e->isDir)     r = Fileops_CopyTree(src, dst);
-        else                   r = Fileops_CopyFile(src, dst);
-        if (r) { ok++; e->marked = 0; }
+        FmCopy(items[n].src, sizeof(items[n].src), s->path);
+        FmJoin(items[n].src, sizeof(items[n].src), e->name);
+        FmCopy(items[n].name, sizeof(items[n].name), e->name);
+        n++;
     }
-    return ok;
+    if (n == 0) return 0;
+    return CopyJob_Begin(items, n, destDir, isMove);
 }
 
 /* delete the active pane's marked (or highlighted) items. Returns count done. */
@@ -331,6 +367,24 @@ void FileMan_Enter(void) {
 int FileMan_Update(WORD pressed, WORD held) {
     Pane* p = &s_pane[s_active];
     (void)held;
+
+    /* async copy/move in progress: pump it, allow B to cancel, finish out */
+    if (s_mode == FM_COPYING) {
+        int st;
+        if (pressed & BTN_B) CopyJob_Cancel();
+        st = CopyJob_Pump();
+        if (st != CJ_RUNNING) {
+            /* finished (done/failed/cancelled): refresh both panes */
+            ReloadPane(&s_pane[s_pendSrc]);
+            ReloadPane(&s_pane[s_pendDest]);
+            SetMsg(st == CJ_DONE ? (s_pendMove ? "Moved" : "Copied")
+                : st == CJ_CANCELLED ? "Cancelled"
+                : "Completed with errors");
+            s_mode = FM_BROWSE;
+            Audio_PlaySfx(st == CJ_DONE ? SFX_SELECT : SFX_BACK);
+        }
+        return 0;
+    }
 
     /* OSK modes: let the on-screen keyboard consume input */
     if (s_mode == FM_OSK_RENAME || s_mode == FM_OSK_MKDIR) {
@@ -436,12 +490,15 @@ int FileMan_Update(WORD pressed, WORD held) {
         if (pressed & BTN_X) { if (UpDir(p)) Audio_PlaySfx(SFX_BACK); }
         if (pressed & BTN_WHITE) {
             if (p->path[0]) {               /* must be inside a real folder */
-                int n = RunPaste(s_pendSrc, p->path, s_pendMove);
-                SetMsg(n > 0 ? (s_pendMove ? "Moved" : "Copied") : "Operation failed");
-                ReloadPane(&s_pane[s_pendSrc]);
-                ReloadPane(p);
-                s_mode = FM_BROWSE;
-                Audio_PlaySfx(SFX_SELECT);
+                s_pendDest = (p == &s_pane[0]) ? 0 : 1;
+                if (StartCopyJob(s_pendSrc, p->path, s_pendMove)) {
+                    s_mode = FM_COPYING;
+                    SetMsg(s_pendMove ? "Moving..." : "Copying...");
+                    Audio_PlaySfx(SFX_SELECT);
+                }
+                else {
+                    SetMsg("Nothing to copy");
+                }
             }
             else {
                 SetMsg("Pick a folder first");
@@ -503,8 +560,14 @@ static void DrawPane(IDirect3DDevice8* d, const Pane* p, int isActive,
     DWORD mark = Theme_Color("accent", 0xFF7FE000);
     int   ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
     float hy = 40.0f, fy = 86.0f, fw = 284.0f, fh = 360.0f;
-    float rowY0 = fy + 16.0f, rowDY = 23.0f;
+    float rowY0 = fy + 22.0f, rowDY = 23.0f;
+    float gh = (float)Font_GlyphHeight(FONT_SIZE_SMALL);   /* actual font height */
+    float hlH = gh + 4.0f;                                 /* highlight encloses glyph */
+    float hlY;                                             /* highlight top offset */
     int   i, vis;
+
+    if (hlH > rowDY) hlH = rowDY;          /* never taller than a row slot */
+    hlY = (rowDY - hlH) * 0.5f - 1.0f;     /* center the bar in the row slot */
 
     /* path-header banner */
     if (hdr) UI_DrawSprite(hdr, px, hy, fw, 36.0f,
@@ -529,19 +592,19 @@ static void DrawPane(IDirect3DDevice8* d, const Pane* p, int isActive,
         DWORD  c;
 
         if (isActive && idx == p->cursor)
-            UI_FillRect(px + 10.0f, ry - 2.0f, fw - 20.0f, 20.0f,
+            UI_FillRect(px + 18.0f, ry + hlY, fw - 36.0f, hlH,
                 UI_ARGB(70, ar, ag, ab));
         if (e->marked)
-            UI_FillRect(px + 10.0f, ry - 2.0f, 4.0f, 20.0f, mark);
+            UI_FillRect(px + 18.0f, ry + hlY, 4.0f, hlH, mark);
 
         c = (isActive && idx == p->cursor) ? glow
             : (e->isDir ? text : dim);
-        Font_DrawText(d, px + 22.0f, ry, e->name, FONT_SIZE_SMALL, c,
-            (int)(fw - 70.0f));
+        Font_DrawText(d, px + 28.0f, ry, e->name, FONT_SIZE_SMALL, c,
+            (int)(fw - 84.0f));
 
         /* dir marker / size on the right */
         if (e->isDir)
-            Font_DrawTextRight(d, px + fw - 14.0f, ry,
+            Font_DrawTextRight(d, px + fw - 22.0f, ry,
                 e->isDrive ? "drive" : "dir", FONT_SIZE_SMALL, dim);
     }
 
@@ -589,7 +652,8 @@ void FileMan_Render(void) {
 
     /* ---- overlays / dialogs ---- */
     if (s_mode == FM_OPS) {
-        float bx = 232.0f, by = 150.0f, bw = 176.0f, bh = 200.0f;
+        float bx = 232.0f, by = 150.0f, bw = 176.0f;
+        float bh = 44.0f + (float)OP_COUNT * 26.0f + 16.0f;   /* fit the rows */
         int i;
         DrawFramedBox(d, bx, by, bw, bh);
         Font_DrawText(d, bx + 20.0f, by + 16.0f, "OPERATIONS", FONT_SIZE_SMALL, accent, 0);
@@ -626,6 +690,43 @@ void FileMan_Render(void) {
         Font_DrawText(d, bx + 20.0f, by + 22.0f, "Exit file manager?", FONT_SIZE_MEDIUM, accent, 0);
         Font_DrawText(d, bx + 20.0f, by + 58.0f, "A = yes    B = no", FONT_SIZE_SMALL, dim, 0);
     }
+    else if (s_mode == FM_COPYING) {
+        float bx = 160.0f, by = 180.0f, bw = 320.0f, bh = 130.0f;
+        int   filesDone = 0, filesSeen = 0;
+        unsigned curDone = 0, curTotal = 0;
+        char  nm[COPYJOB_NAME_MAX];
+        char  line[40]; int k = 0; char num[12]; int v, kk;
+        float barX = bx + 20.0f, barY = by + 86.0f, barW = bw - 40.0f, barH = 12.0f;
+        float frac = 0.0f;
+
+        CopyJob_Progress(&filesDone, &filesSeen, nm, sizeof(nm), &curDone, &curTotal);
+        DrawFramedBox(d, bx, by, bw, bh);
+        Font_DrawText(d, bx + 20.0f, by + 16.0f,
+            s_pendMove ? "Moving" : "Copying", FONT_SIZE_MEDIUM, accent, 0);
+        /* current file name (truncated to the box) */
+        Font_DrawText(d, bx + 20.0f, by + 46.0f, nm[0] ? nm : "...", FONT_SIZE_SMALL,
+            text, (int)(bw - 40.0f));
+
+        /* "N / M files" counter */
+        v = filesDone; kk = 0; if (v == 0) num[kk++] = '0';
+        while (v > 0 && kk < 11) { num[kk++] = (char)('0' + v % 10); v /= 10; }
+        { int j; for (j = 0; j < kk; j++) line[k++] = num[kk - 1 - j]; }
+        line[k++] = ' '; line[k++] = '/'; line[k++] = ' ';
+        v = filesSeen; kk = 0; if (v == 0) num[kk++] = '0';
+        while (v > 0 && kk < 11) { num[kk++] = (char)('0' + v % 10); v /= 10; }
+        { int j; for (j = 0; j < kk; j++) line[k++] = num[kk - 1 - j]; }
+        line[k++] = ' '; line[k++] = 'f'; line[k++] = 'i'; line[k++] = 'l';
+        line[k++] = 'e'; line[k++] = 's'; line[k] = 0;
+        Font_DrawTextRight(d, bx + bw - 20.0f, by + 16.0f, line, FONT_SIZE_SMALL, dim);
+
+        /* per-file byte progress bar */
+        UI_FillRect(barX, barY, barW, barH, UI_ARGB(120, 0, 0, 0));
+        if (curTotal > 0) {
+            frac = (float)curDone / (float)curTotal;
+            if (frac > 1.0f) frac = 1.0f;
+        }
+        UI_FillRect(barX, barY, barW * frac, barH, UI_ARGB(220, ar, ag, ab));
+    }
 
     /* OSK draws on top of everything when open */
     if (s_mode == FM_OSK_RENAME || s_mode == FM_OSK_MKDIR)
@@ -639,9 +740,10 @@ void FileMan_Render(void) {
     case FM_CONFIRM_EXIT: footHint = "A YES   B NO"; break;
     case FM_OSK_RENAME:
     case FM_OSK_MKDIR:    footHint = ""; break;   /* OSK shows its own */
+    case FM_COPYING:      footHint = "B CANCEL"; break;
     default:              footHint = "A ENTER  X UP  Y MARK  LT/RT PANE  BLACK OPS  B BACK"; break;
     }
     if (foot) UI_DrawSprite(foot, 8.0f, 452.0f, 624.0f, 24.0f, 0xFFFFFFFF, 0);
     if (footHint[0])
-        Font_DrawText(d, 16.0f, 457.0f, footHint, FONT_SIZE_SMALL, text, 610);
+        Font_DrawText(d, 31.0f, 452.0f, footHint, FONT_SIZE_SMALL, text, 610);
 }

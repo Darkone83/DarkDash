@@ -19,6 +19,7 @@
 #include "dd_audio.h"
 #include "dd_xbe.h"
 #include "dd_mount.h"
+#include "dd_recents.h"
 #include "dd_backdrop.h"
 #include "dd_pedestal.h"
 #include "dd_launcher.h"
@@ -43,6 +44,7 @@ static const LauncherConfig* s_cfg = NULL;
 /* pedestal title image: only the selected app's image is decoded (lazy) */
 static Texture s_ped = { 0, 0, 0, 0, 0 };
 static int     s_pedIdx = -1;
+static int     s_pedFlat = 0;   /* 1 = art is _resources case art -> flat hologram */
 
 static void JoinPath(char* out, int cap, const char* a, const char* b);  /* fwd */
 
@@ -130,10 +132,19 @@ static void LoadPedestal(int idx) {
     if (s_ped.tex) Texture_Release(&s_ped);
     s_ped.tex = NULL;
     s_pedIdx = idx;
+    s_pedFlat = 0;
     if (idx < 0 || idx >= s_count) return;
-    /* prefer the _resources opencase art; fall back to the XBE title image */
-    if (!ResOpencase(s_items[idx].xbePath, &s_ped))
-        Xbe_LoadTitleImage(Gfx_Device(), s_items[idx].xbePath, &s_ped);
+    /* art priority:
+         1) _resources\artwork\opencase.png  -> flat hologram (s_pedFlat=1)
+         2) the XBE's embedded title image    -> spinning cube
+         3) a generic placeholder PNG         -> spinning cube
+       so an item with neither still shows something on the pedestal. */
+    if (ResOpencase(s_items[idx].xbePath, &s_ped)) {
+        s_pedFlat = 1;
+    }
+    else if (!Xbe_LoadTitleImage(Gfx_Device(), s_items[idx].xbePath, &s_ped)) {
+        Texture_LoadPNG("D:\\themes\\default\\assets\\raw\\s2_003.png", &s_ped);
+    }
 }
 
 /* join "a" + "\" + "b" into out (no sprintf) */
@@ -336,7 +347,7 @@ int Launcher_Update(WORD pressed, WORD held) {
     if (pressed & BTN_B) {
         Audio_PlaySfx(SFX_BACK);
         if (s_ped.tex) Texture_Release(&s_ped);
-        s_ped.tex = NULL; s_pedIdx = -1;
+        s_ped.tex = NULL; s_pedIdx = -1; s_pedFlat = 0;
         return 1;
     }
 
@@ -352,8 +363,9 @@ int Launcher_Update(WORD pressed, WORD held) {
             /* release the pedestal texture, stop the music, then hand off.
                Mount_LaunchXbe does not return on success. */
             if (s_ped.tex) Texture_Release(&s_ped);
-            s_ped.tex = NULL; s_pedIdx = -1;
+            s_ped.tex = NULL; s_pedIdx = -1; s_pedFlat = 0;
             Audio_StopMusic();
+            Recents_Add(s_items[s_cursor].label, s_items[s_cursor].xbePath);
             Mount_LaunchXbe(s_items[s_cursor].xbePath);
             /* fell through -> launch failed; carry on so the menu stays usable */
         }
@@ -397,11 +409,18 @@ void Launcher_Render(void) {
     if (hdr) UI_DrawSprite(hdr, 8.0f, 8.0f, 300.0f, 40.0f, 0xFFFFFFFF, 0);
     Font_DrawText(d, 26.0f, 14.0f, title, FONT_SIZE_LARGE, accent, 0);
 
-    /* pedestal (left): platform base, then the light + spinning title cube */
+    /* pedestal (left): platform base, then the light + title showpiece.
+       _resources case art renders as a flat flickering hologram; an XBE title
+       image (square) keeps the spinning cube. */
     if (ped) UI_DrawSprite(ped, 70.0f, 270.0f, 220.0f, 116.0f, 0xFFFFFFFF, 0);
-    Pedestal_Draw(s_ped.tex ? &s_ped : NULL,
-        Theme_Asset("overlay_selection_glow"),
-        GetTickCount(), ar, ag, ab);
+    if (s_ped.tex && s_pedFlat) {
+        Pedestal_DrawHologram(&s_ped, GetTickCount(), ar, ag, ab);
+    }
+    else {
+        Pedestal_Draw(s_ped.tex ? &s_ped : NULL,
+            Theme_Asset("overlay_selection_glow"),
+            GetTickCount(), ar, ag, ab);
+    }
 
     /* list frame (right), tilted to match the main menu */
     Iso_Begin();

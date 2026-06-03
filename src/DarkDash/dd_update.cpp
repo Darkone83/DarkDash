@@ -155,6 +155,7 @@ static DWORD      s_netInitStart = 0;
 static DWORD      s_dlTotal = 0, s_dlRecv = 0;
 static int        s_extractDone = 0, s_extractTotal = 0;
 static int        s_inExtract = 0;     /* progress phase flag */
+static UpdRenderFn s_renderFn = 0;     /* render pump during blocking download */
 
 /* changelog */
 static char       s_changelog[4096] = { 0 };
@@ -320,13 +321,25 @@ static int DoDownload(const char* path, const char* dest, int showProgress) {
         totalRecv += wr;
         if (showProgress) s_dlRecv = totalRecv;
     }
-    for (;;) {
-        n = recv(sock, dlBuf, sizeof(dlBuf), 0);
-        if (n <= 0) break;
-        WriteFile(hf, dlBuf, (DWORD)n, &wr, NULL);
-        totalRecv += wr;
-        if (showProgress) s_dlRecv = totalRecv;
-        if (cl > 0 && totalRecv >= cl) break;
+    {
+        DWORD pumpAccum = 0;
+        for (;;) {
+            n = recv(sock, dlBuf, sizeof(dlBuf), 0);
+            if (n <= 0) break;
+            WriteFile(hf, dlBuf, (DWORD)n, &wr, NULL);
+            totalRecv += wr;
+            if (showProgress) {
+                s_dlRecv = totalRecv;
+                /* pump a render every ~64KB so the bar advances during the
+                   blocking download (XbDiag pattern). */
+                pumpAccum += wr;
+                if (pumpAccum >= 65536) {
+                    if (s_renderFn) s_renderFn();
+                    pumpAccum = 0;
+                }
+            }
+            if (cl > 0 && totalRecv >= cl) break;
+        }
     }
     FlushFileBuffers(hf);
     CloseHandle(hf);
@@ -370,6 +383,10 @@ void Upd_Relaunch(void) {
     LAUNCH_DATA ld; ZeroMemory(&ld, sizeof(ld));
     XLaunchNewImage(k_xbeDest, &ld);
     for (;;) {}     /* never returns on success */
+}
+
+void Upd_SetRenderFn(UpdRenderFn fn) {
+    s_renderFn = fn;
 }
 
 /* fetch changelog into s_changelog (blocking, best-effort) */

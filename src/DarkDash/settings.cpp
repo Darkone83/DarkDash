@@ -30,6 +30,10 @@
 #include "dd_calib.h"
 #include "dd_select.h"
 #include "Settings.h"
+
+/* forward decls for the download render-pump (defined after Settings_Render) */
+void Settings_Render(void);
+static void SettingsUpdRenderPump(void);
 #include "dd_version.h"
 
 #define SET_COUNT 10
@@ -424,7 +428,7 @@ static void UpdateUpdate(WORD pressed) {
         case UPD_IDLE:
         case UPD_ERROR:
         case UPD_UPTODATE:   Upd_StartCheck();    Audio_PlaySfx(SFX_SELECT); break;
-        case UPD_AVAILABLE:  Upd_StartDownload(); Audio_PlaySfx(SFX_SELECT); break;
+        case UPD_AVAILABLE:  Upd_SetRenderFn(SettingsUpdRenderPump); Upd_StartDownload(); Audio_PlaySfx(SFX_SELECT); break;
         case UPD_DONE:       Upd_Relaunch();       break;   /* never returns */
         default: break;      /* CHECKING/DOWNLOADING/EXTRACTING: ignore */
         }
@@ -1219,4 +1223,14 @@ void Settings_Render(void) {
     if (s_view == CAT_THEME) { RenderTheme(d);   return; }
     if (s_view == CAT_UPDATE) { RenderUpdate(d);  return; }
     RenderPlaceholder(d, k_items[s_view]);
+}
+
+/* Render pump invoked by the updater during the blocking download (every
+   ~64KB). Draws one full frame so the Update panel's progress bar advances on
+   screen even though DoDownload() is blocking (XbDiag's render-callback
+   pattern). Forces the Update category so the bar is what's shown. */
+static void SettingsUpdRenderPump(void) {
+    Gfx_BeginFrame(Theme_BG());
+    Settings_Render();
+    Gfx_EndFrame();
 }

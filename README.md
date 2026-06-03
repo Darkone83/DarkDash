@@ -17,7 +17,8 @@ A lightweight, native dashboard for the original Xbox.
 DarkDash is a clean, themeable replacement dashboard for the OG Xbox. It boots
 fast, stays out of your way, and lets you launch your games, apps, emulators,
 and homebrew from one place. It is built natively (no script engine sitting on
-top), so it is light on resources and quick to navigate.
+top), so it is light on resources and quick to navigate — a typical boot sits
+around 24 MB resident, leaving plenty of headroom on a stock console.
 
 Made by Darkone83 / Team Resurgent.
 
@@ -26,41 +27,80 @@ Made by Darkone83 / Team Resurgent.
 - **Launch everything** — separate sections for Applications, Games, Homebrew,
   and Emulators. DarkDash scans your drives, lists what it finds, and lets you
   launch with a button press.
-- **Cover art & titles** — if a title folder has a `_resources` pack, DarkDash uses its cover art and game title. If
-  not, it falls back to the title image baked into the game.
+- **Cover art & titles** — if a title folder has a `_resources` pack, DarkDash
+  uses its cover art and game title, shown as a floating hologram on the
+  pedestal. If not, it falls back to the title image baked into the game (shown
+  on a rotating cube), and finally to a generic placeholder so there is always
+  something on the pedestal.
+- **Recently launched** — press **Y** on the main menu for a quick list of the
+  last few titles you launched, and jump straight back into one.
+- **Save Manager** — browse your game saves by title, see the cover art, and
+  copy, move, or delete a game's saves — including to and from memory units.
+- **Built-in file manager** — copy, move, rename, and delete files across your
+  hard drive and memory units, with a simple two-pane layout. Large copies and
+  moves run in the background with a progress bar and can be cancelled.
 - **Insert and play** — pop in a game disc and a prompt appears in the top-right
   corner. Press **START** to play it.
-- **Built-in file manager** — copy, move, rename, and delete files across your
-  hard drive and memory units, with a simple two-pane layout.
+- **Power menu** — tap **WHITE** on the main menu to restart the dashboard,
+  reboot (power cycle), or shut the console down.
 - **Themes** — DarkDash is fully reskinnable. Swap colors, the glow, the
   background, and all the on-screen artwork with drop-in theme folders.
 - **Custom fonts** — replace the built-in font with your own.
 - **FTP** — turn on the built-in FTP server to move files to and from your Xbox
   over the network.
 - **Self-updating** — check for and install updates right from the Settings
-  menu, no PC required.
+  menu, with a live download progress bar, then relaunch into the new build —
+  no PC required.
 
 ## Controls
 
+### Main menu
+
 | Button | Action |
 | --- | --- |
-| **D-Pad** | Move around menus |
-| **A** | Select / open / launch |
+| **D-Pad** | Move around the menu |
+| **A** | Select / open a section |
 | **B** | Back |
-| **START** | Launch an inserted game disc (from the main menu) |
+| **Y** | Open the recently-launched list |
+| **WHITE** (tap) | Open the power menu |
+| **START** | Launch an inserted game disc |
+
+### File Manager
+
+| Button | Action |
+| --- | --- |
+| **D-Pad** | Move around the current pane |
+| **A** | Enter a folder / drive |
+| **X** | Up one level |
+| **Y** | Mark / unmark an item |
+| **LT / RT** | Switch panes |
+| **BLACK** | Open the operations menu (copy / move / delete / rename / new folder) |
+| **WHITE** | Paste into the chosen destination |
+| **B** | Back |
+
+### Save Manager
+
+| Button | Action |
+| --- | --- |
+| **D-Pad** | Move through your games |
+| **A** | Open actions (copy / move / delete this game's saves) |
+| **B** | Exit |
 
 ## Installing
 
 1. Copy the DarkDash folder to your Xbox (for example over FTP or with a USB
-   tool).
+   tool). Keep DarkDash's files together in one folder.
 2. Point your softmod / BIOS dashboard path at DarkDash's `default.xbe`, or
    launch it like any other homebrew.
 3. That's it — DarkDash will scan your drives on boot.
 
-Optional folders DarkDash looks for on its own drive:
+DarkDash finds its own install folder automatically, so it works the same
+whether you launch it as a regular homebrew title or set it as your dashboard.
+
+Optional folders DarkDash looks for in its own folder:
 
 - `themes\` — drop-in theme folders (see the tools folder for a theme builder).
-- `fonts\` — custom `.ddf` fonts (see the tools folder for a font maker).
+- `fonts\` — custom fonts (see the tools folder for a font maker).
 - `data\` — saved settings and a few extras.
 
 ## Themes & Fonts
@@ -76,8 +116,8 @@ theme needs.
 ## Updating
 
 Open **Settings → Update**. DarkDash checks the server, and if there's a newer
-version it'll offer to download and install it for you, then relaunch into the
-new build. If nothing's newer, it just says so.
+version it'll download it with an on-screen progress bar, install it, and
+relaunch into the new build. If nothing's newer, it just says so.
 
 ## A note on game discs
 

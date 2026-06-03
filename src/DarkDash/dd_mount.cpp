@@ -50,6 +50,48 @@ void Mount_HddPartitions(void) {
 }
 
 /*---------------------------------------------------------------------------
+    Mount_SelfToD -- re-point D: at this XBE's own directory.
+
+    XeImageFileName holds the device path the running image was loaded from,
+    e.g. "\Device\Harddisk0\Partition2\xboxdash.xbe". We strip the trailing
+    filename to get the directory device path and symlink "\??\D:" to it, so
+    every "D:\..." asset path resolves to our install folder no matter how we
+    were launched (title vs dashboard-from-Cerbios).
+---------------------------------------------------------------------------*/
+int Mount_SelfToD(void) {
+    char  devPath[300];
+    char  linkBuf[8];
+    const char* src;
+    int   srcLen, lastBs, i, j;
+
+    if (!XeImageFileName || !XeImageFileName->Buffer) return 0;
+    src = XeImageFileName->Buffer;
+    srcLen = (int)XeImageFileName->Length;          /* counted, may not be NUL-terminated */
+    if (srcLen <= 0 || srcLen > (int)sizeof(devPath) - 1) return 0;
+
+    /* find the last backslash -> end of the directory part */
+    lastBs = -1;
+    for (i = 0; i < srcLen; ++i) if (src[i] == '\\') lastBs = i;
+    if (lastBs <= 0) return 0;                       /* no directory component */
+
+    /* copy "\Device\...\PartitionN<...dirs...>" up to (not incl) last backslash */
+    for (j = 0; j < lastBs && j < (int)sizeof(devPath) - 1; ++j) devPath[j] = src[j];
+    devPath[j] = '\0';
+
+    /* remap "\??\D:" -> devPath */
+    linkBuf[0] = '\\'; linkBuf[1] = '?'; linkBuf[2] = '?'; linkBuf[3] = '\\';
+    linkBuf[4] = 'D';  linkBuf[5] = ':';  linkBuf[6] = '\0';
+    {
+        int devLen = 0; while (devPath[devLen]) devLen++;
+        XBOX_STRING sLink = { 6, 7, linkBuf };
+        XBOX_STRING sDev = { (USHORT)devLen, (USHORT)(devLen + 1), devPath };
+        IoDeleteSymbolicLink(&sLink);               /* drop any existing D: mapping */
+        if (IoCreateSymbolicLink(&sLink, &sDev) != 0) return 0;
+    }
+    return 1;
+}
+
+/*---------------------------------------------------------------------------
     Mount_LaunchXbe -- boot the XBE at a DOS path (e.g. "E:\Apps\Foo\default.xbe").
 
     XLaunchNewImage only launches reliably from D: on RXDK, so we remap D: to

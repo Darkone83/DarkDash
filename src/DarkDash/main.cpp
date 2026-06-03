@@ -33,8 +33,10 @@
 #include "dd_select.h"
 #include "dd_fx.h"
 #include "dd_savemgr.h"
+#include "dd_recents.h"
 #include "dd_net.h"
 #include "dd_ftp.h"
+#include "xboxinternals.h"
 #include "dd_sysinfo.h"
 #include "dd_launcher.h"
 #include "Applications.h"
@@ -175,6 +177,71 @@ static void DrawStatusScroller(IDirect3DDevice8* d) {
     Font_DrawText(d, baseX, 20.0f, s_status, FONT_SIZE_SMALL, text, 0);
     Font_DrawText(d, baseX + (float)tw, 20.0f, s_status, FONT_SIZE_SMALL, text, 0);
     d->SetViewport(&vpFull);
+}
+
+/* Small "recently launched" overlay (Y on the main menu). Names only, no art;
+   uses the themed menu frame, same treatment as the FileMan operation popups. */
+static void DrawRecents(int selRow) {
+    IDirect3DDevice8* d = Gfx_Device();
+    DWORD accent = Theme_Color("accent", 0xFF7FE000);
+    DWORD text = Theme_Color("text", 0xFFD8F8C0);
+    DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
+    DWORD glow = Theme_Color("glow", 0xFFAEFF3C);
+    int   ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
+    const Texture* frame = Theme_Asset("frame_menu_v");
+    float bx = 200.0f, by = 120.0f, bw = 240.0f, bh = 240.0f;
+    int   rc = Recents_Count();
+    int   i;
+
+    /* dim the scene, then the themed frame panel (matches FileMan dialogs) */
+    UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(150, 0, 0, 0));
+    if (frame) UI_DrawSprite(frame, bx, by, bw, bh, 0xFFFFFFFF, 0);
+    else       UI_FillRect(bx, by, bw, bh, UI_ARGB(235, 18, 22, 18));
+
+    Font_DrawText(d, bx + 20.0f, by + 16.0f, "RECENT", FONT_SIZE_SMALL, accent, 0);
+
+    if (rc == 0) {
+        Font_DrawText(d, bx + 20.0f, by + 56.0f, "Nothing launched yet", FONT_SIZE_SMALL, dim, (int)(bw - 40.0f));
+    }
+    else {
+        for (i = 0; i < rc; i++) {
+            float ry = by + 48.0f + (float)i * 30.0f;
+            if (i == selRow)
+                UI_FillRect(bx + 12.0f, ry - 2.0f, bw - 24.0f, 26.0f, UI_ARGB(90, ar, ag, ab));
+            Font_DrawText(d, bx + 22.0f, ry, Recents_Name(i), FONT_SIZE_SMALL,
+                (i == selRow) ? glow : text, (int)(bw - 44.0f));
+        }
+    }
+    Font_DrawText(d, bx + 20.0f, by + bh - 30.0f, "A LAUNCH   Y/B CLOSE", FONT_SIZE_SMALL, dim, 0);
+}
+
+/* Power menu overlay (WHITE tap on the main menu). Themed frame, same treatment
+   as the recents overlay. Three options: Restart / Reboot / Shutdown. */
+static void DrawPowerMenu(int selRow) {
+    IDirect3DDevice8* d = Gfx_Device();
+    DWORD accent = Theme_Color("accent", 0xFF7FE000);
+    DWORD text = Theme_Color("text", 0xFFD8F8C0);
+    DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
+    DWORD glow = Theme_Color("glow", 0xFFAEFF3C);
+    int   ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
+    const Texture* frame = Theme_Asset("frame_menu_v");
+    static const char* const k_pow[3] = { "Restart", "Reboot", "Shutdown" };
+    float bx = 232.0f, by = 150.0f, bw = 176.0f, bh = 158.0f;
+    int   i;
+
+    UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(150, 0, 0, 0));
+    if (frame) UI_DrawSprite(frame, bx, by, bw, bh, 0xFFFFFFFF, 0);
+    else       UI_FillRect(bx, by, bw, bh, UI_ARGB(235, 18, 22, 18));
+
+    Font_DrawText(d, bx + 20.0f, by + 16.0f, "POWER", FONT_SIZE_SMALL, accent, 0);
+    for (i = 0; i < 3; i++) {
+        float ry = by + 46.0f + (float)i * 28.0f;
+        if (i == selRow)
+            UI_FillRect(bx + 12.0f, ry - 2.0f, bw - 24.0f, 24.0f, UI_ARGB(90, ar, ag, ab));
+        Font_DrawText(d, bx + 22.0f, ry, k_pow[i], FONT_SIZE_SMALL,
+            (i == selRow) ? glow : text, 0);
+    }
+    Font_DrawText(d, bx + 20.0f, by + bh - 26.0f, "A SELECT   B CLOSE", FONT_SIZE_SMALL, dim, 0);
 }
 
 static void DrawSplash(int sel, int glowAlpha, int glitch) {
@@ -326,8 +393,16 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
 
     /* --- footer status bar: FLAT --- */
     if (foot) UI_DrawSprite(foot, 8.0f, 442.0f, 624.0f, 32.0f, 0xFFFFFFFF, 0);
-    Font_DrawText(d, 24.0f, 449.0f,
-        "A SELECT   B BACK   START MENU", FONT_SIZE_SMALL, text, 0);
+    {
+        /* vertically center the hint in the 442..474 bar using the *measured*
+           glyph height, so a tall custom font doesn't clip at the bottom */
+        float barTop = 442.0f, barH = 32.0f;
+        float gh = (float)Font_GlyphHeight(FONT_SIZE_SMALL);
+        float ty = barTop + (barH - gh) * 0.5f;
+        if (ty < barTop + 2.0f) ty = barTop + 2.0f;
+        Font_DrawText(d, 24.0f, ty,
+            "A SELECT   B BACK   START MENU", FONT_SIZE_SMALL, text, 0);
+    }
 }
 
 void __cdecl main(void) {
@@ -343,8 +418,19 @@ void __cdecl main(void) {
     DWORD idleGlitchAt = 0;                /* when the current idle glitch began (0=none) */
     DWORD nextIdleAt = 0;                /* earliest time the next idle glitch may fire */
     DWORD idleSeed = GetTickCount() | 1;
+    int   recOpen = 0;          /* recents overlay (Y on main menu) */
+    int   recSel = 0;
+    int   powOpen = 0;          /* power menu overlay (WHITE tap) */
+    int   powSel = 0;
+    DWORD whiteDownMs = 0;      /* when WHITE went down (0 = not down) */
+    int   whiteMoved = 0;      /* DPAD touched during this WHITE hold? */
 
+    /* Point D: at our own install folder BEFORE anything reads "D:\...". When
+       booted as the dashboard (Cerbios) the kernel's D: may be absent/wrong, so
+       without this every asset/theme/data path fails to resolve. */
+    Mount_SelfToD();
     Data_Load();             /* load prefs first: Gfx_Init reads videoRes from it */
+    Recents_Init();          /* most-recently-launched titles (Y overlay) */
     if (!Gfx_Init()) return;
     UI_Init(Gfx_Width(), Gfx_Height());
     Calib_Apply();           /* apply saved overscan insets (zero if uncalibrated) */
@@ -404,6 +490,7 @@ void __cdecl main(void) {
 
     while (running) {
         WORD btn, pressed;
+        int  whiteReleased;
         DWORD t, el;
         int phase, tri, glowA, tuning, glitch;
 
@@ -412,10 +499,25 @@ void __cdecl main(void) {
 
         Ftp_Tick();   /* service the FTP server every frame (single-threaded) */
         pressed = (WORD)(btn & ~prev);
+        whiteReleased = ((prev & BTN_WHITE) && !(btn & BTN_WHITE)) ? 1 : 0;
         prev = btn;
         if (btn) lastInputMs = GetTickCount();   /* any input cancels idle */
 
         tuning = (btn & BTN_WHITE) ? 1 : 0;
+
+        /* WHITE double-duty: HOLD (with DPAD) = iso angle-tuning egg; a quick
+           TAP (no DPAD, released fast) = open the power menu. Track the hold. */
+        if (pressed & BTN_WHITE) { whiteDownMs = GetTickCount(); whiteMoved = 0; }
+        if ((btn & BTN_WHITE) && (pressed & (BTN_DPAD_UP | BTN_DPAD_DOWN | BTN_DPAD_LEFT | BTN_DPAD_RIGHT)))
+            whiteMoved = 1;
+        if (whiteReleased) {   /* WHITE released this frame */
+            DWORD held = GetTickCount() - whiteDownMs;
+            if (whiteDownMs && held < 400 && !whiteMoved &&
+                screen == SCR_MAIN && trans == 0 && !recOpen && !powOpen) {
+                powSel = 0; powOpen = 1; Audio_PlaySfx(SFX_SELECT);
+            }
+            whiteDownMs = 0;
+        }
         if (trans != 0) {
             /* transition animating -- swallow menu input until it settles */
         }
@@ -454,48 +556,96 @@ void __cdecl main(void) {
             if (btn & BTN_DPAD_RIGHT) Iso_NudgeAngles(0.0f, 0.6f);
         }
         else {
-            if (pressed & BTN_DPAD_DOWN) { if (sel < MENU_COUNT - 1) { sel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
-            if (pressed & BTN_DPAD_UP) { if (sel > 0) { sel--; Audio_PlaySfx(SFX_NAV_UP); } }
-            if (pressed & BTN_A) {
-                const LauncherConfig* cfg = MenuConfig(sel);
-                Audio_PlaySfx(SFX_SELECT);
-                Fx_FlashEdge();                      /* edge-glow pulse on select */
-                if (cfg) {                           /* a browser row: glitch out, then open */
-                    pendingCfg = cfg;
-                    trans = 1; transStart = GetTickCount(); transTarget = SCR_LAUNCH;
-                    Swing_Start();                       /* door-swing the menu out */
-                }
-                else if (sel == 4) {               /* FILE MANAGER */
-                    trans = 1; transStart = GetTickCount(); transTarget = SCR_FILEMAN;
-                    Swing_Start();
-                }
-                else if (sel == 5) {               /* SAVE MANAGER */
-                    trans = 1; transStart = GetTickCount(); transTarget = SCR_SAVEMGR;
-                    Swing_Start();
-                }
-                else if (sel == 6) {               /* SETTINGS */
-                    trans = 1; transStart = GetTickCount(); transTarget = SCR_SETTINGS;
-                    Swing_Start();
-                }
-                /* (no rows past SETTINGS) */
-            }
-            if (pressed & BTN_X) Audio_PlaySfx(SFX_ALT);
-            if (pressed & BTN_B) Audio_PlaySfx(SFX_BACK);
-            if (pressed & BTN_START) {           /* launch a present game disc */
-                const DiscState* ds = Disc_Get();
-                if (ds->present && ds->isXboxGame) {
+            if (powOpen) {
+                /* power menu owns input while open */
+                if (pressed & BTN_DPAD_DOWN) { if (powSel < 2) { powSel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+                if (pressed & BTN_DPAD_UP) { if (powSel > 0) { powSel--; Audio_PlaySfx(SFX_NAV_UP); } }
+                if (pressed & BTN_A) {
                     Audio_PlaySfx(SFX_SELECT);
-                    Disc_Launch();               /* no return on success */
+                    /* tidy shutdown of services before we hand off / power down */
+                    Ftp_Stop();
+                    Audio_StopMusic();
+                    if (powSel == 0) {                 /* Restart: relaunch DarkDash */
+                        LAUNCH_DATA ld; ZeroMemory(&ld, sizeof(ld));
+                        XLaunchNewImage("D:\\default.xbe", &ld);
+                    }
+                    else if (powSel == 1) {          /* Reboot: cold power cycle */
+                        HalReturnToFirmware(RETURN_FIRMWARE_REBOOT);
+                    }
+                    else {                           /* Shutdown: power off */
+                        HalReturnToFirmware(RETURN_FIRMWARE_HALT);
+                    }
+                    /* if a relaunch somehow returns, just close the menu */
+                    powOpen = 0;
                 }
+                if (pressed & BTN_B) { powOpen = 0; Audio_PlaySfx(SFX_BACK); }
             }
-            /* easter egg: Black+RT toggles the spinning Darkone83 logo on the
-               pedestal. Fires once when the combo completes; glitches the swap. */
-            if ((btn & BTN_BLACK) && (btn & BTN_RTRIG) &&
-                (pressed & (BTN_BLACK | BTN_RTRIG))) {
-                Egg_Toggle();
-                trans = 2; transStart = GetTickCount();   /* glitch the swap in */
-                Audio_PlaySfx(SFX_ALT);
+            else if (recOpen) {
+                /* recents overlay owns input while open */
+                int rc = Recents_Count();
+                if (pressed & BTN_DPAD_DOWN) { if (recSel < rc - 1) { recSel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+                if (pressed & BTN_DPAD_UP) { if (recSel > 0) { recSel--; Audio_PlaySfx(SFX_NAV_UP); } }
+                if ((pressed & BTN_A) && rc > 0) {
+                    const char* path = Recents_Path(recSel);
+                    Audio_PlaySfx(SFX_SELECT);
+                    if (path && path[0]) {
+                        Audio_StopMusic();
+                        Mount_LaunchXbe(path);   /* no return on success */
+                        /* fell through -> launch failed; close and carry on */
+                    }
+                    recOpen = 0;
+                }
+                if (pressed & (BTN_B | BTN_Y)) { recOpen = 0; Audio_PlaySfx(SFX_BACK); }
             }
+            else {
+                if (pressed & BTN_DPAD_DOWN) { if (sel < MENU_COUNT - 1) { sel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+                if (pressed & BTN_DPAD_UP) { if (sel > 0) { sel--; Audio_PlaySfx(SFX_NAV_UP); } }
+                if (pressed & BTN_A) {
+                    const LauncherConfig* cfg = MenuConfig(sel);
+                    Audio_PlaySfx(SFX_SELECT);
+                    Fx_FlashEdge();                      /* edge-glow pulse on select */
+                    if (cfg) {                           /* a browser row: glitch out, then open */
+                        pendingCfg = cfg;
+                        trans = 1; transStart = GetTickCount(); transTarget = SCR_LAUNCH;
+                        Swing_Start();                       /* door-swing the menu out */
+                    }
+                    else if (sel == 4) {               /* FILE MANAGER */
+                        trans = 1; transStart = GetTickCount(); transTarget = SCR_FILEMAN;
+                        Swing_Start();
+                    }
+                    else if (sel == 5) {               /* SAVE MANAGER */
+                        trans = 1; transStart = GetTickCount(); transTarget = SCR_SAVEMGR;
+                        Swing_Start();
+                    }
+                    else if (sel == 6) {               /* SETTINGS */
+                        trans = 1; transStart = GetTickCount(); transTarget = SCR_SETTINGS;
+                        Swing_Start();
+                    }
+                    /* (no rows past SETTINGS) */
+                }
+                if (pressed & BTN_X) Audio_PlaySfx(SFX_ALT);
+                if (pressed & BTN_B) Audio_PlaySfx(SFX_BACK);
+                if (pressed & BTN_START) {           /* launch a present game disc */
+                    const DiscState* ds = Disc_Get();
+                    if (ds->present && ds->isXboxGame) {
+                        Audio_PlaySfx(SFX_SELECT);
+                        Disc_Launch();               /* no return on success */
+                    }
+                }
+                if (pressed & BTN_Y) {               /* open the recents overlay */
+                    recSel = 0;
+                    recOpen = 1;
+                    Audio_PlaySfx(SFX_SELECT);
+                }
+                /* easter egg: Black+RT toggles the spinning Darkone83 logo on the
+                   pedestal. Fires once when the combo completes; glitches the swap. */
+                if ((btn & BTN_BLACK) && (btn & BTN_RTRIG) &&
+                    (pressed & (BTN_BLACK | BTN_RTRIG))) {
+                    Egg_Toggle();
+                    trans = 2; transStart = GetTickCount();   /* glitch the swap in */
+                    Audio_PlaySfx(SFX_ALT);
+                }
+            }   /* end !recOpen */
         }
 
         if ((btn & BTN_LTRIG) && (btn & BTN_RTRIG) && (btn & BTN_BACK))
@@ -596,6 +746,8 @@ void __cdecl main(void) {
         else if (screen == SCR_SETTINGS) Settings_Render();
         else if (screen == SCR_SAVEMGR) SaveMgr_Render();
         else                            DrawSplash(sel, glowA, glitch);
+        if (screen == SCR_MAIN && recOpen) DrawRecents(recSel);
+        if (screen == SCR_MAIN && powOpen) DrawPowerMenu(powSel);
         /* ambient overlays, over all content: CRT scanlines + roll, then the
            SFX-synced edge flash. The boot intro (if active) tops everything.
            Each gated by its DD_FX_* toggle. */
