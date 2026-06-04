@@ -135,6 +135,9 @@
     <ClCompile Include="dd_copyjob.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="dd_screensaver.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Text Include="Media\Copy Assets Here.txt">
@@ -263,6 +266,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="dd_copyjob.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_screensaver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

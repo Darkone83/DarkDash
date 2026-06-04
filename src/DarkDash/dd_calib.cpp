@@ -50,7 +50,7 @@ int Calib_NeedsRun(void) {
 void Calib_Run(void) {
     DD_Settings* s = Data_Get();
     IDirect3DDevice8* d;
-    WORD prev = 0;
+    WORD prev;
     int running = 1, save = 0;
 
     /* seed working values from saved (or 0) */
@@ -58,6 +58,11 @@ void Calib_Run(void) {
     s_r = ClampI(s->calibR, 0, CALIB_MAX);
     s_t = ClampI(s->calibT, 0, CALIB_MAX);
     s_b = ClampI(s->calibB, 0, CALIB_MAX);
+
+    /* seed prev with whatever is held right now (e.g. the A press that opened
+       this screen) so it isn't read as an immediate Save-and-exit on frame 1. */
+    PumpInput();
+    prev = GetButtons();
 
     /* draw with NO inset so brackets map against the true screen */
     UI_SetCalibration(0.0f, 0.0f, 0.0f, 0.0f);

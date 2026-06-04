@@ -33,6 +33,7 @@
     <ClCompile Include="dd_pedestal.cpp" />
     <ClCompile Include="dd_recents.cpp" />
     <ClCompile Include="dd_savemgr.cpp" />
+    <ClCompile Include="dd_screensaver.cpp" />
     <ClCompile Include="dd_select.cpp" />
     <ClCompile Include="dd_swing.cpp" />
     <ClCompile Include="dd_sysinfo.cpp" />
@@ -77,6 +78,7 @@
     <ClInclude Include="dd_pedestal.h" />
     <ClInclude Include="dd_recents.h" />
     <ClInclude Include="dd_savemgr.h" />
+    <ClInclude Include="dd_screensaver.h" />
     <ClInclude Include="dd_select.h" />
     <ClInclude Include="dd_swing.h" />
     <ClInclude Include="dd_sysinfo.h" />

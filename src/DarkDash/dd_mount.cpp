@@ -115,8 +115,16 @@ int Mount_LaunchXbe(const char* dosPath) {
     /* D: is the running title's own device -- launch directly, no remap. */
     if (drive == 'D') { XLaunchNewImage((char*)dosPath, NULL); return 1; }
 
-    for (i = 0; i < 7; ++i)
-        if (k_drives[i].letter[0] == drive) { device = k_drives[i].device; break; }
+    /* The optical disc (S:) isn't an HDD partition, so it's not in k_drives;
+       it lives at \Device\Cdrom0. Resolve it explicitly so a game disc can be
+       launched (remap D: -> Cdrom0, then XLaunchNewImage D:\default.xbe). */
+    if (drive == 'S') {
+        device = "\\Device\\Cdrom0";
+    }
+    else {
+        for (i = 0; i < 7; ++i)
+            if (k_drives[i].letter[0] == drive) { device = k_drives[i].device; break; }
+    }
     if (!device) return 2;
 
     len = 0; while (dosPath[len]) len++;

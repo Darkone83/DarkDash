@@ -599,7 +599,7 @@ static void UpdateVideo(WORD pressed) {
         return;
     }
 
-    if (pressed & BTN_DPAD_DOWN) { if (s_row < 3) { s_row++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+    if (pressed & BTN_DPAD_DOWN) { if (s_row < 4) { s_row++; Audio_PlaySfx(SFX_NAV_DOWN); } }
     if (pressed & BTN_DPAD_UP) { if (s_row > 0) { s_row--; Audio_PlaySfx(SFX_NAV_UP); } }
     if (s_row == 0 && (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT | BTN_A))) {
         st->videoAspect = (st->videoAspect == DD_VIDEO_STRETCH)
@@ -614,11 +614,21 @@ static void UpdateVideo(WORD pressed) {
         else                         st->videoRes = (st->videoRes + 1) % 3;
         Audio_PlaySfx(SFX_ALT);
     }
-    if (s_row == 2 && (pressed & BTN_A)) {
+    if (s_row == 2 && (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT | BTN_A))) {
+        /* screensaver timeout: Off, 5, 10, 15, 20, 30 min */
+        static const int k_ss[6] = { 0, 5, 10, 15, 20, 30 };
+        int cur = 0, i;
+        for (i = 0; i < 6; i++) if (st->screensaverMin == k_ss[i]) { cur = i; break; }
+        if (pressed & BTN_DPAD_LEFT) cur = (cur + 5) % 6;
+        else                         cur = (cur + 1) % 6;
+        st->screensaverMin = k_ss[cur];
+        Audio_PlaySfx(SFX_ALT);
+    }
+    if (s_row == 3 && (pressed & BTN_A)) {
         Audio_PlaySfx(SFX_SELECT);
         Calib_Run();     /* interactive overscan overlay; saves + applies live */
     }
-    if (s_row == 3 && (pressed & BTN_A)) {
+    if (s_row == 4 && (pressed & BTN_A)) {
         s_fxSub = 1; s_fxRow = 0; Select_Reset(); Audio_PlaySfx(SFX_SELECT);   /* open Effects */
     }
 }
@@ -866,8 +876,8 @@ static void RenderPlaceholder(IDirect3DDevice8* d, const char* name) {
 
 static void RenderVideo(IDirect3DDevice8* d) {
     DD_Settings* st = Data_Get();
-    char aspRow[40], resRow[40], curRow[40], num[8];
-    const char* rows[5];
+    char aspRow[40], resRow[40], curRow[40], ssRow[40], num[8];
+    const char* rows[6];
     int  w = Gfx_Width(), h = Gfx_Height();
 
     /* ---- Effects sub-menu: four On/Off toggles ---- */
@@ -902,17 +912,25 @@ static void RenderVideo(IDirect3DDevice8* d) {
     else if (st->videoRes == DD_RES_720) strcat(resRow, "720p");
     else                                 strcat(resRow, "Auto");
 
+    strcpy(ssRow, "Screensaver ");
+    if (st->screensaverMin <= 0) {
+        strcat(ssRow, "Off");
+    }
+    else {
+        IntToText(st->screensaverMin, num); strcat(ssRow, num); strcat(ssRow, " min");
+    }
+
     /* live readout of what we actually booted at */
     strcpy(curRow, "Output    ");
     IntToText(w, num); strcat(curRow, num); strcat(curRow, "x");
     IntToText(h, num); strcat(curRow, num);
 
-    rows[0] = aspRow; rows[1] = resRow; rows[2] = "Calibrate Screen";
-    rows[3] = "Effects";  rows[4] = curRow;
+    rows[0] = aspRow; rows[1] = resRow; rows[2] = ssRow;
+    rows[3] = "Calibrate Screen"; rows[4] = "Effects"; rows[5] = curRow;
 
     Chrome(d, "VIDEO", "L/R CHANGE   A SELECT   B BACK");
     DrawPedestal(d);
-    DrawConsole(d, rows, 5, s_row, 4, 0);   /* Aspect/Resolution/Calibrate/Effects selectable; Output read-only */
+    DrawConsole(d, rows, 6, s_row, 5, 0);   /* rows 0-4 selectable; Output (5) read-only */
 
     /* resolution change needs a relaunch -- say so under the console */
     {

@@ -44,12 +44,18 @@ void Sys_Init(void) {
 
 int Sys_ReadTemps(int* cpuC, int* boardC) {
     BYTE c = 0, b = 0;
-    /* ADM1032 (rev 1.0-1.5) */
+    /* ADM1032 (rev 1.0-1.5): regs read directly, no scaling. */
     if (SMBusRead(SMBADDR_ADM1032, 0x01, &c) && SMBusRead(SMBADDR_ADM1032, 0x00, &b)) {
         if (cpuC) *cpuC = c; if (boardC) *boardC = b; return 1;
     }
-    /* PIC/SMC (rev 1.6 / fallback) */
+    /* PIC/SMC fallback (rev 1.6 / Xyclops): reg 0x09 = CPU, 0x0A = board.
+       On 1.6 the board reading runs high and needs the 0.8x ambient scaling
+       that the ADM1032 path doesn't (ref: PrometheOS xboxConfig). The 1.0-1.5
+       PIC proxy returns the same value the ADM1032 would, so scaling it would
+       be wrong there -- but this branch is only reached when the ADM1032 is
+       absent, i.e. a 1.6, so applying the scale here is correct. */
     if (SMBusRead(SMBADDR_PIC, 0x09, &c) && SMBusRead(SMBADDR_PIC, 0x0A, &b)) {
+        b = (BYTE)((int)b * 4 / 5);          /* 1.6 board-temp correction */
         if (cpuC) *cpuC = c; if (boardC) *boardC = b; return 1;
     }
     return 0;

@@ -20,6 +20,7 @@
 #include "dd_audio.h"
 #include "dd_backdrop.h"
 #include "dd_fileops.h"
+#include "dd_disc.h"
 #include "dd_copyjob.h"
 #include "dd_osk.h"
 #include "dd_mount.h"
@@ -144,6 +145,19 @@ static void LoadDriveList(Pane* p) {
         if (attr == 0xFFFFFFFF || !(attr & FILE_ATTRIBUTE_DIRECTORY)) continue;
         label[0] = Mu_Letter(port, slot); label[1] = ':'; label[2] = 0;
         AddEntry(p, label, 1, 1, root, 0);
+    }
+
+    /* optical disc: dd_disc mounts a present disc to S: internally (D: is the
+       dashboard's own install folder and can't be reused). Show it to the user
+       as "D:" though -- that's the letter people expect for the DVD drive -- by
+       labelling it D: while navigation/ops still use the real S:\ root. */
+    {
+        const DiscState* ds = Disc_Get();
+        if (ds->present) {
+            DWORD attr = GetFileAttributesA("S:\\");
+            if (attr != 0xFFFFFFFF && (attr & FILE_ATTRIBUTE_DIRECTORY))
+                AddEntry(p, "D: (Disc)", 1, 1, "S:\\", 0);
+        }
     }
 }
 

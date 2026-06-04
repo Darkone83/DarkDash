@@ -11,6 +11,7 @@
 #define DD_LAUNCHER_H
 
 #include <xtl.h>
+#include "dd_texture.h"
 
 typedef struct {
     const char* title;      /* header label, e.g. "APPLICATIONS"  */
@@ -23,5 +24,10 @@ typedef struct {
 void Launcher_Enter(const LauncherConfig* cfg);   /* scan + reset cursor  */
 int  Launcher_Update(WORD pressed, WORD held);     /* nav; returns 1 on B  */
 void Launcher_Render(void);                        /* draw the screen      */
+
+/* Load cover art for a title (opencase->hologram, title image/placeholder->
+   cube). *isFlat set to 1 for hologram art, 0 for cube art. 1 if any loaded.
+   Caller owns 'out' and must Texture_Release it. */
+int  Launcher_LoadArtFor(const char* xbePath, Texture* out, int* isFlat);
 
 #endif /* DD_LAUNCHER_H */

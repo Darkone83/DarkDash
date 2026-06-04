@@ -41,6 +41,7 @@ static void SetDefaults(void) {
     s_set.fontName[0] = '\0';                /* baked Default failsafe */
     s_set.themeName[0] = '\0';               /* default theme */
     s_set.fxFlags = DD_FX_DEFAULT;       /* all character effects on */
+    s_set.screensaverMin = 10;               /* idle screensaver after 10 min */
 }
 
 DD_Settings* Data_Get(void) {

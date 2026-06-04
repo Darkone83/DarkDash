@@ -56,8 +56,10 @@ extern "C" {
 
         int  fxFlags;                        /* effect toggles, bitfield (see DD_FX_*)       */
 
+        int  screensaverMin;                 /* idle screensaver: 0 = off, else minutes      */
+
         /* room to grow without bumping the on-disk version every time */
-        int  reserved[2];
+        int  reserved[1];
     } DD_Settings;
 
     /* Load settings.dat into memory (defaults if missing/old/corrupt). Safe to

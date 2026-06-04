@@ -20,37 +20,58 @@ int Gfx_Init(void) {
     if (!s_d3d) return 0;
 
     ZeroMemory(&pp, sizeof(pp));
-    /* Match the console's video setup. The UI is authored in a 640x480 logical
-       space and UI_Init scales it (uniform + centered) to whatever backbuffer
-       we create, so we can boot a real 1280x720 surface when the box is set to
-       720p and the whole UI scales up crisply instead of being hardware-upscaled
-       from 640x480. Falls back to 640x480 for SDTV/480p. */
+    /* Mode selection mirrors XbDiag's proven, 1.6-safe logic. The key point:
+       a standard-def display runs 480i (or 576i PAL) and the backbuffer MUST be
+       requested with D3DPRESENTFLAG_INTERLACED -- only true 480p/720p HD modes
+       are PROGRESSIVE. Forcing PROGRESSIVE on an interlaced SDTV box (common on
+       rev 1.6 / Xcalibur) makes CreateDevice fail, so the dash exits to a black
+       screen. The UI is authored at 640x480 and UI_Init scales it to whatever
+       backbuffer we create. 'pref' lets Settings force 480/720; AUTO follows
+       the console's reported capabilities. */
     {
         DWORD vflags = XGetVideoFlags();
         DWORD vstd = XGetVideoStandard();
         int   pref = Data_Get()->videoRes;
-        int   can720 = (vflags & XC_VIDEO_FLAGS_HDTV_720p) ? 1 : 0;
+        int   has720 = (vflags & XC_VIDEO_FLAGS_HDTV_720p) ? 1 : 0;
+        int   has480p = (vflags & XC_VIDEO_FLAGS_HDTV_480p) ? 1 : 0;
+        int   palI = (vstd == XC_VIDEO_STANDARD_PAL_I) ? 1 : 0;
+        int   pal60 = (vflags & XC_VIDEO_FLAGS_PAL_60Hz) ? 1 : 0;
         int   use720;
 
-        /* Auto follows the console; 720p honored only if the box can do it
-           (forcing it on a 480-only box would produce no signal); 480p forces
-           SDTV. */
+        /* 480p forces SDTV res; 720p honored only if the box reports it
+           (forcing it on a 480-only box yields no signal); AUTO follows box. */
         if (pref == DD_RES_480)      use720 = 0;
-        else if (pref == DD_RES_720) use720 = can720;
-        else                         use720 = can720;   /* AUTO */
+        else if (pref == DD_RES_720) use720 = has720;
+        else                         use720 = has720;   /* AUTO */
 
-        pp.Flags = D3DPRESENTFLAG_PROGRESSIVE;
-        if (vflags & XC_VIDEO_FLAGS_WIDESCREEN)
-            pp.Flags |= D3DPRESENTFLAG_WIDESCREEN;
+        pp.FullScreen_RefreshRateInHz = 60;
 
-        if (use720) { pp.BackBufferWidth = 1280; pp.BackBufferHeight = 720; }
-        else { pp.BackBufferWidth = 640;  pp.BackBufferHeight = 480; }
-
-        if (vstd == XC_VIDEO_STANDARD_PAL_I &&
-            !(vflags & XC_VIDEO_FLAGS_PAL_60Hz))
+        if (use720) {
+            /* 720p: progressive widescreen HD */
+            pp.BackBufferWidth = 1280;
+            pp.BackBufferHeight = 720;
+            pp.Flags = D3DPRESENTFLAG_PROGRESSIVE | D3DPRESENTFLAG_WIDESCREEN;
+        }
+        else if (has480p && pref != DD_RES_480) {
+            /* 480p: progressive SDTV (only when the box actually reports 480p) */
+            pp.BackBufferWidth = 640;
+            pp.BackBufferHeight = 480;
+            pp.Flags = D3DPRESENTFLAG_PROGRESSIVE;
+            if (vflags & XC_VIDEO_FLAGS_WIDESCREEN) pp.Flags |= D3DPRESENTFLAG_WIDESCREEN;
+        }
+        else if (palI && !pal60) {
+            /* true PAL-I: 576i 50Hz interlaced, 4:3 (640x576, not 720) */
+            pp.BackBufferWidth = 640;
+            pp.BackBufferHeight = 576;
+            pp.Flags = D3DPRESENTFLAG_INTERLACED;
             pp.FullScreen_RefreshRateInHz = 50;
-        else
-            pp.FullScreen_RefreshRateInHz = 60;
+        }
+        else {
+            /* 480i baseline -- NTSC, PAL-M, PAL60. Interlaced is REQUIRED. */
+            pp.BackBufferWidth = 640;
+            pp.BackBufferHeight = 480;
+            pp.Flags = D3DPRESENTFLAG_INTERLACED;
+        }
     }
     pp.BackBufferFormat = D3DFMT_X8R8G8B8;
     pp.BackBufferCount = 1;
@@ -61,6 +82,27 @@ int Gfx_Init(void) {
 
     hr = s_d3d->CreateDevice(0, D3DDEVTYPE_HAL, NULL,
         D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &s_device);
+
+    /* Safe-mode fallback: if the preferred mode is rejected for any reason,
+       retry with the most conservative mode every Xbox can produce -- 640x480
+       interlaced, 60Hz -- rather than returning 0 (which exits the dash to a
+       black screen). Keeps a 50Hz PAL box on 50Hz. */
+    if (FAILED(hr)) {
+        DWORD vstd2 = XGetVideoStandard();
+        DWORD vflag2 = XGetVideoFlags();
+        pp.BackBufferWidth = 640;
+        pp.BackBufferHeight = 480;
+        pp.Flags = D3DPRESENTFLAG_INTERLACED;
+        if (vstd2 == XC_VIDEO_STANDARD_PAL_I && !(vflag2 & XC_VIDEO_FLAGS_PAL_60Hz)) {
+            pp.BackBufferHeight = 576;
+            pp.FullScreen_RefreshRateInHz = 50;
+        }
+        else {
+            pp.FullScreen_RefreshRateInHz = 60;
+        }
+        hr = s_d3d->CreateDevice(0, D3DDEVTYPE_HAL, NULL,
+            D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &s_device);
+    }
     if (FAILED(hr)) {
         s_d3d->Release();
         s_d3d = NULL;

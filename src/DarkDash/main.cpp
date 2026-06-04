@@ -36,6 +36,7 @@
 #include "dd_recents.h"
 #include "dd_net.h"
 #include "dd_ftp.h"
+#include "dd_screensaver.h"
 #include "xboxinternals.h"
 #include "dd_sysinfo.h"
 #include "dd_launcher.h"
@@ -341,9 +342,14 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
         if (ds->present && ds->isXboxGame) {
             const Texture* dbar = Theme_Asset("bar_header");
             float bx = 380.0f, by = 8.0f, bw = 252.0f, bh = 40.0f;
+            float gh = (float)Font_GlyphHeight(FONT_SIZE_SMALL);
+            float ty = by + (bh - gh) * 0.5f;        /* vertically centre in the bar */
+            if (ty < by + 2.0f) ty = by + 2.0f;
             if (dbar) UI_DrawSprite(dbar, bx, by, bw, bh, 0xFFFFFFFF, 0);
-            Font_DrawText(d, bx + 12.0f, by + 4.0f, ds->title, FONT_SIZE_SMALL, glow, (int)(bw - 20.0f));
-            Font_DrawText(d, bx + 12.0f, by + 21.0f, "START to play", FONT_SIZE_SMALL, dim, (int)(bw - 20.0f));
+            /* single line to match the one-line header frame: action label in the
+               accent glow, then the title (clipped to the bar width). */
+            Font_DrawText(d, bx + 12.0f, ty, "START:", FONT_SIZE_SMALL, glow, 0);
+            Font_DrawText(d, bx + 64.0f, ty, ds->title, FONT_SIZE_SMALL, dim, (int)(bw - 76.0f));
         }
     }
 
@@ -422,6 +428,7 @@ void __cdecl main(void) {
     int   recSel = 0;
     int   powOpen = 0;          /* power menu overlay (WHITE tap) */
     int   powSel = 0;
+    int   saverOn = 0;          /* screensaver active */
     DWORD whiteDownMs = 0;      /* when WHITE went down (0 = not down) */
     int   whiteMoved = 0;      /* DPAD touched during this WHITE hold? */
 
@@ -502,6 +509,17 @@ void __cdecl main(void) {
         whiteReleased = ((prev & BTN_WHITE) && !(btn & BTN_WHITE)) ? 1 : 0;
         prev = btn;
         if (btn) lastInputMs = GetTickCount();   /* any input cancels idle */
+
+        /* screensaver: any input drops out of it and is swallowed (so the wake
+           press doesn't also navigate the menu underneath). */
+        if (saverOn) {
+            if (btn || pressed) {
+                Saver_Exit();
+                saverOn = 0;
+                pressed = 0;
+                whiteReleased = 0;
+            }
+        }
 
         tuning = (btn & BTN_WHITE) ? 1 : 0;
 
@@ -739,15 +757,32 @@ void __cdecl main(void) {
             idleGlitchAt = 0;                       /* leaving main cancels it */
         }
 
+        /* screensaver: engage after the configured idle timeout, only on the
+           bare main menu (no transition, no overlay). 0 = disabled. */
+        if (!saverOn) {
+            int ssMin = Data_Get()->screensaverMin;
+            if (ssMin > 0 && screen == SCR_MAIN && trans == 0 && !recOpen && !powOpen &&
+                (t - lastInputMs) > (DWORD)ssMin * 60000u) {
+                Saver_Enter();
+                saverOn = 1;
+            }
+        }
+        if (saverOn) Saver_Update();
+
         Audio_Update();   /* service Xbox DS mixer every frame */
         Gfx_BeginFrame(Theme_BG());
-        if (screen == SCR_LAUNCH)       Launcher_Render();
-        else if (screen == SCR_FILEMAN) FileMan_Render();
-        else if (screen == SCR_SETTINGS) Settings_Render();
-        else if (screen == SCR_SAVEMGR) SaveMgr_Render();
-        else                            DrawSplash(sel, glowA, glitch);
-        if (screen == SCR_MAIN && recOpen) DrawRecents(recSel);
-        if (screen == SCR_MAIN && powOpen) DrawPowerMenu(powSel);
+        if (saverOn) {
+            Saver_Render();
+        }
+        else {
+            if (screen == SCR_LAUNCH)       Launcher_Render();
+            else if (screen == SCR_FILEMAN) FileMan_Render();
+            else if (screen == SCR_SETTINGS) Settings_Render();
+            else if (screen == SCR_SAVEMGR) SaveMgr_Render();
+            else                            DrawSplash(sel, glowA, glitch);
+            if (screen == SCR_MAIN && recOpen) DrawRecents(recSel);
+            if (screen == SCR_MAIN && powOpen) DrawPowerMenu(powSel);
+        }
         /* ambient overlays, over all content: CRT scanlines + roll, then the
            SFX-synced edge flash. The boot intro (if active) tops everything.
            Each gated by its DD_FX_* toggle. */

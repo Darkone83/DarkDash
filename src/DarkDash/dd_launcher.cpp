@@ -126,6 +126,23 @@ static int ResOpencase(const char* xbePath, Texture* tex) {
     return Texture_LoadPNG(path, tex) ? 1 : 0;
 }
 
+/* Public: load cover art for any title using the same priority chain the
+   launcher uses. *isFlat -> 1 if the art is _resources case art (draw as a
+   hologram), 0 if it's a title image / placeholder (draw on the cube). Returns
+   1 if any texture was loaded. Used by the launcher and the screensaver. */
+int Launcher_LoadArtFor(const char* xbePath, Texture* out, int* isFlat) {
+    if (isFlat) *isFlat = 0;
+    if (!out || !xbePath || !xbePath[0]) return 0;
+    out->tex = NULL;
+    if (ResOpencase(xbePath, out)) {
+        if (isFlat) *isFlat = 1;
+        return 1;
+    }
+    if (Xbe_LoadTitleImage(Gfx_Device(), xbePath, out)) return 1;
+    if (Texture_LoadPNG("D:\\themes\\default\\assets\\raw\\s2_003.png", out)) return 1;
+    return 0;
+}
+
 /* decode (or clear) the title image for item 'idx'; no-op if unchanged */
 static void LoadPedestal(int idx) {
     if (idx == s_pedIdx) return;
@@ -134,17 +151,7 @@ static void LoadPedestal(int idx) {
     s_pedIdx = idx;
     s_pedFlat = 0;
     if (idx < 0 || idx >= s_count) return;
-    /* art priority:
-         1) _resources\artwork\opencase.png  -> flat hologram (s_pedFlat=1)
-         2) the XBE's embedded title image    -> spinning cube
-         3) a generic placeholder PNG         -> spinning cube
-       so an item with neither still shows something on the pedestal. */
-    if (ResOpencase(s_items[idx].xbePath, &s_ped)) {
-        s_pedFlat = 1;
-    }
-    else if (!Xbe_LoadTitleImage(Gfx_Device(), s_items[idx].xbePath, &s_ped)) {
-        Texture_LoadPNG("D:\\themes\\default\\assets\\raw\\s2_003.png", &s_ped);
-    }
+    Launcher_LoadArtFor(s_items[idx].xbePath, &s_ped, &s_pedFlat);
 }
 
 /* join "a" + "\" + "b" into out (no sprintf) */
