@@ -50,6 +50,9 @@ struct FtpCtx {
     char     listDir[256];
     bool     retrPending, storPending;
     char     listBuf[65536]; int listBufLen, listBufOff;
+    DWORD    restOffset;        /* REST: byte offset to resume next RETR/STOR */
+    DWORD    alloSize;          /* ALLO: client-declared size of next upload (0 = unknown) */
+    DWORD    lastActivityMs;    /* GetTickCount of last control activity (idle timeout) */
 };
 extern FtpCtx g_ftp;
 

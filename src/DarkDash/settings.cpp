@@ -752,7 +752,18 @@ static void RenderAbout(IDirect3DDevice8* d) {
     strcpy(lines[nLines++], "");
     lines[nLines][0] = 0; strcat(lines[nLines], "Console   "); strcat(lines[nLines++], Sys_XboxRevision());
     strcpy(lines[nLines++], "CPU       Pentium III  733 MHz");
-    { int mb = Sys_RamMB(); lines[nLines][0] = 0; strcat(lines[nLines], "RAM       "); IntToText(mb, num); strcat(lines[nLines], num); strcat(lines[nLines++], " MB"); }
+    {
+        int mb = Sys_RamMB(), fr = Sys_RamFreeMB();
+        lines[nLines][0] = 0; strcat(lines[nLines], "RAM       ");
+        IntToText(mb, num); strcat(lines[nLines], num); strcat(lines[nLines], " MB total, ");
+        IntToText(fr, num); strcat(lines[nLines], num); strcat(lines[nLines++], " MB free");
+    }
+    {
+        lines[nLines][0] = 0; strcat(lines[nLines], "Video     ");
+        IntToText(Gfx_Width(), num); strcat(lines[nLines], num); strcat(lines[nLines], "x");
+        IntToText(Gfx_Height(), num); strcat(lines[nLines], num); strcat(lines[nLines], " ");
+        strcat(lines[nLines++], Gfx_VideoModeStr());
+    }
     strcpy(lines[nLines++], "");
     Sys_DiskFreeStr("E:\\", freeStr, sizeof(freeStr));
     if (freeStr[0] && freeStr[0] != '-') { lines[nLines][0] = 0; strcat(lines[nLines], "E: Free   "); strcat(lines[nLines++], freeStr); }

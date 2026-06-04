@@ -26,7 +26,11 @@ Made by Darkone83 / Team Resurgent.
 
 - **Launch everything** — separate sections for Applications, Games, Homebrew,
   and Emulators. DarkDash scans your drives, lists what it finds, and lets you
-  launch with a button press.
+  launch with a button press. If your titles live somewhere off the beaten path
+  (an extra drive bay or an unusual layout), you can add your own scan folders
+  per section — just browse to the folder and pick it, no typing required. A
+  quick **refresh** rescans without leaving the menu, handy right after copying
+  new titles over FTP.
 - **Cover art & titles** — if a title folder has a `_resources` pack, DarkDash
   uses its cover art and game title, shown as a floating hologram on the
   pedestal. If not, it falls back to the title image baked into the game (shown
@@ -40,9 +44,14 @@ Made by Darkone83 / Team Resurgent.
   hard drive and memory units, with a simple two-pane layout. Large copies and
   moves run in the background with a progress bar and can be cancelled.
 - **Insert and play** — pop in a game disc and a prompt appears in the top-right
-  corner. Press **START** to play it.
+  corner. Press **START** to play it. The disc also shows up in the file manager
+  as a drive, so you can browse it like any other.
 - **Power menu** — tap **WHITE** on the main menu to restart the dashboard,
   reboot (power cycle), or shut the console down.
+- **Screensaver** — after a configurable idle time, DarkDash drifts a slow
+  showpiece of your cover art across the screen with a rainbow light beam. Any
+  button press brings you straight back. Set the timeout (or turn it off) in
+  **Settings → Video**.
 - **Themes** — DarkDash is fully reskinnable. Swap colors, the glow, the
   background, and all the on-screen artwork with drop-in theme folders.
 - **Custom fonts** — replace the built-in font with your own.
@@ -64,6 +73,17 @@ Made by Darkone83 / Team Resurgent.
 | **Y** | Open the recently-launched list |
 | **WHITE** (tap) | Open the power menu |
 | **START** | Launch an inserted game disc |
+
+### Applications / Games / Homebrew / Emulators
+
+| Button | Action |
+| --- | --- |
+| **D-Pad** | Move through the list |
+| **LT / RT** | Page up / down (jump a screenful — handy for big libraries) |
+| **A** | Launch the highlighted title |
+| **Y** | Add a scan folder for this section (browse and pick) |
+| **X** | Refresh — rescan this section in place |
+| **B** | Back |
 
 ### File Manager
 
@@ -123,7 +143,8 @@ relaunch into the new build. If nothing's newer, it just says so.
 
 When you insert a disc, DarkDash mounts it to a separate drive letter so the
 dashboard keeps working normally, and shows a "press START to play" prompt if
-it's an Xbox game. It does not auto-launch — you stay in control.
+it's an Xbox game. It also appears in the file manager as a drive (labelled
+**D:**) so you can browse it. It does not auto-launch — you stay in control.
 
 ## Credits
 

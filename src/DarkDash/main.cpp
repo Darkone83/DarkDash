@@ -34,6 +34,7 @@
 #include "dd_fx.h"
 #include "dd_savemgr.h"
 #include "dd_recents.h"
+#include "dd_paths.h"
 #include "dd_net.h"
 #include "dd_ftp.h"
 #include "dd_screensaver.h"
@@ -264,9 +265,18 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
     int   gg = (int)((glow >> 8) & 0xFF);
     int   gb = (int)(glow & 0xFF);
     float menuX = 352.0f, menuY = 48.0f;
-    /* 7 rows centred inside the frame interior; rowY0/rowDY are the dials */
+    /* 7 rows centred inside the frame interior. Pitch adapts to the font's line
+       height so a tall custom font doesn't overlap rows, but is capped so all 7
+       still fit inside the panel interior (no spill past the frame). */
     float rowY0 = 112.0f, rowDY = 40.0f;
     int i;
+    {
+        float lh = (float)Font_LineHeight(FONT_SIZE_MEDIUM);
+        float interiorB = menuY + 384.0f - 24.0f;      /* panel bottom, less padding */
+        float maxPitch = (interiorB - rowY0) / 7.0f;  /* pitch that fits 7 rows */
+        if (rowDY < lh)       rowDY = lh;              /* don't let rows touch */
+        if (rowDY > maxPitch) rowDY = maxPitch;        /* don't spill the frame */
+    }
 
     /* --- ambient theme lighting: shared green bloom (same on every screen) --- */
     Backdrop_Draw();
@@ -438,6 +448,7 @@ void __cdecl main(void) {
     Mount_SelfToD();
     Data_Load();             /* load prefs first: Gfx_Init reads videoRes from it */
     Recents_Init();          /* most-recently-launched titles (Y overlay) */
+    Paths_Load();            /* user-added custom scan paths per category */
     if (!Gfx_Init()) return;
     UI_Init(Gfx_Width(), Gfx_Height());
     Calib_Apply();           /* apply saved overscan insets (zero if uncalibrated) */
@@ -490,8 +501,27 @@ void __cdecl main(void) {
 
     /* first boot: run screen calibration so the user can fix overscan up front.
        Everything it needs (font, audio, backdrop) is initialised by now. */
-    if (Calib_NeedsRun())
+    if (Calib_NeedsRun()) {
         Calib_Run();
+        /* The A/B that exited calibration may still be held as we enter the main
+           loop. Seed 'prev' with the current button state so that release isn't
+           read as a fresh press (which would instantly select a menu row). */
+        PumpInput();
+        prev = GetButtons();
+    }
+
+    /* Display settle: emulators show output instantly, but a real LCD/HDTV
+       needs time to lock onto the signal after the video mode is set -- during
+       which the boot fade would already be playing (and missed). Present ~0.7s
+       of blank frames here so the panel acquires sync on real output before the
+       fade starts, making the power-on flourish actually visible on hardware. */
+    {
+        DWORD settleStart = GetTickCount();
+        while (GetTickCount() - settleStart < 700) {
+            Gfx_BeginFrame(Theme_BG());
+            Gfx_EndFrame();
+        }
+    }
 
     Fx_BootBegin();          /* power-on flourish on the first frames */
 

@@ -9,6 +9,15 @@ static IDirect3D8* s_d3d = NULL;
 static IDirect3DDevice8* s_device = NULL;
 static int                s_width = 640;
 static int                s_height = 480;
+static char               s_videoMode[8] = "480i";   /* set during Gfx_Init */
+
+static void GfxSetMode(const char* m) {
+    int i = 0;
+    while (m[i] && i < (int)sizeof(s_videoMode) - 1) { s_videoMode[i] = m[i]; i++; }
+    s_videoMode[i] = 0;
+}
+
+const char* Gfx_VideoModeStr(void) { return s_videoMode; }
 
 int Gfx_Init(void) {
     D3DPRESENT_PARAMETERS pp;
@@ -51,6 +60,7 @@ int Gfx_Init(void) {
             pp.BackBufferWidth = 1280;
             pp.BackBufferHeight = 720;
             pp.Flags = D3DPRESENTFLAG_PROGRESSIVE | D3DPRESENTFLAG_WIDESCREEN;
+            GfxSetMode("720p");
         }
         else if (has480p && pref != DD_RES_480) {
             /* 480p: progressive SDTV (only when the box actually reports 480p) */
@@ -58,6 +68,7 @@ int Gfx_Init(void) {
             pp.BackBufferHeight = 480;
             pp.Flags = D3DPRESENTFLAG_PROGRESSIVE;
             if (vflags & XC_VIDEO_FLAGS_WIDESCREEN) pp.Flags |= D3DPRESENTFLAG_WIDESCREEN;
+            GfxSetMode("480p");
         }
         else if (palI && !pal60) {
             /* true PAL-I: 576i 50Hz interlaced, 4:3 (640x576, not 720) */
@@ -65,12 +76,14 @@ int Gfx_Init(void) {
             pp.BackBufferHeight = 576;
             pp.Flags = D3DPRESENTFLAG_INTERLACED;
             pp.FullScreen_RefreshRateInHz = 50;
+            GfxSetMode("576i");
         }
         else {
             /* 480i baseline -- NTSC, PAL-M, PAL60. Interlaced is REQUIRED. */
             pp.BackBufferWidth = 640;
             pp.BackBufferHeight = 480;
             pp.Flags = D3DPRESENTFLAG_INTERLACED;
+            GfxSetMode("480i");
         }
     }
     pp.BackBufferFormat = D3DFMT_X8R8G8B8;
@@ -96,9 +109,11 @@ int Gfx_Init(void) {
         if (vstd2 == XC_VIDEO_STANDARD_PAL_I && !(vflag2 & XC_VIDEO_FLAGS_PAL_60Hz)) {
             pp.BackBufferHeight = 576;
             pp.FullScreen_RefreshRateInHz = 50;
+            GfxSetMode("576i");
         }
         else {
             pp.FullScreen_RefreshRateInHz = 60;
+            GfxSetMode("480i");
         }
         hr = s_d3d->CreateDevice(0, D3DDEVTYPE_HAL, NULL,
             D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &s_device);

@@ -118,6 +118,8 @@ static void AddEntry(Pane* p, const char* name, int isDir, int isDrive,
 }
 
 /* virtual root: list mounted HDD drives + present MUs */
+static void SortPane(Pane* p);   /* fwd: order drive list by label */
+
 static void LoadDriveList(Pane* p) {
     static const char* k_hdd[] = { "C", "E", "F", "G", "X", "Y", "Z", 0 };
     int mu, di;
@@ -159,6 +161,11 @@ static void LoadDriveList(Pane* p) {
                 AddEntry(p, "D: (Disc)", 1, 1, "S:\\", 0);
         }
     }
+
+    /* order all drives by label so the disc (D:) sits between C: and E: rather
+       than being appended last -- everything is a directory here, so SortPane
+       sorts purely alphabetically by label. */
+    SortPane(p);
 }
 
 /* case-insensitive name compare */
@@ -294,13 +301,27 @@ static int UpDir(Pane* p) {
     return 1;
 }
 
+/* how many rows fit a pane frame at the current font's line height. Shared by
+   the scroll math and the renderer so they always agree (a tall font shows
+   fewer rows and scrolls; a short font shows up to FM_VIS_ROWS). */
+static int FmVisRows(void) {
+    float rowDY = (float)Font_LineHeight(FONT_SIZE_SMALL);
+    int   n;
+    if (rowDY < 21.0f) rowDY = 21.0f;
+    n = (int)((360.0f - 28.0f - 22.0f) / rowDY);
+    if (n < 1) n = 1;
+    if (n > FM_VIS_ROWS) n = FM_VIS_ROWS;
+    return n;
+}
+
 static void MoveCursor(Pane* p, int dir) {
+    int visRows = FmVisRows();
     if (p->count == 0) return;
     p->cursor += dir;
     if (p->cursor < 0) p->cursor = 0;
     if (p->cursor >= p->count) p->cursor = p->count - 1;
     if (p->cursor < p->scroll) p->scroll = p->cursor;
-    if (p->cursor >= p->scroll + FM_VIS_ROWS) p->scroll = p->cursor - FM_VIS_ROWS + 1;
+    if (p->cursor >= p->scroll + visRows) p->scroll = p->cursor - visRows + 1;
 }
 
 /* ---- stage-2 operation helpers ----------------------------------------- */
@@ -323,7 +344,7 @@ static void ReloadPane(Pane* p) {
     if (cur < 0) cur = 0;
     p->cursor = cur;
     p->scroll = (scr <= cur) ? scr : 0;
-    if (p->cursor >= p->scroll + FM_VIS_ROWS) p->scroll = p->cursor - FM_VIS_ROWS + 1;
+    if (p->cursor >= p->scroll + FmVisRows()) p->scroll = p->cursor - FmVisRows() + 1;
 }
 
 /* build the copy/move item list from the source pane's marked (or highlighted)
@@ -574,14 +595,17 @@ static void DrawPane(IDirect3DDevice8* d, const Pane* p, int isActive,
     DWORD mark = Theme_Color("accent", 0xFF7FE000);
     int   ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
     float hy = 40.0f, fy = 86.0f, fw = 284.0f, fh = 360.0f;
-    float rowY0 = fy + 22.0f, rowDY = 23.0f;
-    float gh = (float)Font_GlyphHeight(FONT_SIZE_SMALL);   /* actual font height */
-    float hlH = gh + 4.0f;                                 /* highlight encloses glyph */
-    float hlY;                                             /* highlight top offset */
-    int   i, vis;
+    float rowY0 = fy + 22.0f;
+    float rowDY = (float)Font_LineHeight(FONT_SIZE_SMALL);   /* pitch from font */
+    float gh = (float)Font_GlyphHeight(FONT_SIZE_SMALL);
+    float hlH = gh + 4.0f;
+    float hlY;
+    int   i, vis, fitRows;
 
-    if (hlH > rowDY) hlH = rowDY;          /* never taller than a row slot */
-    hlY = (rowDY - hlH) * 0.5f - 1.0f;     /* center the bar in the row slot */
+    if (rowDY < 21.0f) rowDY = 21.0f;      /* keep a sane minimum pitch */
+    if (hlH > rowDY) hlH = rowDY;
+    hlY = (rowDY - hlH) * 0.5f - 1.0f;
+    fitRows = FmVisRows();                  /* same count the scroll math uses */
 
     /* path-header banner */
     if (hdr) UI_DrawSprite(hdr, px, hy, fw, 36.0f,
@@ -598,7 +622,7 @@ static void DrawPane(IDirect3DDevice8* d, const Pane* p, int isActive,
 
     /* rows */
     vis = p->count - p->scroll;
-    if (vis > FM_VIS_ROWS) vis = FM_VIS_ROWS;
+    if (vis > fitRows) vis = fitRows;
     for (i = 0; i < vis; i++) {
         int    idx = p->scroll + i;
         const FmEntry* e = &p->ent[idx];
@@ -623,7 +647,7 @@ static void DrawPane(IDirect3DDevice8* d, const Pane* p, int isActive,
     }
 
     /* scroll hint */
-    if (p->count > FM_VIS_ROWS) {
+    if (p->count > fitRows) {
         char n[8]; int v = p->cursor + 1, k = 0; char tmp[8];
         while (v > 0 && k < 7) { tmp[k++] = (char)('0' + (v % 10)); v /= 10; }
         { int j; for (j = 0; j < k; j++) n[j] = tmp[k - 1 - j]; n[k] = 0; }

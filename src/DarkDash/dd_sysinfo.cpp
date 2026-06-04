@@ -152,6 +152,14 @@ int Sys_RamMB(void) {
     return 64;
 }
 
+/* free physical RAM right now, in MB (rounds down). */
+int Sys_RamFreeMB(void) {
+    MEMORYSTATUS ms;
+    ms.dwLength = sizeof(ms);
+    GlobalMemoryStatus(&ms);
+    return (int)(ms.dwAvailPhys / (1024UL * 1024UL));
+}
+
 /*---------------------------------------------------------------------------
     First-order Xbox revision from the video encoder on the SMBus -- the
     reliable, lightweight method (full 1.6 vs 1.6b split needs NV2A straps,

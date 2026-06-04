@@ -17,6 +17,7 @@ int         Sys_FanAuto(void);
 int         Sys_FanSetManual(int pct);
 
 int         Sys_RamMB(void);          /* 64 or 128 (detected)            */
+int         Sys_RamFreeMB(void);      /* free physical RAM right now, MB  */
 
 /* System clock (local time). Get reads the current local time; Set applies it
    via NtSetSystemTime (returns 1 on success, 0 if the date was invalid or the

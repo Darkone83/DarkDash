@@ -56,6 +56,7 @@ static void IntToStr(int v, char* buf, int bufLen) {
 #define FTP_DATA_PORT_BASE   2024
 #define FTP_DATA_PORT_COUNT  32
 #define FTP_MAX_PATH         256    // max path length used in FTP operations
+#define FTP_IDLE_TIMEOUT_MS  300000UL  // drop an idle control connection after 5 min
 
 // ============================================================================
 // Internal string helpers
@@ -772,6 +773,17 @@ static void FtpHandleCommand(char* cmd)
         g_ftp.xferDone = 0;
         g_ftp.retrBufLen = 0;
         g_ftp.retrBufOff = 0;
+        // REST resume: seek the source file to the requested offset so the
+        // client can continue an interrupted download.
+        if (g_ftp.restOffset > 0)
+        {
+            if (g_ftp.restOffset <= g_ftp.xferTotal)
+            {
+                SetFilePointer(hf, (LONG)g_ftp.restOffset, NULL, FILE_BEGIN);
+                g_ftp.xferDone = g_ftp.restOffset;
+            }
+            g_ftp.restOffset = 0;   // consumed
+        }
         FtpServ_TruncName(arg, g_ftp.xferName, 18, sizeof(g_ftp.xferName));
         StrCopy(g_ftp.xferPath, sizeof(g_ftp.xferPath), fullPath);
         // Defer 150 until dataSock is accepted — mirrors LIST's listPending pattern.
@@ -797,16 +809,50 @@ static void FtpHandleCommand(char* cmd)
         char fullPath[FTP_MAX_PATH];
         FtpResolvePath(arg, fullPath, sizeof(fullPath));
 
-        HANDLE hf = CreateFile(fullPath, GENERIC_WRITE, 0,
-            NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        // ALLO pre-check: if the client declared a size and the target volume
+        // can't hold it, refuse now rather than filling the disk and failing
+        // mid-upload. Best-effort (only when ALLO was sent and the path has a
+        // drive root we can query).
+        if (g_ftp.alloSize > 0 && fullPath[1] == ':')
+        {
+            char root[4]; ULARGE_INTEGER freeAvail, totalB, totalFree;
+            root[0] = fullPath[0]; root[1] = ':'; root[2] = '\\'; root[3] = 0;
+            if (GetDiskFreeSpaceExA(root, &freeAvail, &totalB, &totalFree))
+            {
+                if (freeAvail.QuadPart < (unsigned __int64)g_ftp.alloSize)
+                {
+                    g_ftp.alloSize = 0;
+                    FtpReply(552, "Insufficient storage for upload.");
+                    return;
+                }
+            }
+        }
+        g_ftp.alloSize = 0;   // consumed (or unusable)
+
+        // REST resume on upload: open existing + seek; otherwise truncate.
+        HANDLE hf;
+        if (g_ftp.restOffset > 0)
+        {
+            hf = CreateFile(fullPath, GENERIC_WRITE, 0,
+                NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hf != INVALID_HANDLE_VALUE)
+                SetFilePointer(hf, (LONG)g_ftp.restOffset, NULL, FILE_BEGIN);
+        }
+        else
+        {
+            hf = CreateFile(fullPath, GENERIC_WRITE, 0,
+                NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        }
         if (hf == INVALID_HANDLE_VALUE)
         {
+            g_ftp.restOffset = 0;
             FtpReply(550, "Cannot create file."); return;
         }
 
         g_ftp.xferFile = hf;
         g_ftp.xferTotal = 0;   // unknown until complete
-        g_ftp.xferDone = 0;
+        g_ftp.xferDone = (g_ftp.restOffset > 0) ? g_ftp.restOffset : 0;
+        g_ftp.restOffset = 0;   // consumed
         FtpServ_TruncName(arg, g_ftp.xferName, 18, sizeof(g_ftp.xferName));
         StrCopy(g_ftp.xferPath, sizeof(g_ftp.xferPath), fullPath);
         // Defer 150 until dataSock is accepted — same pattern as RETR/LIST.
@@ -1024,13 +1070,25 @@ static void FtpHandleCommand(char* cmd)
     }
     else if (verb[0] == 'R' && verb[1] == 'E' && verb[2] == 'S' && verb[3] == 'T')
     {
-        // FlashFXP sends REST for resume — we don't support partial transfer
-        // but acknowledge with 350 so the client proceeds without the offset.
-        // The RETR/STOR will start from byte 0; client may detect the mismatch.
-        FtpReply(350, "REST not supported, transfer will start from byte 0.");
+        // Resume support: remember the byte offset; the next RETR/STOR seeks to
+        // it before transferring. Cleared after it's consumed (or on abort).
+        DWORD off = 0;
+        const char* p = arg;
+        while (*p == ' ') p++;
+        while (*p >= '0' && *p <= '9') { off = off * 10 + (DWORD)(*p - '0'); p++; }
+        g_ftp.restOffset = off;
+        FtpReply(350, "Restart position accepted, send RETR or STOR.");
     }
     else if (verb[0] == 'A' && verb[1] == 'L' && verb[2] == 'L' && verb[3] == 'O')
     {
+        // Pre-allocation hint: capture the declared size so STOR can pre-check
+        // free space and reject an upload that won't fit, rather than filling
+        // the disk and failing mid-transfer. "ALLO <n>".
+        DWORD sz = 0;
+        const char* p = arg;
+        while (*p == ' ') p++;
+        while (*p >= '0' && *p <= '9') { sz = sz * 10 + (DWORD)(*p - '0'); p++; }
+        g_ftp.alloSize = sz;
         FtpReply(200, "ALLO OK.");
     }
     else if (verb[0] == 'M' && verb[1] == 'O' && verb[2] == 'D' && verb[3] == 'E')
@@ -1063,6 +1121,33 @@ static void FtpHandleCommand(char* cmd)
 void FtpServ_Tick()
 {
     if (g_ftp.state == FTP_OFF) return;
+
+    // Idle timeout: drop a control connection that's sat silent too long, so a
+    // dead/half-gone client doesn't hold the single session forever (the server
+    // is single-connection, so a stuck client locks everyone else out). Only
+    // while CONNECTED -- never during a transfer, where the control channel is
+    // legitimately quiet for the whole download/upload.
+    if (g_ftp.state == FTP_CONNECTED && g_ftp.ctrlSock != INVALID_SOCKET &&
+        g_ftp.xferType == XFER_NONE)
+    {
+        if (GetTickCount() - g_ftp.lastActivityMs > FTP_IDLE_TIMEOUT_MS)
+        {
+            FtpSendStr(g_ftp.ctrlSock, "421 Idle timeout, closing control connection.\r\n");
+            closesocket(g_ftp.ctrlSock); g_ftp.ctrlSock = INVALID_SOCKET;
+            if (g_ftp.dataSock != INVALID_SOCKET) { closesocket(g_ftp.dataSock);   g_ftp.dataSock = INVALID_SOCKET; }
+            if (g_ftp.dataListen != INVALID_SOCKET) { closesocket(g_ftp.dataListen); g_ftp.dataListen = INVALID_SOCKET; }
+            g_ftp.authed = false; g_ftp.gotUser = false; g_ftp.gotRnfr = false;
+            g_ftp.atVirtualRoot = false; g_ftp.listPending = false;
+            g_ftp.ctrlHalfClosed = false; g_ftp.retrPending = false; g_ftp.storPending = false;
+            g_ftp.xferType = XFER_NONE; g_ftp.recvLen = 0;
+            g_ftp.retrBufLen = 0; g_ftp.retrBufOff = 0;
+            g_ftp.listBufLen = 0; g_ftp.listBufOff = 0;
+            g_ftp.sendLen = 0; g_ftp.sendOff = 0;
+            g_ftp.restOffset = 0; g_ftp.alloSize = 0;
+            g_ftp.state = FTP_LISTEN;
+            return;
+        }
+    }
 
     // ---- Drain ctrl send buffer ------------------------------------------
     // FtpSendStr() queues into sendBuf; we push bytes here each tick so
@@ -1141,6 +1226,9 @@ void FtpServ_Tick()
             g_ftp.ctrlHalfClosed = false;
             g_ftp.xferType = XFER_NONE;
             g_ftp.recvLen = 0;
+            g_ftp.restOffset = 0;
+            g_ftp.alloSize = 0;
+            g_ftp.lastActivityMs = GetTickCount();
             g_ftp.state = FTP_CONNECTED;
             // Multi-line 220 banner — FTP spec: "NNN-" for continuation, "NNN " for final line.
             // FlashFXP and FileZilla display the continuation lines in their message/log panel.
@@ -1246,7 +1334,7 @@ void FtpServ_Tick()
             {
                 int n = recv(g_ftp.ctrlSock,
                     g_ftp.recvBuf + g_ftp.recvLen, space, 0);
-                if (n > 0) g_ftp.recvLen += n;
+                if (n > 0) { g_ftp.recvLen += n; g_ftp.lastActivityMs = GetTickCount(); }
                 else if (n == 0)
                 {
                     // Graceful half-close — stop receiving, keep sending
@@ -1330,6 +1418,8 @@ void FtpServ_Tick()
             g_ftp.listBufOff = 0;
             g_ftp.sendLen = 0;
             g_ftp.sendOff = 0;
+            g_ftp.restOffset = 0;
+            g_ftp.alloSize = 0;
             g_ftp.state = FTP_LISTEN;
             return;
         }

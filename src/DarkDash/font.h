@@ -46,6 +46,8 @@ extern "C" {
 
     int  Font_MeasureText(const char* str, int size);
     int  Font_GlyphHeight(int size);
+    /* recommended row pitch (glyph box + leading); use for list row spacing */
+    int  Font_LineHeight(int size);
 
     void Font_DrawText(IDirect3DDevice8* pDevice,
         float x, float y, const char* str, int size, DWORD colour, int max_w);

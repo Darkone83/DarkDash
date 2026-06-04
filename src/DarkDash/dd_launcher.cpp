@@ -20,6 +20,8 @@
 #include "dd_xbe.h"
 #include "dd_mount.h"
 #include "dd_recents.h"
+#include "dd_paths.h"
+#include "dd_browse.h"
 #include "dd_backdrop.h"
 #include "dd_pedestal.h"
 #include "dd_launcher.h"
@@ -334,22 +336,57 @@ static void ClampScroll(void) {
     if (s_scroll < 0) s_scroll = 0;
 }
 
-void Launcher_Enter(const LauncherConfig* cfg) {
+/* (re)scan the current category's built-in roots + user custom paths into the
+   item list. Preserves nothing -- callers manage cursor/scroll around it. */
+static void RescanCurrent(void) {
     int i;
+    if (!s_cfg) return;
+    s_count = 0;
+    CacheLoad(s_cfg->cacheId);               /* prior cert results, if any */
+    for (i = 0; i < s_cfg->rootCount; i++)
+        ScanRoot(s_cfg->roots[i]);
+    /* also scan any user-added custom paths for this category */
+    {
+        int np = Paths_Count(s_cfg->cacheId), k;
+        for (k = 0; k < np; k++)
+            ScanRoot(Paths_Get(s_cfg->cacheId, k));
+    }
+    CacheSave(s_cfg->cacheId);                /* refresh cache with this scan */
+    SortItems();                              /* alphabetical by label */
+}
+
+void Launcher_Enter(const LauncherConfig* cfg) {
     s_cfg = cfg;
     s_count = 0; s_cursor = 0; s_scroll = 0;
     if (!cfg) return;
-    CacheLoad(cfg->cacheId);                 /* prior cert results, if any */
-    for (i = 0; i < cfg->rootCount; i++)
-        ScanRoot(cfg->roots[i]);
-    CacheSave(cfg->cacheId);                  /* refresh cache with this scan */
-    SortItems();                              /* alphabetical by label */
+    RescanCurrent();
     s_pedIdx = -1;
     LoadPedestal(s_cursor);   /* decode the first app's title image */
 }
 
 int Launcher_Update(WORD pressed, WORD held) {
     (void)held;   /* hold-to-repeat scroll arrives in A5 */
+
+    /* If the folder picker is open it owns all input. On confirm, add the
+       chosen folder as a custom path for this category, persist, and re-scan
+       so the new titles appear immediately (no exit/re-enter needed). */
+    if (Browse_IsOpen()) {
+        int r = Browse_Update(pressed);
+        if (r == 1) {
+            char picked[256];
+            Browse_GetPath(picked, sizeof(picked));
+            if (s_cfg && picked[0]) {
+                if (Paths_Add(s_cfg->cacheId, picked)) {
+                    Paths_Save();
+                    s_cursor = 0; s_scroll = 0;
+                    RescanCurrent();
+                    s_pedIdx = -1;
+                    LoadPedestal(s_cursor);
+                }
+            }
+        }
+        return 0;   /* swallow input while/after the overlay handled it */
+    }
 
     if (pressed & BTN_B) {
         Audio_PlaySfx(SFX_BACK);
@@ -358,12 +395,56 @@ int Launcher_Update(WORD pressed, WORD held) {
         return 1;
     }
 
+    /* X = refresh: re-scan the current category in place (handy after copying
+       new titles over FTP -- no need to leave and re-enter the menu). */
+    if (pressed & BTN_X) {
+        int keep = s_cursor;
+        Audio_PlaySfx(SFX_SELECT);
+        RescanCurrent();
+        s_cursor = (keep < s_count) ? keep : (s_count > 0 ? s_count - 1 : 0);
+        if (s_cursor < 0) s_cursor = 0;
+        ClampScroll();
+        s_pedIdx = -1;
+        LoadPedestal(s_cursor);
+    }
+
+    /* Y = add a scan path: open the folder picker. The category title gives
+       context ("Add GAMES folder"). */
+    if (pressed & BTN_Y) {
+        char ttl[40];
+        int i = 0; const char* t = s_cfg ? s_cfg->title : "folder";
+        const char* pre = "Add ";
+        while (pre[i]) { ttl[i] = pre[i]; i++; }
+        { int j = 0; while (t[j] && i < 33) ttl[i++] = t[j++]; }
+        { const char* suf = " path"; int j = 0; while (suf[j] && i < 39) ttl[i++] = suf[j++]; }
+        ttl[i] = 0;
+        Browse_Open(ttl);
+        return 0;
+    }
+
     if (s_count > 0) {
         if (pressed & BTN_DPAD_DOWN) {
             if (s_cursor < s_count - 1) { s_cursor++; Audio_PlaySfx(SFX_NAV_DOWN); ClampScroll(); LoadPedestal(s_cursor); }
         }
         if (pressed & BTN_DPAD_UP) {
             if (s_cursor > 0) { s_cursor--; Audio_PlaySfx(SFX_NAV_UP); ClampScroll(); LoadPedestal(s_cursor); }
+        }
+        /* LT / RT jump a full page -- big libraries are painful one row at a
+           time. Page == the visible row count, so the cursor lands a screenful
+           away and the list pages with it. Clamped to the list ends. */
+        if (pressed & BTN_RTRIG) {
+            if (s_cursor < s_count - 1) {
+                s_cursor += LAUNCH_ROWS_VISIBLE;
+                if (s_cursor > s_count - 1) s_cursor = s_count - 1;
+                Audio_PlaySfx(SFX_NAV_DOWN); ClampScroll(); LoadPedestal(s_cursor);
+            }
+        }
+        if (pressed & BTN_LTRIG) {
+            if (s_cursor > 0) {
+                s_cursor -= LAUNCH_ROWS_VISIBLE;
+                if (s_cursor < 0) s_cursor = 0;
+                Audio_PlaySfx(SFX_NAV_UP); ClampScroll(); LoadPedestal(s_cursor);
+            }
         }
         if (pressed & BTN_A) {
             Audio_PlaySfx(SFX_SELECT);
@@ -458,5 +539,8 @@ void Launcher_Render(void) {
 
     /* footer */
     if (foot) UI_DrawSprite(foot, 8.0f, 442.0f, 624.0f, 32.0f, 0xFFFFFFFF, 0);
-    Font_DrawText(d, 24.0f, 449.0f, "A LAUNCH   B BACK", FONT_SIZE_SMALL, text, 0);
+    Font_DrawText(d, 24.0f, 449.0f, "A LAUNCH  LT/RT PAGE  Y ADD PATH  X REFRESH  B BACK", FONT_SIZE_SMALL, text, 0);
+
+    /* folder picker overlay on top of everything when open */
+    Browse_Draw(d);
 }

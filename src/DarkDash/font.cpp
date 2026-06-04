@@ -80,15 +80,29 @@ typedef struct {
 static void RecomputeMetrics(void) {
     int sz, i;
     for (sz = 0; sz < 3; sz++) {
-        int maxh = 0, maxasc = 0;
+        int maxh = 0, maxasc = 0, maxdesc = 0;
         for (i = 0; i < 95; i++) {
-            int asc;
+            int asc, desc;
             if (s_metrics[sz][i].h > maxh) maxh = s_metrics[sz][i].h;
+            /* top above baseline: custom .ddf use negative bear_y, so -bear_y
+               is the upward extent (clamped >=0 for Default's model too). */
             asc = -s_metrics[sz][i].bear_y;
-            if (asc > maxasc) maxasc = asc;   /* maxasc stays >= 0 */
+            if (asc > maxasc) maxasc = asc;
+            /* bottom below baseline: baseline + bear_y is the glyph top, +h is
+               its bottom; the lowest such bottom is the descender extent. */
+            desc = s_metrics[sz][i].bear_y + s_metrics[sz][i].h;
+            if (desc > maxdesc) maxdesc = desc;
         }
-        s_glyph_h[sz] = (int)((float)maxh * s_layoutScale[sz]);
         s_max_ascender[sz] = (int)((float)maxasc * s_layoutScale[sz]);
+        /* True line box = full ascender-to-descender extent, not just the single
+           tallest glyph. A font whose tallest glyph and lowest-descending glyph
+           differ would otherwise under-report height and clip 1-2px at the
+           bottom of a row. Fall back to maxh if the bear_y model gives less. */
+        {
+            int box = maxasc + maxdesc;
+            if (box < maxh) box = maxh;
+            s_glyph_h[sz] = (int)((float)box * s_layoutScale[sz]);
+        }
     }
 }
 
@@ -245,6 +259,17 @@ int Font_MeasureText(const char* str, int size) {
 int Font_GlyphHeight(int size) {
     if (size < 0 || size > 2) return 16;
     return s_glyph_h[size];
+}
+
+/* Recommended row pitch: the full glyph box plus a little leading, so adjacent
+   rows don't touch and a row's text never grazes the slot below it. This is the
+   value list screens should use for row spacing (rather than a hardcoded pitch
+   tuned to one font). */
+int Font_LineHeight(int size) {
+    int gh;
+    if (size < 0 || size > 2) return 18;
+    gh = s_glyph_h[size];
+    return gh + (gh / 6) + 2;        /* ~17% leading + 2px floor */
 }
 
 /*    Drawing                                                                  */

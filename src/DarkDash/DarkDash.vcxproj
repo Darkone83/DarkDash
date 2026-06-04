@@ -14,6 +14,7 @@
     <ClCompile Include="applications.cpp" />
     <ClCompile Include="dd_audio.cpp" />
     <ClCompile Include="dd_backdrop.cpp" />
+    <ClCompile Include="dd_browse.cpp" />
     <ClCompile Include="dd_calib.cpp" />
     <ClCompile Include="dd_copyjob.cpp" />
     <ClCompile Include="dd_data.cpp" />
@@ -30,6 +31,7 @@
     <ClCompile Include="dd_mount.cpp" />
     <ClCompile Include="dd_net.cpp" />
     <ClCompile Include="dd_osk.cpp" />
+    <ClCompile Include="dd_paths.cpp" />
     <ClCompile Include="dd_pedestal.cpp" />
     <ClCompile Include="dd_recents.cpp" />
     <ClCompile Include="dd_savemgr.cpp" />
@@ -61,6 +63,7 @@
     <ClInclude Include="applications.h" />
     <ClInclude Include="dd_audio.h" />
     <ClInclude Include="dd_backdrop.h" />
+    <ClInclude Include="dd_browse.h" />
     <ClInclude Include="dd_calib.h" />
     <ClInclude Include="dd_copyjob.h" />
     <ClInclude Include="dd_data.h" />
@@ -75,6 +78,7 @@
     <ClInclude Include="dd_mount.h" />
     <ClInclude Include="dd_net.h" />
     <ClInclude Include="dd_osk.h" />
+    <ClInclude Include="dd_paths.h" />
     <ClInclude Include="dd_pedestal.h" />
     <ClInclude Include="dd_recents.h" />
     <ClInclude Include="dd_savemgr.h" />

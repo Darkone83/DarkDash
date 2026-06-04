@@ -14,18 +14,19 @@
 extern "C" {
 #endif
 
-/* Create the D3D8 device. Returns 1 on success, 0 on failure. */
-int  Gfx_Init(void);
-void Gfx_Shutdown(void);
+    /* Create the D3D8 device. Returns 1 on success, 0 on failure. */
+    int  Gfx_Init(void);
+    void Gfx_Shutdown(void);
 
-IDirect3DDevice8* Gfx_Device(void);
-int  Gfx_Width(void);    /* backbuffer width  in pixels */
-int  Gfx_Height(void);   /* backbuffer height in pixels */
+    IDirect3DDevice8* Gfx_Device(void);
+    int  Gfx_Width(void);    /* backbuffer width  in pixels */
+    int  Gfx_Height(void);   /* backbuffer height in pixels */
+    const char* Gfx_VideoModeStr(void);   /* "480i"/"480p"/"576i"/"720p" */
 
-/* Clear to 'clearColour' (ARGB) and open the scene. */
-void Gfx_BeginFrame(DWORD clearColour);
-/* Close the scene and present. */
-void Gfx_EndFrame(void);
+    /* Clear to 'clearColour' (ARGB) and open the scene. */
+    void Gfx_BeginFrame(DWORD clearColour);
+    /* Close the scene and present. */
+    void Gfx_EndFrame(void);
 
 #ifdef __cplusplus
 }
