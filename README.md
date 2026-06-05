@@ -17,10 +17,8 @@ A lightweight, native dashboard for the original Xbox.
 DarkDash is a clean, themeable replacement dashboard for the OG Xbox. It boots
 fast, stays out of your way, and lets you launch your games, apps, emulators,
 and homebrew from one place. It is built natively (no script engine sitting on
-top), so it is light on resources and quick to navigate — a typical boot sits
-around 24 MB resident, leaving plenty of headroom on a stock console.
-
-Made by Darkone83 / Team Resurgent.
+top), so it is light on resources and quick to navigate — and has a low ram
+footprint, leaving plenty of headroom on a stock console.
 
 ## Features
 
