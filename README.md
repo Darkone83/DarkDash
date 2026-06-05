@@ -32,10 +32,14 @@ Made by Darkone83 / Team Resurgent.
   quick **refresh** rescans without leaving the menu, handy right after copying
   new titles over FTP.
 - **Cover art & titles** — if a title folder has a `_resources` pack, DarkDash
-  uses its cover art and game title, shown as a floating hologram on the
-  pedestal. If not, it falls back to the title image baked into the game (shown
-  on a rotating cube), and finally to a generic placeholder so there is always
-  something on the pedestal.
+  uses its cover art (PNG or JPG) and game title, shown as a floating hologram on
+  the pedestal. If not, it falls back to the title image baked into the game
+  (shown on a rotating cube), and finally to a generic placeholder so there is
+  always something on the pedestal.
+- **Title info** — in any title list, press **WHITE** on a game that has a
+  `_resources` pack to pop up an info card: front/back cover art (flip with the
+  **D-Pad left/right**) alongside the title, developer, publisher, genre, rating,
+  and a scrolling description. Games without a pack simply don't show the prompt.
 - **Recently launched** — press **Y** on the main menu for a quick list of the
   last few titles you launched, and jump straight back into one.
 - **Save Manager** — browse your game saves by title, see the cover art, and
@@ -53,8 +57,15 @@ Made by Darkone83 / Team Resurgent.
   button press brings you straight back. Set the timeout (or turn it off) in
   **Settings → Video**.
 - **Themes** — DarkDash is fully reskinnable. Swap colors, the glow, the
-  background, and all the on-screen artwork with drop-in theme folders.
-- **Custom fonts** — replace the built-in font with your own.
+  background, the on-screen artwork, and the menu icons with drop-in theme
+  folders. A theme can override as much or as little as it likes — anything it
+  doesn't include falls back to the default look.
+- **Custom fonts** — replace the built-in font with your own. Tall or chunky
+  fonts are scaled to fit the on-screen panels automatically, so a custom font
+  won't spill out of the menus.
+- **Internet time** — DarkDash can set the clock from the internet (NTP). Turn
+  it on and pick your time zone in **Settings → Clock**; it syncs on boot and
+  on demand.
 - **FTP** — turn on the built-in FTP server to move files to and from your Xbox
   over the network.
 - **Self-updating** — check for and install updates right from the Settings
@@ -81,6 +92,7 @@ Made by Darkone83 / Team Resurgent.
 | **D-Pad** | Move through the list |
 | **LT / RT** | Page up / down (jump a screenful — handy for big libraries) |
 | **A** | Launch the highlighted title |
+| **WHITE** | Show title info (cover art + details), if the title has a `_resources` pack |
 | **Y** | Add a scan folder for this section (browse and pick) |
 | **X** | Refresh — rescan this section in place |
 | **B** | Back |
