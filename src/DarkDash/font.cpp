@@ -215,6 +215,34 @@ int Font_LoadDDF(IDirect3DDevice8* pDevice, const char* path) {
             ? ((float)k_virtSize[sz] / (float)raster) : 1.0f;
     }
 
+    /* WIDTH CLAMP (uniform horizontal fit). The height scale above normalizes
+       glyph HEIGHT, but a font can still be intrinsically WIDE -- a chunky/
+       blocky face has the same line height as Default yet much larger advances,
+       so settings rows overflow (or get clipped) horizontally. We can't predict
+       what font the user drops, so we defend by construction: measure the
+       font's average advance at MEDIUM and, if a representative row's worth of
+       characters wouldn't fit the narrowest text context (the iso console
+       value row), reduce layoutScale for ALL tiers by the same factor. Result:
+       the whole font shrinks just enough to fit, uniformly, computed once at
+       load -- no per-frame cost, no mixed sizes. Normal-width fonts measure
+       under budget and are left untouched (no regression). */
+    {
+        const float k_consoleInterior = 224.0f;  /* DrawConsole iso clip width  */
+        const float k_budgetChars = 20.0f;   /* worst real row (~"Zone ...")*/
+        long  sumAdv = 0;
+        int   i;
+        float avgAdv, demand;
+        for (i = 0; i < 95; i++) sumAdv += s_metrics[1][i].advance;
+        avgAdv = (float)sumAdv / 95.0f;                 /* MEDIUM avg advance     */
+        demand = avgAdv * s_layoutScale[1] * k_budgetChars;
+        if (demand > k_consoleInterior && demand > 0.0f) {
+            float extra = k_consoleInterior / demand;   /* <1 -> shrink           */
+            s_layoutScale[0] *= extra;
+            s_layoutScale[1] *= extra;
+            s_layoutScale[2] *= extra;
+        }
+    }
+
     s_usingCustom = 1;
     RecomputeMetrics();
     ok = 1;
@@ -374,8 +402,10 @@ void Font_DrawTextRight(IDirect3DDevice8* pDevice,
 }
 /*    Iso-plane text -- glyph quads in world space, tilts with the chrome.    */
 
-void Font_DrawTextIso(IDirect3DDevice8* pDevice,
-    float vx, float vy, const char* str, int size, DWORD colour) {
+/* core: max_w = 0 means no clipping; >0 stops drawing once the pen would
+   exceed vx + max_w (so long strings truncate cleanly inside a frame). */
+static void Font_DrawTextIsoCore(IDirect3DDevice8* pDevice,
+    float vx, float vy, const char* str, int size, DWORD colour, float max_w) {
     const GlyphMetrics* metrics;
     FontIsoVert verts[4];
     float cx = UI_VIRT_W * 0.5f;
@@ -424,6 +454,8 @@ void Font_DrawTextIso(IDirect3DDevice8* pDevice,
         v1 = (float)(gm->y + gm->h) / ATLAS_H;
 
         gx = cur_x;
+        /* width clip: stop once the next glyph would run past the budget */
+        if (max_w > 0.0f && (gx + (float)gm->w * scale) > vx + max_w) break;
         gy = vy + (float)s_max_ascender[size] + (float)gm->bear_y * scale;
         gw = (float)gm->w * scale;
         gh = (float)gm->h * scale;
@@ -443,4 +475,14 @@ void Font_DrawTextIso(IDirect3DDevice8* pDevice,
 
     pDevice->SetTexture(0, NULL);
     pDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+}
+
+void Font_DrawTextIso(IDirect3DDevice8* pDevice,
+    float vx, float vy, const char* str, int size, DWORD colour) {
+    Font_DrawTextIsoCore(pDevice, vx, vy, str, size, colour, 0.0f);
+}
+
+void Font_DrawTextIsoClip(IDirect3DDevice8* pDevice,
+    float vx, float vy, const char* str, int size, DWORD colour, float max_w) {
+    Font_DrawTextIsoCore(pDevice, vx, vy, str, size, colour, max_w);
 }

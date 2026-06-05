@@ -8,6 +8,7 @@
 #include "dd_texture.h"
 #include "dd_gfx.h"
 #include "lodepng.h"
+#include "picojpeg.h"
 
 /* next power of two >= v */
 static unsigned dd_np2(unsigned v) {
@@ -16,31 +17,26 @@ static unsigned dd_np2(unsigned v) {
     return p;
 }
 
-int Texture_LoadPNG(const char* path, Texture* out) {
-    unsigned char* rgba = NULL;
-    unsigned w = 0, h = 0, err;
+/* Shared upload tail: take a tightly-packed w*h RGBA buffer, swap to BGRA,
+   pad to power-of-two, swizzle, and upload as A8R8G8B8. Frees nothing; the
+   caller owns rgba. Fills *out on success. Returns 1/0. Used by both the PNG
+   and JPEG loaders so they share one code path. */
+static int UploadRGBA(const unsigned char* rgba, unsigned w, unsigned h, Texture* out) {
     unsigned pw, ph, x, y;
     unsigned char* pad;
     IDirect3DTexture8* tex = NULL;
     D3DLOCKED_RECT lr;
     HRESULT hr;
 
-    if (out) { out->tex = NULL; out->w = out->h = out->pw = out->ph = 0; }
-    if (!path || !out) return 0;
-
-    /* lodepng gives RGBA byte order */
-    err = lodepng_decode32_file(&rgba, &w, &h, path);
-    if (err || !rgba) { if (rgba) free(rgba); return 0; }
+    if (!rgba || !out || w == 0 || h == 0) return 0;
 
     pw = dd_np2(w);
     ph = dd_np2(h);
 
     pad = (unsigned char*)malloc((size_t)pw * ph * 4);
-    if (!pad) { free(rgba); return 0; }
+    if (!pad) return 0;
     memset(pad, 0, (size_t)pw * ph * 4);
 
-    /* copy rows into the pow2 buffer, swapping R<->B (RGBA -> BGRA).
-       BGRA byte order is what D3DFMT_A8R8G8B8 wants in memory. */
     for (y = 0; y < h; y++) {
         const unsigned char* src = rgba + (size_t)y * w * 4;
         unsigned char* dst = pad + (size_t)y * pw * 4;
@@ -51,7 +47,6 @@ int Texture_LoadPNG(const char* path, Texture* out) {
             dst[x * 4 + 3] = src[x * 4 + 3]; /* A */
         }
     }
-    free(rgba);
 
     hr = Gfx_Device()->CreateTexture(pw, ph, 1, 0,
         D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &tex);
@@ -61,7 +56,6 @@ int Texture_LoadPNG(const char* path, Texture* out) {
     if (FAILED(hr)) { tex->Release(); free(pad); return 0; }
 
     XGSwizzleRect(pad, pw * 4, NULL, lr.pBits, pw, ph, NULL, 4);
-
     tex->UnlockRect(0);
     free(pad);
 
@@ -69,6 +63,124 @@ int Texture_LoadPNG(const char* path, Texture* out) {
     out->w = (int)w;  out->h = (int)h;
     out->pw = (int)pw; out->ph = (int)ph;
     return 1;
+}
+
+int Texture_LoadPNG(const char* path, Texture* out) {
+    unsigned char* rgba = NULL;
+    unsigned w = 0, h = 0, err;
+    int ok;
+
+    if (out) { out->tex = NULL; out->w = out->h = out->pw = out->ph = 0; }
+    if (!path || !out) return 0;
+
+    /* lodepng gives RGBA byte order */
+    err = lodepng_decode32_file(&rgba, &w, &h, path);
+    if (err || !rgba) { if (rgba) free(rgba); return 0; }
+
+    ok = UploadRGBA(rgba, w, h, out);
+    free(rgba);
+    return ok;
+}
+
+/* ---- JPEG loader (picojpeg) --------------------------------------------
+   Scaffolding: a working baseline-JPEG decoder wired to the same upload path
+   as PNG, so cover art / assets can use .jpg later. picojpeg pulls bytes via a
+   callback; we feed it from a file. It decodes MCU-by-MCU into 8x8 component
+   blocks which we assemble into a full RGBA image. */
+
+typedef struct {
+    HANDLE h;
+} JpegSrc;
+
+static unsigned char Jpeg_NeedBytes(unsigned char* pBuf, unsigned char bufSize,
+    unsigned char* pBytesRead, void* pData) {
+    JpegSrc* s = (JpegSrc*)pData;
+    DWORD got = 0;
+    if (!ReadFile(s->h, pBuf, (DWORD)bufSize, &got, NULL)) { *pBytesRead = 0; return PJPG_STREAM_READ_ERROR; }
+    *pBytesRead = (unsigned char)got;
+    return 0;   /* 0 = ok */
+}
+
+int Texture_LoadJPEG(const char* path, Texture* out) {
+    JpegSrc src;
+    pjpeg_image_info_t info;
+    unsigned char* rgba = NULL;
+    int ok = 0, mcuX = 0, mcuY = 0;
+    unsigned w, h;
+
+    if (out) { out->tex = NULL; out->w = out->h = out->pw = out->ph = 0; }
+    if (!path || !out) return 0;
+
+    src.h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (src.h == INVALID_HANDLE_VALUE) return 0;
+
+    if (pjpeg_decode_init(&info, Jpeg_NeedBytes, &src, 0) != 0) {
+        CloseHandle(src.h);
+        return 0;
+    }
+
+    w = (unsigned)info.m_width;
+    h = (unsigned)info.m_height;
+    rgba = (unsigned char*)malloc((size_t)w * h * 4);
+    if (!rgba) { CloseHandle(src.h); return 0; }
+    memset(rgba, 0, (size_t)w * h * 4);
+
+    /* Walk every MCU. Each MCU is m_MCUWidth x m_MCUHeight px, delivered as
+       (MCUW/8)*(MCUH/8) 8x8 blocks in m_pMCUBufR/G/B. For greyscale, only R is
+       valid (use it for G/B too). Place each pixel into the RGBA buffer. */
+    for (;;) {
+        unsigned char status = pjpeg_decode_mcu();
+        int bx, by, blk;
+
+        if (status) {
+            if (status == PJPG_NO_MORE_BLOCKS) break;   /* done */
+            free(rgba); CloseHandle(src.h); return 0;   /* decode error */
+        }
+
+        /* destination top-left of this MCU in the image */
+        {
+            int dstX0 = mcuX * info.m_MCUWidth;
+            int dstY0 = mcuY * info.m_MCUHeight;
+            int blocksPerRow = info.m_MCUWidth >> 3;     /* /8 */
+            int blockRows = info.m_MCUHeight >> 3;
+
+            for (by = 0; by < blockRows; by++) {
+                for (bx = 0; bx < blocksPerRow; bx++) {
+                    int srcOff = (by * blocksPerRow + bx) * 64;  /* 8x8 block base */
+                    int px, py;
+                    blk = srcOff;
+                    for (py = 0; py < 8; py++) {
+                        for (px = 0; px < 8; px++) {
+                            int ix = dstX0 + bx * 8 + px;
+                            int iy = dstY0 + by * 8 + py;
+                            int si = blk + py * 8 + px;
+                            unsigned char* d;
+                            if (ix >= (int)w || iy >= (int)h) continue;  /* edge MCU overhang */
+                            d = rgba + ((size_t)iy * w + ix) * 4;
+                            if (info.m_comps == 1) {
+                                unsigned char g = info.m_pMCUBufR[si];
+                                d[0] = g; d[1] = g; d[2] = g; d[3] = 255;
+                            }
+                            else {
+                                d[0] = info.m_pMCUBufR[si];
+                                d[1] = info.m_pMCUBufG[si];
+                                d[2] = info.m_pMCUBufB[si];
+                                d[3] = 255;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (++mcuX == info.m_MCUSPerRow) { mcuX = 0; mcuY++; }
+    }
+
+    CloseHandle(src.h);
+    ok = UploadRGBA(rgba, w, h, out);
+    free(rgba);
+    return ok;
 }
 
 /* ---- XPR0 (.xbx) texture loader ----------------------------------------

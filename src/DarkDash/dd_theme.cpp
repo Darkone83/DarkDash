@@ -217,6 +217,39 @@ const Texture* Theme_Asset(const char* name) {
     return &slot->tex;
 }
 
+/* Resolve a raw icon file, preferring the active theme then falling back to
+   default. Icons live under "<themeRoot>\assets\raw\<name>". */
+void Theme_ResolveIcon(const char* name, char* out, int cap) {
+    char path[PATH_MAX_DD];
+    DWORD attr;
+    int n;
+
+    if (!out || cap <= 0) return;
+    out[0] = 0;
+    if (!name || !name[0]) return;
+
+    /* 1) active theme's assets\raw, if a theme is loaded */
+    if (s_root[0]) {
+        n = 0;
+        strncpy(path, s_root, sizeof(path) - 1); path[sizeof(path) - 1] = 0;
+        strncat(path, "\\assets\\raw\\", sizeof(path) - strlen(path) - 1);
+        strncat(path, name, sizeof(path) - strlen(path) - 1);
+        { int i; for (i = 0; path[i]; i++) if (path[i] == '/') path[i] = '\\'; }
+        attr = GetFileAttributesA(path);
+        if (attr != 0xFFFFFFFF && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            strncpy(out, path, cap - 1); out[cap - 1] = 0;
+            return;
+        }
+        (void)n;
+    }
+
+    /* 2) fall back to the default theme's icons */
+    strncpy(path, "D:\\themes\\default\\assets\\raw\\", sizeof(path) - 1);
+    path[sizeof(path) - 1] = 0;
+    strncat(path, name, sizeof(path) - strlen(path) - 1);
+    strncpy(out, path, cap - 1); out[cap - 1] = 0;
+}
+
 /*    Theme discovery                                                         */
 
 /* does <themesRoot>\<name>\theme.ini exist? */

@@ -19,6 +19,8 @@
     <ClCompile Include="dd_copyjob.cpp" />
     <ClCompile Include="dd_data.cpp" />
     <ClCompile Include="dd_disc.cpp" />
+    <ClCompile Include="dd_edit.cpp" />
+    <ClCompile Include="dd_eeprom.cpp" />
     <ClCompile Include="dd_egg.cpp" />
     <ClCompile Include="dd_fileops.cpp" />
     <ClCompile Include="dd_ftol.cpp">
@@ -30,17 +32,21 @@
     <ClCompile Include="dd_launcher.cpp" />
     <ClCompile Include="dd_mount.cpp" />
     <ClCompile Include="dd_net.cpp" />
+    <ClCompile Include="dd_ntp.cpp" />
     <ClCompile Include="dd_osk.cpp" />
     <ClCompile Include="dd_paths.cpp" />
     <ClCompile Include="dd_pedestal.cpp" />
+    <ClCompile Include="dd_preview.cpp" />
     <ClCompile Include="dd_recents.cpp" />
     <ClCompile Include="dd_savemgr.cpp" />
     <ClCompile Include="dd_screensaver.cpp" />
     <ClCompile Include="dd_select.cpp" />
     <ClCompile Include="dd_swing.cpp" />
+    <ClCompile Include="dd_synopsis.cpp" />
     <ClCompile Include="dd_sysinfo.cpp" />
     <ClCompile Include="dd_texture.cpp" />
     <ClCompile Include="dd_theme.cpp" />
+    <ClCompile Include="dd_time.cpp" />
     <ClCompile Include="dd_ui.cpp" />
     <ClCompile Include="dd_update.cpp" />
     <ClCompile Include="dd_xbe.cpp" />
@@ -53,6 +59,7 @@
     <ClCompile Include="input.cpp" />
     <ClCompile Include="lodepng.c" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="picojpeg.c" />
     <ClCompile Include="settings.cpp" />
     <ClCompile Include="xba.cpp" />
   </ItemGroup>
@@ -68,6 +75,8 @@
     <ClInclude Include="dd_copyjob.h" />
     <ClInclude Include="dd_data.h" />
     <ClInclude Include="dd_disc.h" />
+    <ClInclude Include="dd_edit.h" />
+    <ClInclude Include="dd_eeprom.h" />
     <ClInclude Include="dd_egg.h" />
     <ClInclude Include="dd_fileops.h" />
     <ClInclude Include="dd_ftp.h" />
@@ -77,17 +86,21 @@
     <ClInclude Include="dd_launcher.h" />
     <ClInclude Include="dd_mount.h" />
     <ClInclude Include="dd_net.h" />
+    <ClInclude Include="dd_ntp.h" />
     <ClInclude Include="dd_osk.h" />
     <ClInclude Include="dd_paths.h" />
     <ClInclude Include="dd_pedestal.h" />
+    <ClInclude Include="dd_preview.h" />
     <ClInclude Include="dd_recents.h" />
     <ClInclude Include="dd_savemgr.h" />
     <ClInclude Include="dd_screensaver.h" />
     <ClInclude Include="dd_select.h" />
     <ClInclude Include="dd_swing.h" />
+    <ClInclude Include="dd_synopsis.h" />
     <ClInclude Include="dd_sysinfo.h" />
     <ClInclude Include="dd_texture.h" />
     <ClInclude Include="dd_theme.h" />
+    <ClInclude Include="dd_time.h" />
     <ClInclude Include="dd_ui.h" />
     <ClInclude Include="dd_update.h" />
     <ClInclude Include="dd_version.h" />
@@ -101,6 +114,7 @@
     <ClInclude Include="input.h" />
     <ClInclude Include="lodepng.h" />
     <ClInclude Include="minimp3.h" />
+    <ClInclude Include="picojpeg.h" />
     <ClInclude Include="settings.h" />
     <ClInclude Include="xba.h" />
     <ClInclude Include="xboxinternals.h" />
@@ -240,7 +254,7 @@ MKDIR "$(OutDir)XISO"
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>xboxkrnl.lib;libcmt.lib;xapilib.lib;d3d8.lib;d3dx8.lib;xgraphics.lib;dsound.lib;xnet.lib;xvoice.lib</AdditionalDependencies>
+      <AdditionalDependencies>xboxkrnl.lib;libcmt.lib;xapilib.lib;d3d8.lib;d3dx8.lib;xgraphics.lib;dsound.lib;xnet.lib;xvoice.lib;xmv.lib</AdditionalDependencies>
       <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
       <BaseAddress>
       </BaseAddress>

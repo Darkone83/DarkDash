@@ -20,7 +20,9 @@
 #include "dd_audio.h"
 #include "dd_backdrop.h"
 #include "dd_fileops.h"
+#include "dd_edit.h"
 #include "dd_disc.h"
+#include "dd_sysinfo.h"
 #include "dd_copyjob.h"
 #include "dd_osk.h"
 #include "dd_mount.h"
@@ -59,6 +61,7 @@ enum {
     FM_DESTPICK,      /* choosing a paste destination (copy/move)*/
     FM_CONFIRM_DEL,   /* "delete N items?" dialog                */
     FM_CONFIRM_EXIT,  /* "exit file manager?" dialog             */
+    FM_CONFIRM_CACHE, /* "clear cache partitions?" dialog        */
     FM_OSK_RENAME,    /* OSK open, renaming the highlighted item */
     FM_OSK_MKDIR,     /* OSK open, naming a new folder           */
     FM_COPYING        /* async copy/move in progress (progress UI) */
@@ -66,9 +69,9 @@ enum {
 static int s_mode = FM_BROWSE;
 
 /* ops menu */
-enum { OP_COPY = 0, OP_MOVE, OP_DELETE, OP_RENAME, OP_MKDIR, OP_COUNT };
+enum { OP_COPY = 0, OP_MOVE, OP_DELETE, OP_RENAME, OP_MKDIR, OP_CLRCACHE, OP_COUNT };
 static const char* k_opNames[OP_COUNT] = {
-    "Copy", "Move", "Delete", "Rename", "New Folder"
+    "Copy", "Move", "Delete", "Rename", "New Folder", "Clear Cache"
 };
 static int s_opCursor = 0;
 
@@ -308,7 +311,9 @@ static int FmVisRows(void) {
     float rowDY = (float)Font_LineHeight(FONT_SIZE_SMALL);
     int   n;
     if (rowDY < 21.0f) rowDY = 21.0f;
-    n = (int)((360.0f - 28.0f - 22.0f) / rowDY);
+    /* reserve the top header gap (22) + a bottom band (44) for the free-space /
+       scroll readout, so rows never collide with it or the frame chrome. */
+    n = (int)((360.0f - 44.0f - 22.0f) / rowDY);
     if (n < 1) n = 1;
     if (n > FM_VIS_ROWS) n = FM_VIS_ROWS;
     return n;
@@ -388,6 +393,36 @@ static int RunDelete(Pane* p) {
     return ok;
 }
 
+/* Clear the Xbox cache partitions (X:, Y:, Z:). Games dump per-title cache and
+   temp data here and it fills over time; wiping it is safe and frees space.
+   We delete the CONTENTS of each partition, not the partitions themselves.
+   Returns the number of top-level items removed across all three. */
+static int RunClearCache(void) {
+    static const char* const k_cache[] = { "X:\\", "Y:\\", "Z:\\", 0 };
+    int ci, ok = 0;
+    for (ci = 0; k_cache[ci]; ci++) {
+        char pat[FM_PATH_MAX];
+        WIN32_FIND_DATA fd;
+        HANDLE h;
+        DWORD  attr = GetFileAttributesA(k_cache[ci]);
+        if (attr == 0xFFFFFFFF || !(attr & FILE_ATTRIBUTE_DIRECTORY)) continue;  /* not mounted */
+        FmCopy(pat, sizeof(pat), k_cache[ci]);
+        FmJoin(pat, sizeof(pat), "*");
+        h = FindFirstFile(pat, &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            char path[FM_PATH_MAX];
+            if (fd.cFileName[0] == '.' &&
+                (fd.cFileName[1] == 0 || fd.cFileName[1] == '.')) continue;
+            FmCopy(path, sizeof(path), k_cache[ci]);
+            FmJoin(path, sizeof(path), fd.cFileName);
+            if (Fileops_Delete(path)) ok++;   /* recursive, depth-guarded */
+        } while (FindNextFile(h, &fd));
+        FindClose(h);
+    }
+    return ok;
+}
+
 /* ---- lifecycle --------------------------------------------------------- */
 
 void FileMan_Enter(void) {
@@ -402,6 +437,12 @@ void FileMan_Enter(void) {
 int FileMan_Update(WORD pressed, WORD held) {
     Pane* p = &s_pane[s_active];
     (void)held;
+
+    /* the text/config editor (R3 on a file) owns input while open */
+    if (Edit_IsOpen()) {
+        Edit_Update(pressed);
+        return 0;
+    }
 
     /* async copy/move in progress: pump it, allow B to cancel, finish out */
     if (s_mode == FM_COPYING) {
@@ -479,6 +520,23 @@ int FileMan_Update(WORD pressed, WORD held) {
         return 0;
     }
 
+    /* clear-cache confirm dialog */
+    if (s_mode == FM_CONFIRM_CACHE) {
+        if (pressed & BTN_A) {
+            int n = RunClearCache();
+            SetMsg(n > 0 ? "Cache cleared" : "Cache already empty");
+            ReloadPane(&s_pane[0]);   /* either pane may be showing X/Y/Z */
+            ReloadPane(&s_pane[1]);
+            s_mode = FM_BROWSE;
+            Audio_PlaySfx(SFX_SELECT);
+        }
+        else if (pressed & BTN_B) {
+            s_mode = FM_BROWSE;
+            Audio_PlaySfx(SFX_BACK);
+        }
+        return 0;
+    }
+
     /* ops menu overlay */
     if (s_mode == FM_OPS) {
         if (pressed & BTN_DPAD_DOWN) { if (s_opCursor < OP_COUNT - 1) { s_opCursor++; Audio_PlaySfx(SFX_NAV_DOWN); } }
@@ -511,6 +569,9 @@ int FileMan_Update(WORD pressed, WORD held) {
                     s_mode = FM_OSK_MKDIR;
                 }
                 else { SetMsg("Open a drive first"); s_mode = FM_BROWSE; }
+                break;
+            case OP_CLRCACHE:
+                s_mode = FM_CONFIRM_CACHE;   /* always confirm -- destructive */
                 break;
             }
         }
@@ -557,6 +618,23 @@ int FileMan_Update(WORD pressed, WORD held) {
 
     if (pressed & BTN_A) { EnterEntry(p); Audio_PlaySfx(SFX_SELECT); }
     if (pressed & BTN_X) { if (UpDir(p)) Audio_PlaySfx(SFX_BACK); }
+
+    /* R3 (right-stick click): open the highlighted file in the text/config
+       editor, if it's an editable text file. Undocumented power-user feature --
+       silent no-op on folders, drives, or non-text files. */
+    if (pressed & BTN_RTHUMB) {
+        if (p->cursor >= 0 && p->cursor < p->count) {
+            FmEntry* e = &p->ent[p->cursor];
+            if (!e->isDir && !e->isDrive) {
+                char fp[FM_PATH_MAX];
+                EntryPath(p, p->cursor, fp, sizeof(fp));
+                if (Edit_IsEditable(fp)) {
+                    if (Edit_Open(fp)) Audio_PlaySfx(SFX_SELECT);
+                    else               SetMsg("Can't edit (too large?)");
+                }
+            }
+        }
+    }
 
     if (pressed & BTN_Y) {                 /* mark/unmark */
         if (p->cursor >= 0 && p->cursor < p->count && !p->ent[p->cursor].isDrive) {
@@ -620,30 +698,38 @@ static void DrawPane(IDirect3DDevice8* d, const Pane* p, int isActive,
     if (frame) UI_DrawSprite(frame, px, fy, fw, fh,
         isActive ? 0xFFFFFFFF : UI_ARGB(140, 255, 255, 255), 0);
 
-    /* rows */
-    vis = p->count - p->scroll;
-    if (vis > fitRows) vis = fitRows;
-    for (i = 0; i < vis; i++) {
-        int    idx = p->scroll + i;
-        const FmEntry* e = &p->ent[idx];
-        float  ry = rowY0 + rowDY * (float)i;
-        DWORD  c;
+    /* rows. Hard bottom limit: rows must stay above the free-space/scroll
+       readout band at the frame foot. fitRows already accounts for this, but we
+       also guard each row's pixel position so a tall font or off-by-one can
+       never paint into that band -- identical for both panes (same DrawPane). */
+    {
+        float rowBottomLimit = fy + fh - 44.0f;   /* matches FmVisRows reservation */
+        vis = p->count - p->scroll;
+        if (vis > fitRows) vis = fitRows;
+        for (i = 0; i < vis; i++) {
+            int    idx = p->scroll + i;
+            const FmEntry* e = &p->ent[idx];
+            float  ry = rowY0 + rowDY * (float)i;
+            DWORD  c;
 
-        if (isActive && idx == p->cursor)
-            UI_FillRect(px + 18.0f, ry + hlY, fw - 36.0f, hlH,
-                UI_ARGB(70, ar, ag, ab));
-        if (e->marked)
-            UI_FillRect(px + 18.0f, ry + hlY, 4.0f, hlH, mark);
+            if (ry + rowDY > rowBottomLimit) break;   /* would spill the band -> stop */
 
-        c = (isActive && idx == p->cursor) ? glow
-            : (e->isDir ? text : dim);
-        Font_DrawText(d, px + 28.0f, ry, e->name, FONT_SIZE_SMALL, c,
-            (int)(fw - 84.0f));
+            if (isActive && idx == p->cursor)
+                UI_FillRect(px + 18.0f, ry + hlY, fw - 36.0f, hlH,
+                    UI_ARGB(70, ar, ag, ab));
+            if (e->marked)
+                UI_FillRect(px + 18.0f, ry + hlY, 4.0f, hlH, mark);
 
-        /* dir marker / size on the right */
-        if (e->isDir)
-            Font_DrawTextRight(d, px + fw - 22.0f, ry,
-                e->isDrive ? "drive" : "dir", FONT_SIZE_SMALL, dim);
+            c = (isActive && idx == p->cursor) ? glow
+                : (e->isDir ? text : dim);
+            Font_DrawText(d, px + 28.0f, ry, e->name, FONT_SIZE_SMALL, c,
+                (int)(fw - 84.0f));
+
+            /* dir marker / size on the right */
+            if (e->isDir)
+                Font_DrawTextRight(d, px + fw - 22.0f, ry,
+                    e->isDrive ? "drive" : "dir", FONT_SIZE_SMALL, dim);
+        }
     }
 
     /* scroll hint */
@@ -651,7 +737,18 @@ static void DrawPane(IDirect3DDevice8* d, const Pane* p, int isActive,
         char n[8]; int v = p->cursor + 1, k = 0; char tmp[8];
         while (v > 0 && k < 7) { tmp[k++] = (char)('0' + (v % 10)); v /= 10; }
         { int j; for (j = 0; j < k; j++) n[j] = tmp[k - 1 - j]; n[k] = 0; }
-        Font_DrawTextRight(d, px + fw - 14.0f, fy + fh - 18.0f, n, FONT_SIZE_SMALL, dim);
+        Font_DrawTextRight(d, px + fw - 18.0f, fy + fh - 34.0f, n, FONT_SIZE_SMALL, dim);
+    }
+
+    /* free space for the current drive (bottom-left, inside the frame interior --
+       lifted clear of the decorative bottom chrome so it doesn't ride the edge).
+       Only when we're inside a drive; the virtual root has no single drive. */
+    if (p->path[0] && p->path[1] == ':') {
+        char root[4], usage[40];
+        root[0] = p->path[0]; root[1] = ':'; root[2] = '\\'; root[3] = 0;
+        Sys_DiskUsageStr(root, usage, sizeof(usage));
+        if (usage[0] && usage[0] != '-')
+            Font_DrawText(d, px + 18.0f, fy + fh - 34.0f, usage, FONT_SIZE_SMALL, dim, (int)(fw - 70.0f));
     }
 }
 
@@ -728,6 +825,14 @@ void FileMan_Render(void) {
         Font_DrawText(d, bx + 20.0f, by + 22.0f, "Exit file manager?", FONT_SIZE_MEDIUM, accent, 0);
         Font_DrawText(d, bx + 20.0f, by + 58.0f, "A = yes    B = no", FONT_SIZE_SMALL, dim, 0);
     }
+    else if (s_mode == FM_CONFIRM_CACHE) {
+        float bx = 176.0f, by = 188.0f, bw = 288.0f, bh = 122.0f;
+        DrawFramedBox(d, bx, by, bw, bh);
+        Font_DrawText(d, bx + 20.0f, by + 18.0f, "Clear cache?", FONT_SIZE_MEDIUM, accent, 0);
+        Font_DrawText(d, bx + 20.0f, by + 48.0f, "Wipes X: Y: Z: cache partitions", FONT_SIZE_SMALL, text, (int)(bw - 40.0f));
+        Font_DrawText(d, bx + 20.0f, by + 68.0f, "(saves are unaffected)", FONT_SIZE_SMALL, dim, (int)(bw - 40.0f));
+        Font_DrawText(d, bx + 20.0f, by + 92.0f, "A = yes    B = no", FONT_SIZE_SMALL, dim, 0);
+    }
     else if (s_mode == FM_COPYING) {
         float bx = 160.0f, by = 180.0f, bw = 320.0f, bh = 130.0f;
         int   filesDone = 0, filesSeen = 0;
@@ -775,7 +880,8 @@ void FileMan_Render(void) {
     case FM_OPS:          footHint = "A SELECT   B CANCEL"; break;
     case FM_DESTPICK:     footHint = "A ENTER  X UP  WHITE PASTE  B CANCEL"; break;
     case FM_CONFIRM_DEL:
-    case FM_CONFIRM_EXIT: footHint = "A YES   B NO"; break;
+    case FM_CONFIRM_EXIT:
+    case FM_CONFIRM_CACHE: footHint = "A YES   B NO"; break;
     case FM_OSK_RENAME:
     case FM_OSK_MKDIR:    footHint = ""; break;   /* OSK shows its own */
     case FM_COPYING:      footHint = "B CANCEL"; break;
@@ -784,4 +890,7 @@ void FileMan_Render(void) {
     if (foot) UI_DrawSprite(foot, 8.0f, 452.0f, 624.0f, 24.0f, 0xFFFFFFFF, 0);
     if (footHint[0])
         Font_DrawText(d, 31.0f, 452.0f, footHint, FONT_SIZE_SMALL, text, 610);
+
+    /* text/config editor overlay sits above everything (incl. its own footer) */
+    Edit_Draw(d);
 }

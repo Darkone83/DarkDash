@@ -22,6 +22,7 @@
 #include "dd_recents.h"
 #include "dd_paths.h"
 #include "dd_browse.h"
+#include "dd_synopsis.h"
 #include "dd_backdrop.h"
 #include "dd_pedestal.h"
 #include "dd_launcher.h"
@@ -128,6 +129,18 @@ static int ResOpencase(const char* xbePath, Texture* tex) {
     return Texture_LoadPNG(path, tex) ? 1 : 0;
 }
 
+/* try _resources\artwork\poster.jpg (XBMC4Gamers packs ship JPG box art). 1 on
+   success. Uses the picojpeg-backed loader. */
+static int ResPoster(const char* xbePath, Texture* tex) {
+    char folder[LAUNCH_PATH_MAX], path[LAUNCH_PATH_MAX];
+    DWORD attr;
+    TitleFolder(xbePath, folder, sizeof(folder));
+    JoinPath(path, sizeof(path), folder, "_resources\\artwork\\poster.jpg");
+    attr = GetFileAttributesA(path);
+    if (attr == 0xFFFFFFFF || (attr & FILE_ATTRIBUTE_DIRECTORY)) return 0;
+    return Texture_LoadJPEG(path, tex) ? 1 : 0;
+}
+
 /* Public: load cover art for any title using the same priority chain the
    launcher uses. *isFlat -> 1 if the art is _resources case art (draw as a
    hologram), 0 if it's a title image / placeholder (draw on the cube). Returns
@@ -140,8 +153,16 @@ int Launcher_LoadArtFor(const char* xbePath, Texture* out, int* isFlat) {
         if (isFlat) *isFlat = 1;
         return 1;
     }
+    if (ResPoster(xbePath, out)) {       /* JPG box art from the pack */
+        if (isFlat) *isFlat = 1;
+        return 1;
+    }
     if (Xbe_LoadTitleImage(Gfx_Device(), xbePath, out)) return 1;
-    if (Texture_LoadPNG("D:\\themes\\default\\assets\\raw\\s2_003.png", out)) return 1;
+    {   /* placeholder cover: active theme's, else default */
+        char ph[260];
+        Theme_ResolveIcon("s2_003.png", ph, sizeof(ph));
+        if (Texture_LoadPNG(ph, out)) return 1;
+    }
     return 0;
 }
 
@@ -388,11 +409,30 @@ int Launcher_Update(WORD pressed, WORD held) {
         return 0;   /* swallow input while/after the overlay handled it */
     }
 
+    /* Synopsis popup owns input while open. */
+    if (Synopsis_IsOpen()) {
+        Synopsis_Update(pressed);
+        return 0;
+    }
+
     if (pressed & BTN_B) {
         Audio_PlaySfx(SFX_BACK);
         if (s_ped.tex) Texture_Release(&s_ped);
         s_ped.tex = NULL; s_pedIdx = -1; s_pedFlat = 0;
         return 1;
+    }
+
+    /* WHITE = title info: open the synopsis popup for the highlighted title,
+       but only if it actually has a _resources pack. Silent no-op otherwise. */
+    if (pressed & BTN_WHITE) {
+        if (s_count > 0 && s_cursor >= 0 && s_cursor < s_count) {
+            const char* xp = s_items[s_cursor].xbePath;
+            if (Synopsis_Available(xp)) {
+                Audio_PlaySfx(SFX_SELECT);
+                Synopsis_Open(xp);
+                return 0;
+            }
+        }
     }
 
     /* X = refresh: re-scan the current category in place (handy after copying
@@ -539,8 +579,9 @@ void Launcher_Render(void) {
 
     /* footer */
     if (foot) UI_DrawSprite(foot, 8.0f, 442.0f, 624.0f, 32.0f, 0xFFFFFFFF, 0);
-    Font_DrawText(d, 24.0f, 449.0f, "A LAUNCH  LT/RT PAGE  Y ADD PATH  X REFRESH  B BACK", FONT_SIZE_SMALL, text, 0);
+    Font_DrawText(d, 24.0f, 449.0f, "A LAUNCH  LT/RT PAGE  WHITE INFO  Y ADD PATH  X REFRESH  B BACK", FONT_SIZE_SMALL, text, 0);
 
-    /* folder picker overlay on top of everything when open */
+    /* overlays on top of everything */
     Browse_Draw(d);
+    Synopsis_Draw(d);
 }

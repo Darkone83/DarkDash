@@ -34,6 +34,12 @@ extern "C" {
        Returns NULL if not found. Texture lifetime is owned by the theme. */
     const Texture* Theme_Asset(const char* name);
 
+    /* Resolve a raw asset/icon file (e.g. "s2_020.png") to a full path, preferring
+       the ACTIVE theme's assets\raw folder and falling back to the default theme
+       if the active theme doesn't ship that file. Writes the chosen path into out.
+       Lets themes override the menu icons while keeping default as the safety net. */
+    void Theme_ResolveIcon(const char* name, char* out, int cap);
+
     /*---- theme discovery -------------------------------------------------------
        Scan a themes root (e.g. "D:\\themes") for sub-folders containing a
        theme.ini. "default" is always reported first if present. Names are the

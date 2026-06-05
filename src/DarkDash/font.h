@@ -64,6 +64,12 @@ extern "C" {
     void Font_DrawTextIso(IDirect3DDevice8* pDevice,
         float vx, float vy, const char* str, int size, DWORD colour);
 
+    /* Iso text with a width budget (virtual px from vx): truncates cleanly so a
+       long string can't overrun the panel. max_w <= 0 behaves like the unclipped
+       version. */
+    void Font_DrawTextIsoClip(IDirect3DDevice8* pDevice,
+        float vx, float vy, const char* str, int size, DWORD colour, float max_w);
+
 #ifdef __cplusplus
 }
 #endif

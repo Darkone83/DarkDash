@@ -12,6 +12,7 @@ const char* Net_Ip(void);      /* cached "192.168.x.x", or "No Link"          */
 const char* Net_Subnet(void);  /* subnet mask, or "--"                        */
 const char* Net_Gateway(void); /* default gateway, or "--"                    */
 const char* Net_Dns(void);     /* primary DNS, or "--"                        */
+const char* Net_Dns2(void);    /* secondary DNS, or "--"                      */
 int         Net_IsUp(void);    /* 1 once an address has resolved              */
 int         Net_LinkUp(void);  /* 1 if the Ethernet link is active            */
 

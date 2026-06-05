@@ -35,6 +35,8 @@
 #include "dd_savemgr.h"
 #include "dd_recents.h"
 #include "dd_paths.h"
+#include "dd_time.h"
+#include "dd_ntp.h"
 #include "dd_net.h"
 #include "dd_ftp.h"
 #include "dd_screensaver.h"
@@ -92,6 +94,7 @@ static const LauncherConfig* MenuConfig(int sel) {
 /* --- header status ticker: temp / fan / IP / free space ---------------- */
 static char  s_status[192] = "DARKDASH";
 static DWORD s_lastStatus = 0;
+static int   s_ntpDone = 0;    /* one-shot internet time sync at boot */
 
 static void StrAppend(char* dst, int cap, const char* s) {
     strncat(dst, s, cap - (int)strlen(dst) - 1);
@@ -449,6 +452,7 @@ void __cdecl main(void) {
     Data_Load();             /* load prefs first: Gfx_Init reads videoRes from it */
     Recents_Init();          /* most-recently-launched titles (Y overlay) */
     Paths_Load();            /* user-added custom scan paths per category */
+    Time_Load();             /* NTP enable + timezone prefs (time.dat)        */
     if (!Gfx_Init()) return;
     UI_Init(Gfx_Width(), Gfx_Height());
     Calib_Apply();           /* apply saved overscan insets (zero if uncalibrated) */
@@ -736,6 +740,19 @@ void __cdecl main(void) {
             Net_Poll();
             BuildStatus();
             Disc_Poll();          /* mount/unmount a disc on tray change */
+
+            /* one-shot internet time sync: fire once DHCP has resolved an
+               address, if the user enabled it. Give up after a grace window so
+               we don't keep retrying a dead/timeserver-less network forever. */
+            if (!s_ntpDone && Time_NtpEnabled()) {
+                if (Net_IsUp()) {
+                    Ntp_Sync();        /* best-effort; failure is silent at boot */
+                    s_ntpDone = 1;
+                }
+                else if (t > 30000) { /* ~30s and still no link/lease -> stop */
+                    s_ntpDone = 1;
+                }
+            }
         }
 
         /* transition timer -> orb glitch intensity (0..100) */

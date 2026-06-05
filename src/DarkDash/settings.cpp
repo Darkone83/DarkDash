@@ -21,6 +21,9 @@
 #include "dd_audio.h"
 #include "dd_data.h"
 #include "dd_sysinfo.h"
+#include "dd_eeprom.h"
+#include "dd_time.h"
+#include "dd_ntp.h"
 #include "dd_net.h"
 #include "dd_pedestal.h"
 #include "dd_backdrop.h"
@@ -37,7 +40,6 @@ static void SettingsUpdRenderPump(void);
 #include "dd_version.h"
 
 #define SET_COUNT 10
-#define ICON_DIR  "D:\\themes\\default\\assets\\raw\\"
 #define MUSIC_DIR "D:\\audio\\music"
 #define MUSIC_MAX 64
 
@@ -62,6 +64,7 @@ static int     s_iconIdx = -1;
 
 /* Audio: 0 = options, 1 = MP3 picker */
 static int  s_audioPick = 0;
+static int  s_audioMsg = 0;    /* 0 none, 1 saved, 2 failed (EEPROM audio) */
 static char s_mp3[MUSIC_MAX][64];
 static int  s_mp3Count = 0;
 static int  s_mp3Cursor = 0;
@@ -109,12 +112,13 @@ static int  s_themeMsg = 0;      /* 0 none, 1 applied, 2 failed -> default */
 /*---- helpers ---------------------------------------------------------------*/
 
 static void LoadIcon(int idx) {
-    char path[160];
+    char path[260];
     if (idx == s_iconIdx) return;
     if (idx < 0 || idx >= SET_COUNT) return;
     if (s_icon.tex) Texture_Release(&s_icon);
     s_icon.tex = NULL;
-    strcpy(path, ICON_DIR); strcat(path, k_icon[idx]);
+    /* prefer the active theme's icon, fall back to default if it doesn't ship it */
+    Theme_ResolveIcon(k_icon[idx], path, sizeof(path));
     Texture_LoadPNG(path, &s_icon);
     s_iconIdx = idx;
 }
@@ -259,15 +263,21 @@ static void DrawConsole(IDirect3DDevice8* d, const char* const* rows, int count,
 
     Iso_Begin();
     if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
-    if (selRow >= 0 && selRow < selectable) {
+    if (selRow >= 0 && (selRow < selectable || (pinLast && selRow == count - 1))) {
         float gy = ((pinLast && selRow == count - 1) ? bottomY : rowY0 + rowDY * (float)selRow) - 6.0f;
         Select_Begin(0x5000 + s_view, gy);
         Select_DrawGlow(menuX + 18.0f, gy, 210.0f, 34.0f, UI_ARGB(110, ar, ag, ab));
     }
     for (i = 0; i < count; i++) {
-        DWORD c = (i >= selectable) ? dim : ((i == selRow) ? glow : text);
-        float ry = (pinLast && i == count - 1) ? bottomY : rowY0 + rowDY * (float)i;
-        Font_DrawTextIso(d, menuX + 28.0f, ry + 4.0f, rows[i], FONT_SIZE_MEDIUM, c);
+        /* the pinned last row is always the action row (Apply/Set) -- keep it
+           bright even when it falls outside the in-line selectable range, as in
+           pure-DHCP where the rows between Mode and Apply are read-only. */
+        int isAction = (pinLast && i == count - 1);
+        DWORD c = (i == selRow) ? glow
+            : (isAction) ? text
+            : (i >= selectable) ? dim : text;
+        float ry = isAction ? bottomY : rowY0 + rowDY * (float)i;
+        Font_DrawTextIsoClip(d, menuX + 28.0f, ry + 4.0f, rows[i], FONT_SIZE_MEDIUM, c, 224.0f);
     }
     Iso_End();
 }
@@ -290,7 +300,7 @@ static int UpdateList(WORD pressed) {
     if (pressed & BTN_DPAD_UP) { if (s_cursor > 0) { s_cursor--; Audio_PlaySfx(SFX_NAV_UP);   LoadIcon(s_cursor); } }
     if (pressed & BTN_A) {
         Audio_PlaySfx(SFX_SELECT);
-        s_view = s_cursor; s_row = 0; s_audioPick = 0;
+        s_view = s_cursor; s_row = 0; s_audioPick = 0; s_audioMsg = 0;
         s_fxSub = 0;   /* video Effects sub-menu starts closed */
         Select_Reset();   /* snap the highlight to the new panel's first row */
         if (s_view == CAT_CLOCK) { Sys_GetClock(&s_clk); s_clkMsg = 0; }
@@ -358,7 +368,7 @@ static void UpdateAudio(WORD pressed) {
         }
         return;
     }
-    if (pressed & BTN_DPAD_DOWN) { if (s_row < 1) { s_row++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+    if (pressed & BTN_DPAD_DOWN) { if (s_row < 4) { s_row++; Audio_PlaySfx(SFX_NAV_DOWN); } }
     if (pressed & BTN_DPAD_UP) { if (s_row > 0) { s_row--; Audio_PlaySfx(SFX_NAV_UP); } }
     if (s_row == 0 && (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
         int v = st->musicVolume;
@@ -368,6 +378,29 @@ static void UpdateAudio(WORD pressed) {
         st->musicVolume = v; Audio_SetMusicVolume(v); Audio_PlaySfx(SFX_NAV_UP);
     }
     if (s_row == 1 && (pressed & BTN_A)) { ScanMp3(); s_mp3Cursor = 0; s_audioPick = 1; Audio_PlaySfx(SFX_SELECT); }
+
+    /* console audio config (EEPROM-backed). Read current, modify, persist via
+       the kernel single-setting write. Games may need a restart to pick it up. */
+    if (s_row == 2 && (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
+        int m = 0, a = 0, t = 0;
+        Eeprom_GetAudio(&m, &a, &t);
+        if (pressed & BTN_DPAD_RIGHT) m = (m + 1) % 3;
+        else                          m = (m + 2) % 3;
+        s_audioMsg = Eeprom_SetAudio(m, a, t) ? 1 : 2;
+        Audio_PlaySfx(SFX_ALT);
+    }
+    if (s_row == 3 && (pressed & (BTN_A | BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
+        int m = 0, a = 0, t = 0;
+        Eeprom_GetAudio(&m, &a, &t);
+        s_audioMsg = Eeprom_SetAudio(m, !a, t) ? 1 : 2;
+        Audio_PlaySfx(SFX_ALT);
+    }
+    if (s_row == 4 && (pressed & (BTN_A | BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
+        int m = 0, a = 0, t = 0;
+        Eeprom_GetAudio(&m, &a, &t);
+        s_audioMsg = Eeprom_SetAudio(m, a, !t) ? 1 : 2;
+        Audio_PlaySfx(SFX_ALT);
+    }
 }
 
 static void UpdateFan(WORD pressed) {
@@ -556,8 +589,8 @@ static void UpdateNetwork(WORD pressed) {
 }
 
 static void UpdateClock(WORD pressed) {
-    /* rows: 0 = Time (HH:MM), 1 = Month, 2 = Day, 3 = Year, 4 = Apply */
-    if (pressed & BTN_DPAD_DOWN) { if (s_row < 4) { s_row++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+    /* rows: 0=Time 1=Month 2=Day 3=Year 4=NetTime 5=Zone 6=SyncNow 7=Apply */
+    if (pressed & BTN_DPAD_DOWN) { if (s_row < 7) { s_row++; Audio_PlaySfx(SFX_NAV_DOWN); } }
     if (pressed & BTN_DPAD_UP) { if (s_row > 0) { s_row--; Audio_PlaySfx(SFX_NAV_UP); } }
 
     if (s_row == 0) {                                   /* Time */
@@ -575,7 +608,25 @@ static void UpdateClock(WORD pressed) {
         else s_clk.year += d;
         ClampClock(); s_clkMsg = 0; Audio_PlaySfx(SFX_NAV_UP);
     }
-    else if (s_row == 4 && (pressed & BTN_A)) {         /* Apply */
+    else if (s_row == 4 && (pressed & (BTN_A | BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {  /* Net Time */
+        Time_SetNtpEnabled(!Time_NtpEnabled());
+        Time_Save();
+        s_clkMsg = 0; Audio_PlaySfx(SFX_ALT);
+    }
+    else if (s_row == 5 && (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {          /* Zone */
+        int idx = Time_TzIndex();
+        idx += (pressed & BTN_DPAD_RIGHT) ? 1 : -1;
+        Time_SetTzIndex(idx);
+        Time_Save();
+        s_clkMsg = 0; Audio_PlaySfx(SFX_NAV_UP);
+    }
+    else if (s_row == 6 && (pressed & BTN_A)) {          /* Sync Now */
+        int ok = Ntp_Sync();
+        s_clkMsg = ok ? 3 : 4;
+        if (ok) Sys_GetClock(&s_clk);   /* refresh the editable fields from the new clock */
+        Audio_PlaySfx(ok ? SFX_SELECT : SFX_BACK);
+    }
+    else if (s_row == 7 && (pressed & BTN_A)) {          /* Apply (manual) */
         s_clk.sec = 0;
         s_clkMsg = Sys_SetClock(&s_clk) ? 1 : 2;
         Audio_PlaySfx(s_clkMsg == 1 ? SFX_SELECT : SFX_BACK);
@@ -737,8 +788,8 @@ static void RenderAbout(IDirect3DDevice8* d) {
     int   vx = 90, vy = 70, vw = 460, vh = 330;
     float scrollPx, contentH;
     int   nLines = 0, li;
-    char  lines[16][72];
-    char  num[16], freeStr[24];
+    char  lines[24][72];
+    char  num[16], freeStr[40];
     D3DVIEWPORT8 vpOld, vpClip;
 
     Chrome(d, "ABOUT", "B BACK");
@@ -764,13 +815,35 @@ static void RenderAbout(IDirect3DDevice8* d) {
         IntToText(Gfx_Height(), num); strcat(lines[nLines], num); strcat(lines[nLines], " ");
         strcat(lines[nLines++], Gfx_VideoModeStr());
     }
+    /* live health: CPU / board temp + fan % */
+    {
+        int cpuC = 0, brdC = 0, fan = 0;
+        if (Sys_ReadTemps(&cpuC, &brdC)) {
+            lines[nLines][0] = 0; strcat(lines[nLines], "CPU Temp  ");
+            IntToText(cpuC, num); strcat(lines[nLines], num); strcat(lines[nLines++], " C");
+            lines[nLines][0] = 0; strcat(lines[nLines], "Board     ");
+            IntToText(brdC, num); strcat(lines[nLines], num); strcat(lines[nLines++], " C");
+        }
+        if (Sys_ReadFanPct(&fan)) {
+            lines[nLines][0] = 0; strcat(lines[nLines], "Fan       ");
+            IntToText(fan, num); strcat(lines[nLines], num); strcat(lines[nLines++], " %");
+        }
+    }
     strcpy(lines[nLines++], "");
-    Sys_DiskFreeStr("E:\\", freeStr, sizeof(freeStr));
-    if (freeStr[0] && freeStr[0] != '-') { lines[nLines][0] = 0; strcat(lines[nLines], "E: Free   "); strcat(lines[nLines++], freeStr); }
-    Sys_DiskFreeStr("F:\\", freeStr, sizeof(freeStr));
-    if (freeStr[0] && freeStr[0] != '-') { lines[nLines][0] = 0; strcat(lines[nLines], "F: Free   "); strcat(lines[nLines++], freeStr); }
-    Sys_DiskFreeStr("G:\\", freeStr, sizeof(freeStr));
-    if (freeStr[0] && freeStr[0] != '-') { lines[nLines][0] = 0; strcat(lines[nLines], "G: Free   "); strcat(lines[nLines++], freeStr); }
+    /* partitions: free / total. Only list drives that are actually mounted. */
+    {
+        static const char* const k_part[] = { "C:\\", "E:\\", "F:\\", "G:\\", "X:\\", "Y:\\", "Z:\\", 0 };
+        int pi;
+        for (pi = 0; k_part[pi]; pi++) {
+            Sys_DiskUsageStr(k_part[pi], freeStr, sizeof(freeStr));
+            if (freeStr[0] && freeStr[0] != '-') {
+                char* p = lines[nLines];
+                p[0] = k_part[pi][0]; p[1] = ':'; p[2] = ' '; p[3] = ' '; p[4] = ' '; p[5] = ' ';
+                p[6] = ' '; p[7] = ' '; p[8] = ' '; p[9] = ' '; p[10] = 0;
+                strcat(lines[nLines++], freeStr);
+            }
+        }
+    }
     lines[nLines][0] = 0; strcat(lines[nLines], "IP        "); strcat(lines[nLines++], Net_Ip());
 
     contentH = (float)nLines * 40.0f + (float)vh;
@@ -795,9 +868,10 @@ static void RenderAbout(IDirect3DDevice8* d) {
 
 static void RenderAudio(IDirect3DDevice8* d) {
     DD_Settings* st = Data_Get();
-    char volRow[48], trkRow[64], num[8];
-    const char* rows[2];
+    char volRow[48], trkRow[64], outRow[40], ac3Row[40], dtsRow[40], num[8];
+    const char* rows[5];
     int  k;
+    int  amode = 0, aac3 = 0, adts = 0;
 
     if (s_audioPick) {
         DWORD text = Theme_Color("text", 0xFFD8F8C0);
@@ -839,9 +913,25 @@ static void RenderAudio(IDirect3DDevice8* d) {
     }
     rows[0] = volRow; rows[1] = trkRow;
 
+    /* console audio config (EEPROM-backed) */
+    Eeprom_GetAudio(&amode, &aac3, &adts);
+    strcpy(outRow, "Output    ");
+    strcat(outRow, (amode == DD_AUDIO_MONO) ? "Mono"
+        : (amode == DD_AUDIO_SURROUND) ? "Surround" : "Stereo");
+    strcpy(ac3Row, "Dolby AC3 "); strcat(ac3Row, aac3 ? "On" : "Off");
+    strcpy(dtsRow, "DTS       "); strcat(dtsRow, adts ? "On" : "Off");
+    rows[2] = outRow; rows[3] = ac3Row; rows[4] = dtsRow;
+
     Chrome(d, "AUDIO", "L/R ADJUST   A PICK   B BACK");
     DrawPedestal(d);
-    DrawConsole(d, rows, 2, s_row, 2, 0);
+    DrawConsole(d, rows, 5, s_row, 5, 0);
+    if (s_audioMsg) {
+        DWORD ok = Theme_Color("accent", 0xFF7FE000);
+        DWORD dm = Theme_Color("text_dim", 0xFF7FA060);
+        Font_DrawText(d, 60.0f, 410.0f,
+            (s_audioMsg == 1) ? "Saved -- restart games to apply" : "Save failed",
+            FONT_SIZE_SMALL, (s_audioMsg == 1) ? ok : dm, 0);
+    }
 }
 
 /*---- render: Fan (launcher-style) ------------------------------------------*/
@@ -889,7 +979,6 @@ static void RenderVideo(IDirect3DDevice8* d) {
     DD_Settings* st = Data_Get();
     char aspRow[40], resRow[40], curRow[40], ssRow[40], num[8];
     const char* rows[6];
-    int  w = Gfx_Width(), h = Gfx_Height();
 
     /* ---- Effects sub-menu: four On/Off toggles ---- */
     if (s_fxSub) {
@@ -931,10 +1020,21 @@ static void RenderVideo(IDirect3DDevice8* d) {
         IntToText(st->screensaverMin, num); strcat(ssRow, num); strcat(ssRow, " min");
     }
 
-    /* live readout of what we actually booted at */
+    /* live readout: the video STANDARD we booted, not the raw framebuffer size.
+       Gfx_VideoModeStr() reports what DarkDash actually output (480i/480p/576i/
+       720p); append the console's region (NTSC/NTSC-J/PAL) for context so the
+       user sees e.g. "480i NTSC". 1080i is shown as a capability note when the
+       display reports it (the dash itself renders at 480/720). */
     strcpy(curRow, "Output    ");
-    IntToText(w, num); strcat(curRow, num); strcat(curRow, "x");
-    IntToText(h, num); strcat(curRow, num);
+    strcat(curRow, Gfx_VideoModeStr());
+    {
+        DWORD vstd = XGetVideoStandard();
+        const char* reg =
+            (vstd == XC_VIDEO_STANDARD_NTSC_J) ? " NTSC-J" :
+            (vstd == XC_VIDEO_STANDARD_PAL_I) ? " PAL" :
+            (vstd == XC_VIDEO_STANDARD_NTSC_M) ? " NTSC" : "";
+        strcat(curRow, reg);
+    }
 
     rows[0] = aspRow; rows[1] = resRow; rows[2] = ssRow;
     rows[3] = "Calibrate Screen"; rows[4] = "Effects"; rows[5] = curRow;
@@ -973,11 +1073,34 @@ static void RenderNetwork(IDirect3DDevice8* d) {
         FmtIp(s_netDns1, ipStr); strcpy(d1Row, "DNS 1     "); strcat(d1Row, ipStr); rows[n++] = d1Row;
         FmtIp(s_netDns2, ipStr); strcpy(d2Row, "DNS 2     "); strcat(d2Row, ipStr); rows[n++] = d2Row;
     }
+    /* Pure DHCP: nothing here is editable, so instead show what the server
+       actually assigned as read-only rows (laid out by DrawConsole exactly like
+       any other row -- aligned, spaced, no overlap). They sit between Mode and
+       Apply and render dimmed/non-selectable (selectable = NetRowCount() = 2). */
+    if (s_netMode == DD_NET_DHCP) {
+        strcpy(ipRow, "IP        "); strcat(ipRow, Net_Ip());      rows[n++] = ipRow;
+        strcpy(subRow, "Mask      "); strcat(subRow, Net_Subnet());  rows[n++] = subRow;
+        strcpy(gwRow, "Gateway   "); strcat(gwRow, Net_Gateway()); rows[n++] = gwRow;
+        strcpy(d1Row, "DNS 1     "); strcat(d1Row, Net_Dns());     rows[n++] = d1Row;
+        strcpy(d2Row, "DNS 2     "); strcat(d2Row, Net_Dns2());    rows[n++] = d2Row;
+    }
     rows[n++] = "Apply";
 
     Chrome(d, "NETWORK", "L/R MODE   A EDIT/APPLY   B BACK");
     DrawPedestal(d);
-    DrawConsole(d, rows, n, s_row, n, 1);   /* Apply pinned to frame bottom */
+    {
+        /* Static / DHCP+DNS: the logical cursor maps 1:1 to array rows (all
+           selectable). Pure DHCP: only Mode (row 0) and Apply are selectable,
+           with read-only assigned-value rows in between -- so map the logical
+           Apply (s_row==1) to the LAST array row, and dim the rows between. */
+        int selArrayRow = s_row;
+        int selectable = n;
+        if (s_netMode == DD_NET_DHCP) {
+            selArrayRow = (s_row == 0) ? 0 : (n - 1);
+            selectable = 1;            /* only Mode in the in-line range... */
+        }
+        DrawConsole(d, rows, n, selArrayRow, selectable, 1);
+    }
 
     /* live readout of what's actually active right now */
     {
@@ -1027,11 +1150,11 @@ static void RenderFtp(IDirect3DDevice8* d) {
         ss = (s == 3) ? "Transferring" : (s == 2) ? "Client connected"
             : (s == 1) ? "Listening" : "Stopped";
         strcpy(line, "Status    "); strcat(line, ss);
-        Font_DrawText(d, 60.0f, 410.0f, line, FONT_SIZE_SMALL, dim, 0);
+        Font_DrawText(d, 60.0f, 400.0f, line, FONT_SIZE_SMALL, dim, 0);
         if (Ftp_IsRunning() && Net_IsUp()) {
             char ipl[48];
             strcpy(ipl, "ftp://"); strcat(ipl, Net_Ip());
-            Font_DrawText(d, 60.0f, 428.0f, ipl, FONT_SIZE_SMALL, dim, 0);
+            Font_DrawText(d, 60.0f, 418.0f, ipl, FONT_SIZE_SMALL, dim, 0);
         }
     }
 
@@ -1041,8 +1164,8 @@ static void RenderFtp(IDirect3DDevice8* d) {
 /*---- render: Clock (editable fields + Set) ---------------------------------*/
 
 static void RenderClock(IDirect3DDevice8* d) {
-    char tRow[40], moRow[32], dRow[32], yRow[32], num[8], hh[4], mm[4];
-    const char* rows[5];
+    char tRow[40], moRow[32], dRow[32], yRow[32], ntpRow[32], tzRow[64], num[8], hh[4], mm[4];
+    const char* rows[8];
 
     Pad2(s_clk.hour, hh);
     Pad2(s_clk.min, mm);
@@ -1063,19 +1186,32 @@ static void RenderClock(IDirect3DDevice8* d) {
     strcpy(dRow, "Day       "); Pad2(s_clk.day, num); strcat(dRow, num);
     strcpy(yRow, "Year      "); IntToText(s_clk.year, num); strcat(yRow, num);
 
+    strcpy(ntpRow, "Net Time  "); strcat(ntpRow, Time_NtpEnabled() ? "On" : "Off");
+    {
+        char off[12];
+        Tz_OffsetStr(Time_TzIndex(), off, sizeof(off));
+        strcpy(tzRow, "Zone  ");
+        strcat(tzRow, Tz_Name(Time_TzIndex()));
+        strcat(tzRow, "  ");
+        strcat(tzRow, off);
+    }
+
     rows[0] = tRow; rows[1] = moRow; rows[2] = dRow; rows[3] = yRow;
-    rows[4] = "Apply";
+    rows[4] = ntpRow; rows[5] = tzRow; rows[6] = "Sync Now"; rows[7] = "Apply";
 
     Chrome(d, "CLOCK", "L/R ADJUST   A SWITCH/APPLY   B BACK");
     DrawPedestal(d);
-    DrawConsole(d, rows, 5, s_row, 5, 1);   /* Apply pinned to frame bottom */
+    DrawConsole(d, rows, 8, s_row, 8, 1);   /* Apply pinned to frame bottom */
 
     if (s_clkMsg) {
         DWORD ok = Theme_Color("accent", 0xFF7FE000);
         DWORD bad = Theme_Color("text_dim", 0xFF7FA060);
-        Font_DrawText(d, 60.0f, 410.0f,
-            (s_clkMsg == 1) ? "Clock updated" : "Invalid date/time",
-            FONT_SIZE_SMALL, (s_clkMsg == 1) ? ok : bad, 0);
+        const char* m =
+            (s_clkMsg == 1) ? "Clock updated" :
+            (s_clkMsg == 3) ? "Synced from internet" :
+            (s_clkMsg == 4) ? "Sync failed -- check network" : "Invalid date/time";
+        Font_DrawText(d, 60.0f, 410.0f, m, FONT_SIZE_SMALL,
+            (s_clkMsg == 1 || s_clkMsg == 3) ? ok : bad, 0);
     }
 }
 

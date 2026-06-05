@@ -548,7 +548,14 @@ void Pedestal_DrawSaver(const Texture* icon, int isFlat, DWORD ms,
         d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
         d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
         d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
-        d->SetRenderState(D3DRS_ZENABLE, FALSE);   /* faded quad over field; no z needed */
+        /* The cube is solid 3D geometry, so it needs depth testing or its 6
+           faces blend through each other (the "see-through / all faces" look).
+           Enable Z-test+write and clear depth in this viewport for a clean
+           slate (the field/backdrop left stale depth here). The constant-alpha
+           fade still applies -- it dims the whole solid cube uniformly. */
+        d->Clear(0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
+        d->SetRenderState(D3DRS_ZENABLE, TRUE);
+        d->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
         d->SetRenderState(D3DRS_TEXTUREFACTOR, ((DWORD)fadeA << 24) | 0x00FFFFFF);
         /* color from texture; alpha from the constant factor (the fade) */
         d->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);

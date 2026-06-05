@@ -108,6 +108,43 @@ void Sys_DiskFreeStr(const char* drive, char* out, int cap) {
     }
 }
 
+/* append an MB count formatted as "N MB" (<1GB) or "N.N GB" to *out (bounded) */
+static void AppendSize(char* out, int cap, DWORD mb) {
+    char num[12];
+    if (mb < 1024) {
+        UIntToStr(mb, num, sizeof(num));
+        strncat(out, num, cap - strlen(out) - 1);
+        strncat(out, " MB", cap - strlen(out) - 1);
+    }
+    else {
+        DWORD gb = mb / 1024, dec = (mb % 1024) * 10 / 1024;
+        UIntToStr(gb, num, sizeof(num));
+        strncat(out, num, cap - strlen(out) - 1);
+        strncat(out, ".", cap - strlen(out) - 1);
+        UIntToStr(dec, num, sizeof(num));
+        strncat(out, num, cap - strlen(out) - 1);
+        strncat(out, " GB", cap - strlen(out) - 1);
+    }
+}
+
+/* "free / total" for a drive, e.g. "4.2 / 8.0 GB". "--" if the drive isn't there. */
+void Sys_DiskUsageStr(const char* drive, char* out, int cap) {
+    ULARGE_INTEGER freeToCaller, total, freeBytes;
+    if (cap <= 0) return;
+    out[0] = 0;
+    if (!GetDiskFreeSpaceExA(drive, &freeToCaller, &total, &freeBytes)) {
+        if (cap > 2) { out[0] = '-'; out[1] = '-'; out[2] = 0; }
+        return;
+    }
+    {
+        DWORD freeMB = (DWORD)(freeBytes.QuadPart / (1024ULL * 1024ULL));
+        DWORD totalMB = (DWORD)(total.QuadPart / (1024ULL * 1024ULL));
+        AppendSize(out, cap, freeMB);
+        strncat(out, " / ", cap - strlen(out) - 1);
+        AppendSize(out, cap, totalMB);
+    }
+}
+
 /*---------------------------------------------------------------------------
     Fan control -- ported verbatim from XbDiag StressTestCPU's proven model.
     PIC (SMC) at 0x20:
@@ -210,4 +247,21 @@ int Sys_SetClock(const SysClock* c) {
     if (!SystemTimeToFileTime(&st, &local))      return 0;   /* invalid date */
     if (!LocalFileTimeToFileTime(&local, &utc))  return 0;
     return NtSetSystemTime(&utc, NULL) == 0;                 /* 0 = STATUS_SUCCESS */
+}
+
+/* Set the clock from already-resolved wall-clock fields WITHOUT going through
+   LocalFileTimeToFileTime (which would re-apply the EEPROM timezone bias). NTP
+   sync uses this: it computes local time itself from UTC + the user's stored
+   offset, so we must not let the kernel's EEPROM-TZ conversion touch it again.
+   The fields are written straight as the system time. */
+int Sys_SetClockDirect(const SysClock* c) {
+    SYSTEMTIME st;
+    FILETIME   ft;
+    if (!c) return 0;
+    ZeroMemory(&st, sizeof(st));
+    st.wYear = (WORD)c->year;  st.wMonth = (WORD)c->mon;  st.wDay = (WORD)c->day;
+    st.wHour = (WORD)c->hour;  st.wMinute = (WORD)c->min;  st.wSecond = (WORD)c->sec;
+    st.wMilliseconds = 0;
+    if (!SystemTimeToFileTime(&st, &ft)) return 0;           /* invalid date */
+    return NtSetSystemTime(&ft, NULL) == 0;
 }
