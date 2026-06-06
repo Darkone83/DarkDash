@@ -39,6 +39,11 @@
 #include "dd_ntp.h"
 #include "dd_net.h"
 #include "dd_ftp.h"
+#include "dd_lcd.h"
+#include "dd_udp.h"
+#include "dd_typed.h"
+#include "dd_oxfp.h"
+#include "dd_rgb.h"
 #include "dd_screensaver.h"
 #include "xboxinternals.h"
 #include "dd_sysinfo.h"
@@ -458,7 +463,7 @@ void __cdecl main(void) {
     Calib_Apply();           /* apply saved overscan insets (zero if uncalibrated) */
     Font_Init(Gfx_Device());
     InitInput();
-    Mount_HddPartitions();   /* map C/E/F/G/X/Y/Z before anything scans them */
+    Mount_HddPartitions();   /* map C/E/F/G before anything scans them (X/Y/Z cache skipped) */
 
     /* apply the saved custom font, if any. Font_Init already loaded the baked
        Default, so a missing/bad file just leaves Default in place. */
@@ -503,6 +508,12 @@ void __cdecl main(void) {
     if (Data_Get()->ftpEnabled)
         Ftp_Want(1);
 
+    Lcd_Init();              /* physical LCD accessory: load lcd.dat, probe, splash */
+    Udp_Init();              /* shared UDP layer for DarkoneCustoms accessories */
+    TypeD_Init();            /* Type-D status broadcaster (UDP 50504)           */
+    Oxfp_Init();             /* OXFP front-panel control (UDP 32123)            */
+    Rgb_Init();              /* XBOX-RGB control (UDP 7777)                     */
+
     /* first boot: run screen calibration so the user can fix overscan up front.
        Everything it needs (font, audio, backdrop) is initialised by now. */
     if (Calib_NeedsRun()) {
@@ -539,6 +550,9 @@ void __cdecl main(void) {
         btn = GetButtons();
 
         Ftp_Tick();   /* service the FTP server every frame (single-threaded) */
+        Lcd_Tick();   /* refresh the physical LCD accessory (background service) */
+        TypeD_Tick(); /* broadcast Type-D status (background, rate-limited)       */
+        Udp_DiscoTick(); /* discover XBOX-RGB / OXFP for accessory menu gating    */
         pressed = (WORD)(btn & ~prev);
         whiteReleased = ((prev & BTN_WHITE) && !(btn & BTN_WHITE)) ? 1 : 0;
         prev = btn;
@@ -621,11 +635,11 @@ void __cdecl main(void) {
                         LAUNCH_DATA ld; ZeroMemory(&ld, sizeof(ld));
                         XLaunchNewImage("D:\\default.xbe", &ld);
                     }
-                    else if (powSel == 1) {          /* Reboot: cold power cycle */
-                        HalReturnToFirmware(RETURN_FIRMWARE_REBOOT);
+                    else if (powSel == 1) {          /* Reboot: warm reset (0x01) */
+                        Sys_Reset();
                     }
                     else {                           /* Shutdown: power off */
-                        HalReturnToFirmware(RETURN_FIRMWARE_HALT);
+                        Sys_PowerOff();
                     }
                     /* if a relaunch somehow returns, just close the menu */
                     powOpen = 0;

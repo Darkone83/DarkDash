@@ -42,6 +42,33 @@ int Fileops_IsDir(const char* path) {
     return (a != 0xFFFFFFFF) && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+int Fileops_LoadFile(unsigned char** out, size_t* outSize, const char* path) {
+    HANDLE h;
+    DWORD  sz, got = 0;
+    unsigned char* buf;
+
+    if (out) *out = NULL;
+    if (outSize) *outSize = 0;
+    if (!out || !outSize || !path) return 1;
+
+    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 1;
+    sz = GetFileSize(h, NULL);
+    if (sz == 0xFFFFFFFF) { CloseHandle(h); return 1; }
+
+    buf = (unsigned char*)malloc(sz ? sz : 1);   /* never malloc(0) */
+    if (!buf) { CloseHandle(h); return 1; }
+    if (sz && (!ReadFile(h, buf, sz, &got, NULL) || got != sz)) {
+        free(buf); CloseHandle(h); return 1;
+    }
+    CloseHandle(h);
+
+    *out = buf;
+    *outSize = (size_t)sz;
+    return 0;
+}
+
 /* ---- single file copy (blocking) ---------------------------------------- */
 
 int Fileops_CopyFile(const char* src, const char* dst) {

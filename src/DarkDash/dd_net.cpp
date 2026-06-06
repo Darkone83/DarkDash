@@ -10,6 +10,8 @@
 #include <winsockx.h>
 #include "xboxinternals.h"
 #include "dd_net.h"
+#include "dd_ftp.h"   /* FtpServ_Stop -- drop the FTP listener across a restart */
+#include "dd_udp.h"   /* Udp_Shutdown / Udp_Init -- cycle accessory discovery   */
 
 /* XNetConfigStatus / XNetConfigParams + their load/save/status externs now come
    from xboxinternals.h (winsockx.h included first for IN_ADDR). */
@@ -154,6 +156,17 @@ int         Net_LinkUp(void) { return s_link; }
 ---------------------------------------------------------------------------*/
 
 void Net_Restart(void) {
+    /* Tear down in PrometheOS order: close every service holding a socket BEFORE
+       XNetCleanup, then bring them back AFTER XNetStartup. Cleaning up the stack
+       while the FTP listener and the accessory UDP discovery sockets are still
+       open leaves them clutching dead handles bound to the destroyed stack
+       instance -- which is exactly why applying network settings used to kill
+       connectivity until a reboot. FtpServ_Stop() drops the listener without
+       clearing the user's "FTP enabled" wish, so Ftp_Tick() brings FTP back on
+       its own once the fresh DHCP lease resolves. */
+    FtpServ_Stop();
+    Udp_Shutdown();
+
     if (s_started) {
         WSACleanup();
         XNetCleanup();
@@ -162,7 +175,10 @@ void Net_Restart(void) {
     s_ip[0] = 'N'; s_ip[1] = 'o'; s_ip[2] = ' '; s_ip[3] = 'L'; s_ip[4] = 'i';
     s_ip[5] = 'n'; s_ip[6] = 'k'; s_ip[7] = 0;
     s_up = 0;
-    Net_Start();   /* re-startup: reads the freshly-saved config */
+
+    Net_Start();   /* XNetStartup + WSAStartup: reads the freshly-saved config */
+    Udp_Init();    /* re-arm accessory discovery (sockets recreate lazily)     */
+    /* FTP restarts itself via Ftp_Tick() once Net_IsUp() goes true again.     */
 }
 
 void Net_LoadConfig(int* mode, unsigned long* ip, unsigned long* mask,
@@ -192,7 +208,15 @@ int Net_ApplyConfig(int mode, unsigned long ip, unsigned long mask,
     DWORD wantIp, wantMask, wantGw, wantDns1, wantDns2;
 
     ZeroMemory(&p, sizeof(p));
-    if (XNetLoadConfigParams(&p) != 0) return 0;   /* couldn't read -> bail */
+    /* XNetLoadConfigParams returns an NTSTATUS. Only a negative value (high bit
+       set) is a real failure -- 0 is success and a positive value is an
+       informational/warning status that still fills the struct. The old test
+       (!= 0) treated those benign statuses as fatal, so Apply bailed before
+       writing while the display path (Net_LoadConfig, which ignores the status
+       entirely) kept working -- exactly the "can read net info, can't apply"
+       symptom. Mirror the display path: proceed on anything that isn't a hard
+       failure. */
+    if ((LONG)XNetLoadConfigParams(&p) < 0) return 0;   /* couldn't read -> bail */
     v2 = (p.V2_Tag == DDNET_V2_TAG);
 
     if (mode == DD_NET_STATIC) {
@@ -218,7 +242,7 @@ int Net_ApplyConfig(int mode, unsigned long ip, unsigned long mask,
     }
     p.Flag = flag;
 
-    if (XNetSaveConfigParams(&p) != 0) return 0;   /* EEPROM write refused */
+    if ((LONG)XNetSaveConfigParams(&p) < 0) return 0;   /* EEPROM write refused */
     Net_Restart();
     return 1;
 }

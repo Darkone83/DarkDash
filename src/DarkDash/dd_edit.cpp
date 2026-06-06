@@ -287,7 +287,7 @@ int Edit_IsOpen(void) { return s_open; }
 #define ED_ROW_DY    22.0f
 #define ED_FOOTER_H  34.0f
 #define ED_LINENO_W  40.0f                /* width of the line-number gutter   */
-#define ED_TEXT_W    (ED_FW - 48.0f - ED_LINENO_W)  /* interior text col width  */
+#define ED_TEXT_W    (ED_FW - 80.0f - ED_LINENO_W)  /* interior text col width (2x40 inset) */
 #define ED_PAN_STEP  48.0f                /* virtual px per L/R press          */
 
 static int VisRows(void) {
@@ -404,7 +404,10 @@ int Edit_Update(WORD pressed) {
 void Edit_Draw(IDirect3DDevice8* d) {
     const Texture* frame;
     DWORD text, dim, accent, glow;
-    float inL = ED_FX + 24.0f, inR = ED_FX + ED_FW - 24.0f;
+    /* 40px insets: the frame_menu_v chrome is ~35px thick stretched to 560 wide,
+       so the old 24px inset let the text, line numbers and the selection bar
+       bleed under the metal. 40 clears it with a small margin. */
+    float inL = ED_FX + 40.0f, inR = ED_FX + ED_FW - 40.0f;
     float rowY0 = ED_FY + ED_ROW_TOP;
     int vis, live, i, phys;
 
@@ -444,7 +447,7 @@ void Edit_Draw(IDirect3DDevice8* d) {
         if (phys < 0) break;
 
         if (visIdx == s_cursor)
-            UI_FillRect(inL - 4.0f, ry - 2.0f, (inR - inL) + 8.0f, ED_ROW_DY,
+            UI_FillRect(inL, ry - 2.0f, inR - inL, ED_ROW_DY,
                 UI_ARGB(70, 174, 255, 60));
 
         /* line number (dim) + content (clipped to interior) */
@@ -486,7 +489,7 @@ void Edit_Draw(IDirect3DDevice8* d) {
         DWORD c = dim;
         if (s_msg == 1) { hint = "Saved"; c = accent; }
         else if (s_msg == 2) { hint = "Save failed"; c = Theme_Color("text_dim", 0xFF7FA060); }
-        Font_DrawText(d, inL, ED_FY + ED_FH - 26.0f, hint, FONT_SIZE_SMALL, c, (int)(inR - inL));
+        Font_DrawTextCentered(d, inL, ED_FY + ED_FH - 26.0f, inR - inL, hint, FONT_SIZE_SMALL, c);
     }
 
     /* exit-confirm dialog */

@@ -48,24 +48,66 @@ int Sys_ReadTemps(int* cpuC, int* boardC) {
     if (SMBusRead(SMBADDR_ADM1032, 0x01, &c) && SMBusRead(SMBADDR_ADM1032, 0x00, &b)) {
         if (cpuC) *cpuC = c; if (boardC) *boardC = b; return 1;
     }
-    /* PIC/SMC fallback (rev 1.6 / Xyclops): reg 0x09 = CPU, 0x0A = board.
+    /* PIC/SMC fallback (rev 1.6 / Xyclops): CPU_TEMP (0x09) / MB_TEMP (0x0A).
        On 1.6 the board reading runs high and needs the 0.8x ambient scaling
        that the ADM1032 path doesn't (ref: PrometheOS xboxConfig). The 1.0-1.5
        PIC proxy returns the same value the ADM1032 would, so scaling it would
        be wrong there -- but this branch is only reached when the ADM1032 is
        absent, i.e. a 1.6, so applying the scale here is correct. */
-    if (SMBusRead(SMBADDR_PIC, 0x09, &c) && SMBusRead(SMBADDR_PIC, 0x0A, &b)) {
+    if (SMBusRead(SMBADDR_PIC, CPU_TEMP, &c) && SMBusRead(SMBADDR_PIC, MB_TEMP, &b)) {
         b = (BYTE)((int)b * 4 / 5);          /* 1.6 board-temp correction */
         if (cpuC) *cpuC = c; if (boardC) *boardC = b; return 1;
     }
     return 0;
 }
 
+/* Fan-read cache + cold-boot retry state (file scope, per project convention).
+   Right after a (soft) reboot the first FAN_READBACK samples can come back bad:
+   0x00 because the SMC PIC is still settling, or garbage because the Type-D
+   telemetry unit is mid-transaction on the shared SMBus. A 0x00 sails straight
+   through the 0..50 range check as a bogus "0%". So: cache the last good reading,
+   and until we've seen one, back off briefly and gently re-poll. Once a valid
+   sample latches, the slow path is never taken again (no hitches in normal use,
+   and a genuinely absent sensor can't stall the dashboard forever). */
+static int s_fanHaveGood = 0;   /* 1 once a valid 1..50 sample has been seen   */
+static int s_fanLastGood = 0;   /* last valid reading, already scaled to 0..100 */
+static int s_fanColdTries = 0;   /* cold-boot retry sequences spent (capped)     */
+
 int Sys_ReadFanPct(int* pct) {
     BYTE f = 0;
-    if (!SMBusRead(SMBADDR_PIC, 0x10, &f)) return 0;   /* 0..50 */
-    if (pct) { int p = (int)f * 2; if (p > 100) p = 100; *pct = p; }
-    return 1;
+    int  i;
+
+    /* fast path: one read, no stalling. Valid speed is 1..50 (== 2..100%);
+       0x00 / out-of-range is a bad sample, not a real "fan stopped". */
+    if (SMBusRead(SMBADDR_PIC, FAN_READBACK, &f) && f >= 1 && f <= 50) {
+        s_fanLastGood = (int)f * 2;
+        s_fanHaveGood = 1;
+        if (pct) *pct = s_fanLastGood;
+        return 1;
+    }
+
+    /* once we've had a good reading, a lone flaky sample isn't worth a hitch --
+       reuse the last good value instead of flashing 0%. */
+    if (s_fanHaveGood) {
+        if (pct) *pct = s_fanLastGood;
+        return 1;
+    }
+
+    /* no good reading yet (cold/soft boot). Wait a beat for the SMC / SMBus to
+       settle and gently re-poll. Capped so an absent sensor can't stall forever. */
+    if (s_fanColdTries < 8) {
+        s_fanColdTries++;
+        for (i = 0; i < 3; i++) {       /* up to 3 gentle re-polls */
+            Sleep(200);                 /* ~150-250ms back-off between polls */
+            if (SMBusRead(SMBADDR_PIC, FAN_READBACK, &f) && f >= 1 && f <= 50) {
+                s_fanLastGood = (int)f * 2;
+                s_fanHaveGood = 1;
+                if (pct) *pct = s_fanLastGood;
+                return 1;
+            }
+        }
+    }
+    return 0;
 }
 
 static void UIntToStr(unsigned v, char* out, int cap) {
@@ -174,6 +216,37 @@ int Sys_FanSetManual(int pct) {
     ok = SMBusWrite(SMBADDR_PIC, 0x06, raw) && ok;
     return ok;
 }
+
+/*---------------------------------------------------------------------------
+    Power control via the SMC PIC, the same way XbDiag does it (and the reason
+    its web UI reboots/shuts down reliably). HalReturnToFirmware's REBOOT/HALT
+    paths are flaky on modded boxes -- HALT in particular doesn't actually cut
+    power on most BIOSes -- so we poke the SMC command register directly:
+
+        SMBus 0x20, reg 0x02:  0x01 = warm reset,  0x40 = power cycle,
+                               0x80 = power off
+
+    The SMC acts a few dozen ms after the write, so we spin briefly afterwards
+    rather than letting the dashboard render another frame. If the bus refuses
+    the write (e.g. xemu, which has no real SMC), we fall back to the firmware
+    path so the action still happens under emulation.
+---------------------------------------------------------------------------*/
+#define SMC_REG_POWER   0x02
+#define SMC_PWR_RESET   0x01
+#define SMC_PWR_CYCLE   0x40
+#define SMC_PWR_OFF     0x80
+
+static void Sys_SmcPower(BYTE cmd, unsigned int fwFallback) {
+    if (SMBusWrite(SMBADDR_PIC, SMC_REG_POWER, cmd)) {
+        int i;
+        for (i = 0; i < 20; i++) Sleep(100);   /* ~2s; the box dies here on real HW */
+    }
+    HalReturnToFirmware(fwFallback);           /* emulator / refused-write fallback */
+}
+
+void Sys_Reset(void) { Sys_SmcPower(SMC_PWR_RESET, RETURN_FIRMWARE_REBOOT); }
+void Sys_PowerCycle(void) { Sys_SmcPower(SMC_PWR_CYCLE, RETURN_FIRMWARE_REBOOT); }
+void Sys_PowerOff(void) { Sys_SmcPower(SMC_PWR_OFF, RETURN_FIRMWARE_HALT); }
 
 /*---------------------------------------------------------------------------
     Installed RAM, megabytes. GlobalMemoryStatus reports total physical;

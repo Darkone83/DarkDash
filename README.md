@@ -49,11 +49,13 @@ footprint, leaving plenty of headroom on a stock console.
   corner. Press **START** to play it. The disc also shows up in the file manager
   as a drive, so you can browse it like any other.
 - **Power menu** — tap **WHITE** on the main menu to restart the dashboard,
-  reboot (power cycle), or shut the console down.
+  reboot the console, or shut it down.
 - **Screensaver** — after a configurable idle time, DarkDash drifts a slow
   showpiece of your cover art across the screen with a rainbow light beam. Any
   button press brings you straight back. Set the timeout (or turn it off) in
   **Settings → Video**.
+- **Sound** — DarkDash has background music and menu sound effects. Pick your
+  own music track and set the volume in **Settings → Audio**.
 - **Themes** — DarkDash is fully reskinnable. Swap colors, the glow, the
   background, the on-screen artwork, and the menu icons with drop-in theme
   folders. A theme can override as much or as little as it likes — anything it
@@ -64,8 +66,16 @@ footprint, leaving plenty of headroom on a stock console.
 - **Internet time** — DarkDash can set the clock from the internet (NTP). Turn
   it on and pick your time zone in **Settings → Clock**; it syncs on boot and
   on demand.
+- **Network** — DHCP works out of the box. If you need it, set a static IP, or
+  keep DHCP with your own DNS servers, in **Settings → Network**.
 - **FTP** — turn on the built-in FTP server to move files to and from your Xbox
   over the network.
+- **Accessories** — DarkDash can control DarkoneCustoms hardware add-ons from
+  **Settings → Accessories**: a front-panel LCD, the Type-D info module, and the
+  XBOX-RGB and OXFP lighting controllers. Connected devices are selectable; the
+  rest stay greyed out until they're found.
+- **Fan control** — let the console manage the fan automatically, or set a
+  manual fan speed, in **Settings → Fan**.
 - **Self-updating** — check for and install updates right from the Settings
   menu, with a live download progress bar, then relaunch into the new build —
   no PC required.

@@ -21,7 +21,7 @@
 #include "minimp3.h"
 
 #include "dd_audio.h"
-#include "lodepng.h"   /* lodepng_load_file: generic file -> buffer */
+#include "dd_fileops.h"  /* Fileops_LoadFile: generic file -> buffer */
 
 #define AUDIO_SND_ROOT   "D:\\audio\\snd"
 #define AUDIO_MUSIC_ROOT "D:\\audio\\music"
@@ -34,7 +34,7 @@
 static LPDIRECTSOUND        s_ds = NULL;
 static LPDIRECTSOUNDBUFFER  s_sfx[SFX_COUNT] = { 0 };
 
-static int s_dbgRead = 0;       /* files lodepng read off disk     */
+static int s_dbgRead = 0;       /* files read off disk               */
 static int s_dbgDecoded = 0;    /* files minimp3 decoded to PCM     */
 
 /* SFX files in enum order */
@@ -64,7 +64,7 @@ static int decode_mp3_file(const char* path, mp3d_sample_t** pcmOut,
 
     *pcmOut = NULL; *bytesOut = 0; *chOut = 0; *hzOut = 0;
 
-    if (lodepng_load_file(&data, &size, path) != 0 || !data || size == 0) {
+    if (Fileops_LoadFile(&data, &size, path) != 0 || !data || size == 0) {
         if (data) free(data);
         return 0;
     }
@@ -372,7 +372,7 @@ void Audio_StartMusic(int loop) {
         strncat(path, "\\bg.mp3", sizeof(path) - strlen(path) - 1);
     }
 
-    if (lodepng_load_file(&data, &size, path) != 0 || !data || size == 0) {
+    if (Fileops_LoadFile(&data, &size, path) != 0 || !data || size == 0) {
         if (data) free(data);
         return;                      /* file missing -> no music, no crash */
     }

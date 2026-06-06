@@ -29,6 +29,12 @@
 #include "dd_backdrop.h"
 #include "dd_osk.h"
 #include "dd_ftp.h"
+#include "dd_lcd.h"
+#include "dd_typed.h"
+#include "dd_udp.h"
+#include "dd_rgb.h"
+#include "dd_oxfp.h"
+#include "dd_dc.h"
 #include "dd_update.h"
 #include "dd_calib.h"
 #include "dd_select.h"
@@ -36,24 +42,25 @@
 
 /* forward decls for the download render-pump (defined after Settings_Render) */
 void Settings_Render(void);
+static void RenderAccessories(IDirect3DDevice8* d);
 static void SettingsUpdRenderPump(void);
 #include "dd_version.h"
 
-#define SET_COUNT 10
+#define SET_COUNT 11
 #define MUSIC_DIR "D:\\audio\\music"
 #define MUSIC_MAX 64
 
 enum {
     CAT_NETWORK = 0, CAT_FTP, CAT_VIDEO, CAT_AUDIO,
-    CAT_FAN, CAT_CLOCK, CAT_THEME, CAT_FONT, CAT_UPDATE, CAT_ABOUT
+    CAT_FAN, CAT_ACCESSORIES, CAT_CLOCK, CAT_THEME, CAT_FONT, CAT_UPDATE, CAT_ABOUT
 };
 
 static const char* const k_items[SET_COUNT] = {
-    "Network", "FTP", "Video", "Audio", "Fan", "Clock", "Theme", "Font", "Update", "About"
+    "Network", "FTP", "Video", "Audio", "Fan", "Accessories", "Clock", "Theme", "Font", "Update", "About"
 };
 static const char* const k_icon[SET_COUNT] = {
     "s2_020.png", "s2_018.png", "s2_005.png", "s2_004.png", "s2_010.png",
-    "s2_008.png", "s2_006.png", "s2_002.png", "s2_019.png", "s2_011.png"
+    "s2_013.png", "s2_008.png", "s2_006.png", "s2_002.png", "s2_019.png", "s2_011.png"
 };
 
 static int     s_cursor = 0;     /* category list cursor       */
@@ -100,6 +107,33 @@ static DWORD s_aboutEnter = 0;
 
 /* Video panel Effects sub-menu */
 static int s_fxSub = 0;    /* 0 = Video rows, 1 = Effects sub-menu */
+
+/* Accessories: two-level. s_accDev = -1 -> device list; else a device screen.
+   s_accRow = cursor within the active level. OXFP/RGB rows grey out and do
+   nothing when their device isn't currently detected (Udp_Present). */
+enum { ACC_DEV_LCD = 0, ACC_DEV_TYPED, ACC_DEV_RGB, ACC_DEV_OXFP, ACC_DEV_COUNT };
+static int s_accDev = -1;
+static int s_accRow = 0;
+
+/* live working values for the RGB / OXFP control screens (sent as we adjust).
+   colors are palette indices (into k_palette) so L/R scrolls presets. */
+static int s_rgbMode = 0, s_rgbBright = 128, s_rgbSpeed = 128, s_rgbIntensity = 128;
+static int s_rgbPalCount = 2;
+static int s_rgbColIx[4] = { 0, 1, 2, 3 };       /* colorA..D -> palette index  */
+
+static int s_oxfpMode = 0, s_oxfpBright = 128;
+static int s_oxfpAnim = 0, s_oxfpAnimSpeed = 128;
+static int s_oxfpStatusIx[3] = { 4, 6, 8 };      /* green/red/orange -> palette  */
+static int s_oxfpAnimIx[2] = { 0, 2 };         /* animA/animB -> palette       */
+
+/* shared preset palette the color slots scroll through (0xRRGGBB) */
+static const unsigned long k_palette[] = {
+    0xFF0000UL, 0xFF4000UL, 0xFF8000UL, 0xFFC000UL,   /* reds -> amber           */
+    0x00FF00UL, 0x00FF80UL, 0x00FFC0UL, 0x00FFFFUL,   /* greens -> cyan          */
+    0x0000FFUL, 0x4000FFUL, 0x8000FFUL, 0xFF00FFUL,   /* blues -> magenta        */
+    0xFFFFFFUL, 0xFFC0A0UL, 0x80FF00UL, 0xFFE000UL    /* white, warm, lime, gold */
+};
+#define PALETTE_COUNT ((int)(sizeof(k_palette)/sizeof(k_palette[0])))
 static int s_fxRow = 0;    /* cursor within the Effects sub-menu   */
 static const int k_fxBits[4] = { DD_FX_SCANLINES, DD_FX_SELECT, DD_FX_IDLE, DD_FX_EDGE };
 static const char* const k_fxNames[4] = { "Scanlines", "Selection FX", "Idle Motion", "Edge Flash" };
@@ -260,23 +294,70 @@ static void DrawConsole(IDirect3DDevice8* d, const char* const* rows, int count,
     float menuX = 352.0f, menuY = 48.0f, rowY0 = 96.0f, rowDY = 42.0f;
     float bottomY = menuY + 384.0f - 50.0f;   /* pinned action row, near frame foot */
     int i;
+    /* How many rows fit between rowY0 and the pinned-action row. Scrolling stays
+       a no-op when the list fits (count <= visRows) -- so existing short screens
+       are unchanged -- and only engages for tall ones like the LCD page list.
+       The pinned last row (if any) is always drawn at the foot, so it's excluded
+       from the scrolling window. */
+    int hasPin = (pinLast && count > 0) ? 1 : 0;
+    int scrollCount = count - hasPin;                 /* rows that participate in scroll */
+    /* Usable height: down to the pinned-action row when one exists, otherwise
+       all the way to the frame's bottom inset -- so screens without an action
+       row (like the LCD page list) use the whole panel instead of leaving the
+       lower half empty. */
+    float listBottom = hasPin ? bottomY : (menuY + 384.0f - 24.0f);
+    int visRows;
+    static int s_consoleScroll = 0;
+    int first;
+
+    /* Adaptive row spacing: keep the comfortable 42px default for short screens,
+       but if a screen has more rows than fit at that pitch, tighten just enough
+       to show them all in the whole frame (down to a 30px floor) rather than
+       scrolling. The LCD page list (9 rows) becomes fully visible this way. */
+    {
+        int fitAt42 = (int)((listBottom - rowY0) / rowDY);
+        if (scrollCount > fitAt42 && scrollCount > 0) {
+            float dy = (listBottom - rowY0) / (float)scrollCount;
+            if (dy < 30.0f) dy = 30.0f;
+            rowDY = dy;
+        }
+    }
+    visRows = (int)((listBottom - rowY0) / rowDY);
+    if (visRows < 1) visRows = 1;
+
+    /* keep the selected (non-pinned) row within the window */
+    if (selRow >= 0 && !(hasPin && selRow == count - 1)) {
+        if (selRow < s_consoleScroll) s_consoleScroll = selRow;
+        if (selRow >= s_consoleScroll + visRows) s_consoleScroll = selRow - visRows + 1;
+    }
+    if (s_consoleScroll > scrollCount - visRows && scrollCount > visRows) s_consoleScroll = scrollCount - visRows;
+    if (scrollCount <= visRows) s_consoleScroll = 0;
+    if (s_consoleScroll < 0) s_consoleScroll = 0;
+    first = s_consoleScroll;
 
     Iso_Begin();
     if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
     if (selRow >= 0 && (selRow < selectable || (pinLast && selRow == count - 1))) {
-        float gy = ((pinLast && selRow == count - 1) ? bottomY : rowY0 + rowDY * (float)selRow) - 6.0f;
+        float gy;
+        if (pinLast && selRow == count - 1) gy = bottomY - 6.0f;
+        else                                gy = rowY0 + rowDY * (float)(selRow - first) - 6.0f;
         Select_Begin(0x5000 + s_view, gy);
         Select_DrawGlow(menuX + 18.0f, gy, 210.0f, 34.0f, UI_ARGB(110, ar, ag, ab));
     }
     for (i = 0; i < count; i++) {
-        /* the pinned last row is always the action row (Apply/Set) -- keep it
-           bright even when it falls outside the in-line selectable range, as in
-           pure-DHCP where the rows between Mode and Apply are read-only. */
         int isAction = (pinLast && i == count - 1);
         DWORD c = (i == selRow) ? glow
             : (isAction) ? text
             : (i >= selectable) ? dim : text;
-        float ry = isAction ? bottomY : rowY0 + rowDY * (float)i;
+        float ry;
+        if (isAction) {
+            ry = bottomY;                               /* pinned at the foot */
+        }
+        else {
+            int vis = i - first;                        /* position in window */
+            if (vis < 0 || vis >= visRows) continue;    /* scrolled out of view */
+            ry = rowY0 + rowDY * (float)vis;
+        }
         Font_DrawTextIsoClip(d, menuX + 28.0f, ry + 4.0f, rows[i], FONT_SIZE_MEDIUM, c, 224.0f);
     }
     Iso_End();
@@ -302,6 +383,7 @@ static int UpdateList(WORD pressed) {
         Audio_PlaySfx(SFX_SELECT);
         s_view = s_cursor; s_row = 0; s_audioPick = 0; s_audioMsg = 0;
         s_fxSub = 0;   /* video Effects sub-menu starts closed */
+        s_accDev = -1; s_accRow = 0;   /* accessories starts at the device list */
         Select_Reset();   /* snap the highlight to the new panel's first row */
         if (s_view == CAT_CLOCK) { Sys_GetClock(&s_clk); s_clkMsg = 0; }
         if (s_view == CAT_NETWORK) {
@@ -633,6 +715,284 @@ static void UpdateClock(WORD pressed) {
     }
 }
 
+/*---- visual control rows (RGB / OXFP) : shared declarations ----------------
+   The RGB/OXFP screens build a row-descriptor list each frame so the Update and
+   Render paths agree on what each row means even though the row set is mode
+   -dependent. Declared here (above UpdateAccessories) so both can use it. */
+enum {
+    RR_MODE = 0, RR_BRIGHT, RR_SPEED, RR_INTENSITY, RR_PALCOUNT,
+    RR_COLOR,            /* a color slot; .idx = 0..3 (RGB) or status/anim slot */
+    RR_ANIMMODE, RR_ANIMSPEED, RR_ANIMCOLOR,
+    RR_IDENTIFY, RR_SAVE, RR_RESET, RR_LABEL
+};
+typedef struct { int type; int idx; const char* label; } CtrlRow;
+
+/* layout constants shared with DrawConsole's frame */
+#define CR_MENUX   352.0f
+#define CR_MENUY    48.0f
+#define CR_ROWY0    96.0f
+#define CR_LABELX  (CR_MENUX + 28.0f)
+#define CR_WIDGETX (CR_MENUX + 150.0f)   /* where bars/swatches start            */
+#define CR_WIDGETW   86.0f               /* bar / swatch width (virtual px)       */
+
+/* Build the RGB row list for the current mode. Returns row count. */
+static int BuildRgbRows(CtrlRow* r) {
+    int n = 0, cc, i;
+    r[n].type = RR_MODE;      r[n].label = "Mode";       r[n].idx = 0; n++;
+    r[n].type = RR_BRIGHT;    r[n].label = "Brightness"; r[n].idx = 0; n++;
+    r[n].type = RR_SPEED;     r[n].label = "Speed";      r[n].idx = 0; n++;
+    r[n].type = RR_INTENSITY; r[n].label = "Intensity";  r[n].idx = 0; n++;
+    cc = Rgb_ModeColorCount(s_rgbMode);
+    if (cc < 0) {             /* palette mode: choose how many of A..D to use */
+        r[n].type = RR_PALCOUNT; r[n].label = "Colors"; r[n].idx = 0; n++;
+        cc = s_rgbPalCount;
+    }
+    for (i = 0; i < cc && i < 4; i++) {
+        r[n].type = RR_COLOR; r[n].idx = i;
+        r[n].label = (i == 0) ? "Color A" : (i == 1) ? "Color B"
+            : (i == 2) ? "Color C" : "Color D";
+        n++;
+    }
+    r[n].type = RR_SAVE;  r[n].label = "Save";  r[n].idx = 0; n++;
+    r[n].type = RR_RESET; r[n].label = "Reset"; r[n].idx = 0; n++;
+    return n;
+}
+
+/* Build the OXFP row list. */
+static int BuildOxfpRows(CtrlRow* r) {
+    int n = 0;
+    r[n].type = RR_MODE;      r[n].label = "Mode";       r[n].idx = 0; n++;
+    r[n].type = RR_BRIGHT;    r[n].label = "Brightness"; r[n].idx = 0; n++;
+    r[n].type = RR_COLOR;     r[n].label = "Green";  r[n].idx = 0; n++;   /* status */
+    r[n].type = RR_COLOR;     r[n].label = "Red";    r[n].idx = 1; n++;
+    r[n].type = RR_COLOR;     r[n].label = "Orange"; r[n].idx = 2; n++;
+    r[n].type = RR_ANIMMODE;  r[n].label = "Anim";       r[n].idx = 0; n++;
+    r[n].type = RR_ANIMCOLOR; r[n].label = "Anim A"; r[n].idx = 0; n++;
+    r[n].type = RR_ANIMCOLOR; r[n].label = "Anim B"; r[n].idx = 1; n++;
+    r[n].type = RR_ANIMSPEED; r[n].label = "Anim Spd";   r[n].idx = 0; n++;
+    r[n].type = RR_IDENTIFY;  r[n].label = "Identify";   r[n].idx = 0; n++;
+    r[n].type = RR_SAVE;      r[n].label = "Save";       r[n].idx = 0; n++;
+    r[n].type = RR_RESET;     r[n].label = "Reset";      r[n].idx = 0; n++;
+    return n;
+}
+
+/*---- UpdateAccessories ------------------------------------------------------
+   Two levels: a device list (LCD / Type-D), then each device's own screen.
+   Device state/logic lives in dd_lcd / dd_typed; this is just the UI surface. */
+static void UpdateAccessories(WORD pressed) {
+    if (s_accDev < 0) {
+        if (pressed & BTN_DPAD_DOWN) { if (s_accRow < ACC_DEV_COUNT - 1) { s_accRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+        if (pressed & BTN_DPAD_UP) { if (s_accRow > 0) { s_accRow--; Audio_PlaySfx(SFX_NAV_UP); } }
+        if (pressed & BTN_A) {
+            /* Entry is always allowed. RGB/OXFP control items inside the screen
+               are only selectable when the device is detected (handled in the
+               screen itself), so you can always open the menu and SEE status. */
+            if (s_accRow == ACC_DEV_RGB) {
+                s_rgbMode = Dc_RgbMode(); s_rgbBright = Dc_RgbBright(); s_rgbSpeed = Dc_RgbSpeed();
+                s_rgbIntensity = Dc_RgbIntensity(); s_rgbPalCount = Dc_RgbPalCount();
+                s_rgbColIx[0] = Dc_RgbColor(0); s_rgbColIx[1] = Dc_RgbColor(1);
+                s_rgbColIx[2] = Dc_RgbColor(2); s_rgbColIx[3] = Dc_RgbColor(3);
+            }
+            else if (s_accRow == ACC_DEV_OXFP) {
+                s_oxfpMode = Dc_OxfpMode(); s_oxfpBright = Dc_OxfpBright();
+                s_oxfpAnim = Dc_OxfpAnim(); s_oxfpAnimSpeed = Dc_OxfpAnimSpeed();
+                s_oxfpStatusIx[0] = Dc_OxfpStatus(0); s_oxfpStatusIx[1] = Dc_OxfpStatus(1);
+                s_oxfpStatusIx[2] = Dc_OxfpStatus(2);
+                s_oxfpAnimIx[0] = Dc_OxfpAnimColor(0); s_oxfpAnimIx[1] = Dc_OxfpAnimColor(1);
+            }
+            s_accDev = s_accRow; s_accRow = 0; Audio_PlaySfx(SFX_SELECT);
+        }
+        return;
+    }
+
+    if (s_accDev == ACC_DEV_LCD) {
+        int nRows = 10;  /* Enabled, Address, Interval, Brightness, + 6 page toggles */
+        if (pressed & BTN_DPAD_DOWN) { if (s_accRow < nRows - 1) { s_accRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+        if (pressed & BTN_DPAD_UP) { if (s_accRow > 0) { s_accRow--; Audio_PlaySfx(SFX_NAV_UP); } }
+
+        if (s_accRow == 0 && (pressed & BTN_A)) {
+            Lcd_SetEnabled(!Lcd_Enabled()); Audio_PlaySfx(SFX_ALT);
+        }
+        else if (s_accRow == 1 && (pressed & (BTN_A | BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
+            Lcd_SetAddrChoice(Lcd_AddrChoice() == LCD_ADDR_3C ? LCD_ADDR_3D : LCD_ADDR_3C);
+            Audio_PlaySfx(SFX_ALT);
+        }
+        else if (s_accRow == 2 && (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
+            int iv = Lcd_IntervalMs();
+            if (pressed & BTN_DPAD_RIGHT) iv += 1000;
+            if (pressed & BTN_DPAD_LEFT)  iv -= 1000;
+            Lcd_SetIntervalMs(iv); Audio_PlaySfx(SFX_ALT);
+        }
+        else if (s_accRow == 3 && (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
+            int br = Lcd_Brightness();
+            if (pressed & BTN_DPAD_RIGHT) br += 24;
+            if (pressed & BTN_DPAD_LEFT)  br -= 24;
+            Lcd_SetBrightness(br); Audio_PlaySfx(SFX_ALT);
+        }
+        else if (s_accRow >= 4 && (pressed & BTN_A)) {
+            static const int k_pageBit[6] = {
+                LCD_PAGE_TEMPS, LCD_PAGE_MEM, LCD_PAGE_DISK,
+                LCD_PAGE_NET, LCD_PAGE_FTP, LCD_PAGE_CLOCK
+            };
+            Lcd_TogglePage(k_pageBit[s_accRow - 4]); Audio_PlaySfx(SFX_ALT);
+        }
+        return;
+    }
+
+    if (s_accDev == ACC_DEV_TYPED) {
+        if (pressed & BTN_A) { TypeD_SetEnabled(!TypeD_Enabled()); Audio_PlaySfx(SFX_ALT); }
+        return;
+    }
+
+    /* ----- XBOX-RGB screen (row-descriptor driven; matches the renderer) ----- */
+    if (s_accDev == ACC_DEV_RGB) {
+        CtrlRow rows[14]; int n = BuildRgbRows(rows);
+        int present = Udp_Present(UDP_DEV_RGB);
+        int dir = (pressed & BTN_DPAD_RIGHT) ? 1 : (pressed & BTN_DPAD_LEFT) ? -1 : 0;
+        if (s_accRow >= n) s_accRow = n - 1;
+        if (pressed & BTN_DPAD_DOWN) { if (s_accRow < n - 1) { s_accRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+        if (pressed & BTN_DPAD_UP) { if (s_accRow > 0) { s_accRow--; Audio_PlaySfx(SFX_NAV_UP); } }
+        if (!present) {                          /* inert when not detected */
+            if (pressed & (BTN_A | BTN_DPAD_LEFT | BTN_DPAD_RIGHT)) Audio_PlaySfx(SFX_BACK);
+            return;
+        }
+        {
+            const CtrlRow* rr = &rows[s_accRow];
+            switch (rr->type) {
+            case RR_MODE:
+                if (dir) {
+                    s_rgbMode = (s_rgbMode + RGB_MODE_COUNT + dir) % RGB_MODE_COUNT;
+                    Rgb_SetMode(s_rgbMode, 0); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_BRIGHT:
+                if (dir) {
+                    s_rgbBright += dir * 16; if (s_rgbBright < 0) s_rgbBright = 0; if (s_rgbBright > 255) s_rgbBright = 255;
+                    Rgb_SetBrightness(s_rgbBright, 0); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_SPEED:
+                if (dir) {
+                    s_rgbSpeed += dir * 16; if (s_rgbSpeed < 0) s_rgbSpeed = 0; if (s_rgbSpeed > 255) s_rgbSpeed = 255;
+                    Rgb_SetSpeed(s_rgbSpeed, 0); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_INTENSITY:
+                if (dir) {
+                    s_rgbIntensity += dir * 16; if (s_rgbIntensity < 0) s_rgbIntensity = 0; if (s_rgbIntensity > 255) s_rgbIntensity = 255;
+                    Rgb_SetIntensity(s_rgbIntensity, 0); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_PALCOUNT:
+                if (dir) {
+                    s_rgbPalCount += dir; if (s_rgbPalCount < 1) s_rgbPalCount = 1; if (s_rgbPalCount > 4) s_rgbPalCount = 4;
+                    Rgb_SetPaletteCount(s_rgbPalCount, 0); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_COLOR:
+                if (dir) {
+                    int* ix = &s_rgbColIx[rr->idx];
+                    *ix = (*ix + PALETTE_COUNT + dir) % PALETTE_COUNT;
+                    Rgb_SetColor(rr->idx, k_palette[*ix], 0); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_SAVE:
+                if (pressed & BTN_A) {
+                    int i, cc;
+                    Rgb_SetMode(s_rgbMode, 1); Rgb_SetBrightness(s_rgbBright, 1);
+                    Rgb_SetSpeed(s_rgbSpeed, 1); Rgb_SetIntensity(s_rgbIntensity, 1);
+                    cc = Rgb_ModeColorCount(s_rgbMode);
+                    if (cc < 0) { Rgb_SetPaletteCount(s_rgbPalCount, 1); cc = s_rgbPalCount; }
+                    for (i = 0; i < cc && i < 4; i++) Rgb_SetColor(i, k_palette[s_rgbColIx[i]], 1);
+                    Dc_SaveRgb2(s_rgbMode, s_rgbBright, s_rgbSpeed, s_rgbIntensity,
+                        s_rgbPalCount, s_rgbColIx[0], s_rgbColIx[1], s_rgbColIx[2], s_rgbColIx[3]);
+                    Audio_PlaySfx(SFX_SELECT);
+                }
+                break;
+            case RR_RESET:
+                if (pressed & BTN_A) { Rgb_Reset(); Audio_PlaySfx(SFX_ALT); }
+                break;
+            default: break;
+            }
+        }
+        return;
+    }
+
+    /* ----- OXFP screen (row-descriptor driven) ----- */
+    if (s_accDev == ACC_DEV_OXFP) {
+        CtrlRow rows[14]; int n = BuildOxfpRows(rows);
+        int present = Udp_Present(UDP_DEV_OXFP);
+        int dir = (pressed & BTN_DPAD_RIGHT) ? 1 : (pressed & BTN_DPAD_LEFT) ? -1 : 0;
+        if (s_accRow >= n) s_accRow = n - 1;
+        if (pressed & BTN_DPAD_DOWN) { if (s_accRow < n - 1) { s_accRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+        if (pressed & BTN_DPAD_UP) { if (s_accRow > 0) { s_accRow--; Audio_PlaySfx(SFX_NAV_UP); } }
+        if (!present) {
+            if (pressed & (BTN_A | BTN_DPAD_LEFT | BTN_DPAD_RIGHT)) Audio_PlaySfx(SFX_BACK);
+            return;
+        }
+        {
+            const CtrlRow* rr = &rows[s_accRow];
+            switch (rr->type) {
+            case RR_MODE:
+                if (dir) {
+                    s_oxfpMode = (s_oxfpMode + OXFP_MODE_COUNT + dir) % OXFP_MODE_COUNT;
+                    Oxfp_SetMode(s_oxfpMode); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_BRIGHT:
+                if (dir) {
+                    s_oxfpBright += dir * 16; if (s_oxfpBright < 0) s_oxfpBright = 0; if (s_oxfpBright > 255) s_oxfpBright = 255;
+                    Oxfp_SetBrightness(s_oxfpBright); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_COLOR:   /* status color: green/red/orange */
+                if (dir) {
+                    int* ix = &s_oxfpStatusIx[rr->idx];
+                    *ix = (*ix + PALETTE_COUNT + dir) % PALETTE_COUNT;
+                    Oxfp_SetStatusColor(rr->idx, k_palette[*ix]); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_ANIMMODE:
+                if (dir) {
+                    s_oxfpAnim = (s_oxfpAnim + OXFP_ANIM_COUNT + dir) % OXFP_ANIM_COUNT;
+                    Oxfp_SetAnimMode(s_oxfpAnim); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_ANIMCOLOR:
+                if (dir) {
+                    int* ix = &s_oxfpAnimIx[rr->idx];
+                    *ix = (*ix + PALETTE_COUNT + dir) % PALETTE_COUNT;
+                    Oxfp_SetAnimColor(rr->idx, k_palette[*ix]); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_ANIMSPEED:
+                if (dir) {
+                    s_oxfpAnimSpeed += dir * 16; if (s_oxfpAnimSpeed < 0) s_oxfpAnimSpeed = 0; if (s_oxfpAnimSpeed > 255) s_oxfpAnimSpeed = 255;
+                    Oxfp_SetAnimSpeed(s_oxfpAnimSpeed); Audio_PlaySfx(SFX_ALT);
+                }
+                break;
+            case RR_IDENTIFY:
+                if (pressed & BTN_A) { Oxfp_Identify(1500); Audio_PlaySfx(SFX_ALT); }
+                break;
+            case RR_SAVE:
+                if (pressed & BTN_A) {
+                    Oxfp_Save();
+                    Dc_SaveOxfp2(s_oxfpMode, s_oxfpBright, s_oxfpAnim, s_oxfpAnimSpeed,
+                        s_oxfpStatusIx[0], s_oxfpStatusIx[1], s_oxfpStatusIx[2],
+                        s_oxfpAnimIx[0], s_oxfpAnimIx[1]);
+                    Audio_PlaySfx(SFX_SELECT);
+                }
+                break;
+            case RR_RESET:
+                if (pressed & BTN_A) { Oxfp_Reset(); Audio_PlaySfx(SFX_ALT); }
+                break;
+            default: break;
+            }
+        }
+        return;
+    }
+}
+
 static void UpdateVideo(WORD pressed) {
     DD_Settings* st = Data_Get();
 
@@ -733,6 +1093,15 @@ int Settings_Update(WORD pressed, WORD held) {
     else if (s_view == CAT_FONT) UpdateFont(pressed);
     else if (s_view == CAT_THEME) UpdateTheme(pressed);
     else if (s_view == CAT_UPDATE) UpdateUpdate(pressed);
+    else if (s_view == CAT_ACCESSORIES) {
+        /* two-level: B inside a device screen returns to the device list, not
+           out to the category list -- so swallow B at that level */
+        UpdateAccessories(pressed);
+        if (s_accDev >= 0 && (pressed & BTN_B)) {
+            s_accDev = -1; s_accRow = 0; Audio_PlaySfx(SFX_BACK);
+            return 0;
+        }
+    }
 
     if (pressed & BTN_B) {
         if (s_view == CAT_AUDIO && s_audioPick) { Audio_PlaySfx(SFX_BACK); s_audioPick = 0; return 0; }
@@ -745,6 +1114,7 @@ int Settings_Update(WORD pressed, WORD held) {
             st->fanAuto = s_fanAuto; st->fanPercent = s_fanPct; Data_Save();
         }
         if (s_view == CAT_UPDATE) Upd_Cancel();   /* abort any in-flight check */
+        if (s_view == CAT_ACCESSORIES) { s_accDev = -1; s_accRow = 0; }
         s_view = -1; s_row = 0;
         Select_Reset();   /* snap back to the category list position */
     }
@@ -761,6 +1131,16 @@ static void RenderList(IDirect3DDevice8* d) {
     const Texture* menu = Theme_Asset("frame_menu_v");
     float menuX = 352.0f, menuY = 48.0f, rowY0 = 80.0f, rowDY = 34.0f;
     int i;
+    /* visible-row window: the panel interior fits ~9 rows; scroll to keep the
+       cursor in view once the list outgrows the frame (Accessories pushed it
+       to 11). */
+    int visRows = 9;
+    static int s_listScroll = 0;
+    if (s_cursor < s_listScroll) s_listScroll = s_cursor;
+    if (s_cursor >= s_listScroll + visRows) s_listScroll = s_cursor - visRows + 1;
+    if (s_listScroll < 0) s_listScroll = 0;
+    if (s_listScroll > SET_COUNT - visRows && SET_COUNT > visRows) s_listScroll = SET_COUNT - visRows;
+    if (SET_COUNT <= visRows) s_listScroll = 0;
 
     Chrome(d, "SETTINGS", "A OPEN   B BACK");
     DrawPedestal(d);
@@ -768,13 +1148,16 @@ static void RenderList(IDirect3DDevice8* d) {
     Iso_Begin();
     if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
     {
-        float gy = rowY0 + rowDY * (float)s_cursor - 6.0f;
+        float gy = rowY0 + rowDY * (float)(s_cursor - s_listScroll) - 6.0f;
         Select_Begin(0x5001, gy);
         Select_DrawGlow(menuX + 18.0f, gy, 210.0f, 32.0f, UI_ARGB(110, ar, ag, ab));
     }
-    for (i = 0; i < SET_COUNT; i++) {
-        DWORD c = (i == s_cursor) ? glow : text;
-        Font_DrawTextIso(d, menuX + 30.0f, rowY0 + rowDY * (float)i + 4.0f, k_items[i], FONT_SIZE_MEDIUM, c);
+    for (i = 0; i < visRows; i++) {
+        int idx = s_listScroll + i;
+        DWORD c;
+        if (idx >= SET_COUNT) break;
+        c = (idx == s_cursor) ? glow : text;
+        Font_DrawTextIso(d, menuX + 30.0f, rowY0 + rowDY * (float)i + 4.0f, k_items[idx], FONT_SIZE_MEDIUM, c);
     }
     Iso_End();
 }
@@ -1221,12 +1604,13 @@ static void UpdProgBar(IDirect3DDevice8* d, float x, float y, float w, float h, 
     DWORD accent = Theme_Color("accent", 0xFF7FE000);
     DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
     int   ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
+    int   dr = (int)((dim >> 16) & 0xFF), dg = (int)((dim >> 8) & 0xFF), db = (int)(dim & 0xFF);
     float fw;
     if (pct < 0) pct = 0; if (pct > 100) pct = 100;
     fw = w * (float)pct / 100.0f;
-    UI_FillRect(x, y, w, h, UI_ARGB(60, 80, 80, 80));
+    UI_FillRect(x, y, w, h, UI_ARGB(90, dr, dg, db));               /* themed track */
     if (fw > 0) UI_FillRect(x, y, fw, h, UI_ARGB(220, ar, ag, ab));
-    (void)d; (void)dim;
+    (void)d;
 }
 
 static void RenderUpdate(IDirect3DDevice8* d) {
@@ -1374,6 +1758,218 @@ static void RenderFont(IDirect3DDevice8* d) {
     }
 }
 
+/*---- visual control rows (RGB / OXFP) --------------------------------------
+   Draw helpers for the row-descriptor control screens. The CtrlRow type, the
+   RR_* enum, the layout constants, and the row builders are declared earlier
+   (above UpdateAccessories) so both the Update and Render paths can see them. */
+
+   /* a value bar: dim track + accent fill proportional to v/255 */
+static void DrawValBar(float vx, float vy, int v, int ar, int ag, int ab) {
+    float w = CR_WIDGETW, h = 12.0f;
+    float fill = (v < 0 ? 0 : v > 255 ? 255 : v) / 255.0f * w;
+    Iso_FillRect(vx, vy, w, h, UI_ARGB(90, ar, ag, ab), 0);          /* track   */
+    if (fill > 1.0f) Iso_FillRect(vx, vy, fill, h, UI_ARGB(230, ar, ag, ab), 0);
+}
+
+/* a color swatch with a thin themed border. fill is the literal LED colour
+   (that's the point of the swatch); the border uses the theme so the frame
+   around it matches whatever theme is loaded. */
+static void DrawSwatch(float vx, float vy, unsigned long rgb, DWORD border) {
+    int r = (int)((rgb >> 16) & 0xFF), g = (int)((rgb >> 8) & 0xFF), b = (int)(rgb & 0xFF);
+    float w = 40.0f, h = 14.0f;
+    Iso_FillRect(vx - 1.0f, vy - 1.0f, w + 2.0f, h + 2.0f, border, 0);
+    Iso_FillRect(vx, vy, w, h, UI_ARGB(255, r, g, b), 0);
+}
+
+/* Draw a built control-row list with value text + bars + swatches, selection
+   glow, and adaptive spacing to fit the frame (same scheme as DrawConsole). */
+static void DrawControlRows(IDirect3DDevice8* d, const CtrlRow* rows, int count,
+    int sel, int present, int isOxfp) {
+    DWORD accent = Theme_Color("accent", 0xFF7FE000);
+    DWORD text = Theme_Color("text", 0xFFD8F8C0);
+    DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
+    DWORD glow = Theme_Color("glow", 0xFFAEFF3C);
+    int   ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
+    const Texture* menu = Theme_Asset("frame_menu_v");
+    float listBottom = CR_MENUY + 384.0f - 24.0f;
+    float rowDY = 42.0f;                       /* fixed, comfortable row pitch */
+    int   fit = (int)((listBottom - CR_ROWY0) / rowDY);   /* rows that fit on screen */
+    int   first = 0;                           /* index of the first visible row */
+    int   i;
+
+    if (fit < 1) fit = 1;
+
+    /* Scroll instead of compressing: when the list is taller than the panel,
+       keep the rows at full pitch and slide the window so the selected row
+       stays in view (roughly centered, pinned at the ends). This keeps the
+       bottom rows -- Save / Reset -- reachable instead of clipping off. */
+    if (count > fit) {
+        first = sel - fit / 2;
+        if (first < 0) first = 0;
+        if (first > count - fit) first = count - fit;
+    }
+
+    Iso_Begin();
+    if (menu) Iso_DrawPanel(menu, CR_MENUX, CR_MENUY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
+
+    /* selection glow (only when present, so absent screens read as inert) */
+    if (present && sel >= 0 && sel < count) {
+        float gy = CR_ROWY0 + rowDY * (float)(sel - first) - 6.0f;
+        Select_Begin(0x5200 + s_view, gy);
+        Select_DrawGlow(CR_MENUX + 18.0f, gy, 210.0f, 30.0f, UI_ARGB(110, ar, ag, ab));
+    }
+
+    for (i = first; i < first + fit && i < count; i++) {
+        const CtrlRow* rr = &rows[i];
+        float ry = CR_ROWY0 + rowDY * (float)(i - first);
+        DWORD c = !present ? dim : (i == sel) ? glow : text;
+        unsigned long sw;
+
+        Font_DrawTextIsoClip(d, CR_LABELX, ry + 2.0f, rr->label, FONT_SIZE_MEDIUM, c, 120.0f);
+
+        switch (rr->type) {
+        case RR_MODE:
+            Font_DrawTextIsoClip(d, CR_WIDGETX, ry + 2.0f,
+                isOxfp ? Oxfp_ModeName(s_oxfpMode) : Rgb_ModeName(s_rgbMode),
+                FONT_SIZE_MEDIUM, c, 110.0f);
+            break;
+        case RR_ANIMMODE:
+            Font_DrawTextIsoClip(d, CR_WIDGETX, ry + 2.0f, Oxfp_AnimName(s_oxfpAnim),
+                FONT_SIZE_MEDIUM, c, 110.0f);
+            break;
+        case RR_BRIGHT:
+            DrawValBar(CR_WIDGETX, ry + 4.0f, isOxfp ? s_oxfpBright : s_rgbBright, ar, ag, ab);
+            break;
+        case RR_SPEED:
+            DrawValBar(CR_WIDGETX, ry + 4.0f, s_rgbSpeed, ar, ag, ab);
+            break;
+        case RR_INTENSITY:
+            DrawValBar(CR_WIDGETX, ry + 4.0f, s_rgbIntensity, ar, ag, ab);
+            break;
+        case RR_ANIMSPEED:
+            DrawValBar(CR_WIDGETX, ry + 4.0f, s_oxfpAnimSpeed, ar, ag, ab);
+            break;
+        case RR_PALCOUNT: {
+            char nb[4]; nb[0] = (char)('0' + s_rgbPalCount); nb[1] = 0;
+            Font_DrawTextIsoClip(d, CR_WIDGETX, ry + 2.0f, nb, FONT_SIZE_MEDIUM, c, 40.0f);
+            break;
+        }
+        case RR_COLOR:
+            if (isOxfp) sw = k_palette[s_oxfpStatusIx[rr->idx]];
+            else        sw = k_palette[s_rgbColIx[rr->idx]];
+            DrawSwatch(CR_WIDGETX, ry + 2.0f, sw, dim);
+            break;
+        case RR_ANIMCOLOR:
+            DrawSwatch(CR_WIDGETX, ry + 2.0f, k_palette[s_oxfpAnimIx[rr->idx]], dim);
+            break;
+        default: /* RR_SAVE / RR_RESET / RR_IDENTIFY: label only */
+            break;
+        }
+    }
+
+    /* scroll hints: a chevron when rows are hidden above / below the window */
+    if (first > 0)
+        Font_DrawTextIsoClip(d, CR_MENUX + 128.0f, CR_ROWY0 - 22.0f, "^",
+            FONT_SIZE_MEDIUM, dim, 24.0f);
+    if (first + fit < count)
+        Font_DrawTextIsoClip(d, CR_MENUX + 128.0f, listBottom - 4.0f, "v",
+            FONT_SIZE_MEDIUM, dim, 24.0f);
+
+    Iso_End();
+}
+
+/*---- RenderAccessories ------------------------------------------------------
+   Device list, or the selected device's screen. */
+static void RenderAccessories(IDirect3DDevice8* d) {
+    /* ----- device list ----- */
+    if (s_accDev < 0) {
+        const char* rows[ACC_DEV_COUNT];
+        char lcdRow[40], tdRow[40], rgbRow[40], oxRow[40];
+        /* uniform detection status across the detectable devices. LCD only
+           probes the SMBus when enabled, so when it's off we say "Off" rather
+           than claiming nothing's there. */
+        strcpy(lcdRow, "LCD       ");
+        strcat(lcdRow, !Lcd_Enabled() ? "Off" : (Lcd_IsPresent() ? "Detected" : "Not found"));
+        strcpy(tdRow, "Type-D    ");  strcat(tdRow, TypeD_Enabled() ? "On" : "Off");
+        strcpy(rgbRow, "XBOX-RGB  ");  strcat(rgbRow, Udp_Present(UDP_DEV_RGB) ? "Detected" : "Not found");
+        strcpy(oxRow, "OXFP      ");  strcat(oxRow, Udp_Present(UDP_DEV_OXFP) ? "Detected" : "Not found");
+        rows[ACC_DEV_LCD] = lcdRow;
+        rows[ACC_DEV_TYPED] = tdRow;
+        rows[ACC_DEV_RGB] = rgbRow;
+        rows[ACC_DEV_OXFP] = oxRow;
+        Chrome(d, "ACCESSORIES", "A OPEN   B BACK");
+        DrawPedestal(d);
+        DrawConsole(d, rows, ACC_DEV_COUNT, s_accRow, ACC_DEV_COUNT, 0);
+        return;
+    }
+
+    /* ----- LCD screen ----- */
+    if (s_accDev == ACC_DEV_LCD) {
+        char enRow[40], adRow[40], ivRow[40], brRow[40];
+        char pTemps[40], pMem[40], pDisk[40], pNet[40], pFtp[40], pClk[40];
+        const char* rows[10]; char num[8]; int k, pages;
+
+        strcpy(enRow, "Enabled   ");
+        if (!Lcd_Enabled())          strcat(enRow, "No");
+        else if (Lcd_IsPresent())    strcat(enRow, "Yes (detected)");
+        else                         strcat(enRow, "Yes (no panel)");
+        strcpy(adRow, "Address   "); strcat(adRow, Lcd_AddrChoice() == LCD_ADDR_3D ? "0x3D" : "0x3C");
+        k = IntToText(Lcd_IntervalMs() / 1000, num); num[k] = 's'; num[k + 1] = 0;
+        strcpy(ivRow, "Interval  "); strcat(ivRow, num);
+        k = IntToText(Lcd_Brightness() * 100 / 255, num); num[k] = '%'; num[k + 1] = 0;
+        strcpy(brRow, "Bright    "); strcat(brRow, num);
+
+        pages = Lcd_Pages();
+        strcpy(pTemps, "Temps     "); strcat(pTemps, (pages & LCD_PAGE_TEMPS) ? "On" : "Off");
+        strcpy(pMem, "Memory    "); strcat(pMem, (pages & LCD_PAGE_MEM) ? "On" : "Off");
+        strcpy(pDisk, "Disk      "); strcat(pDisk, (pages & LCD_PAGE_DISK) ? "On" : "Off");
+        strcpy(pNet, "Network   "); strcat(pNet, (pages & LCD_PAGE_NET) ? "On" : "Off");
+        strcpy(pFtp, "FTP       "); strcat(pFtp, (pages & LCD_PAGE_FTP) ? "On" : "Off");
+        strcpy(pClk, "Clock     "); strcat(pClk, (pages & LCD_PAGE_CLOCK) ? "On" : "Off");
+
+        rows[0] = enRow; rows[1] = adRow; rows[2] = ivRow; rows[3] = brRow;
+        rows[4] = pTemps; rows[5] = pMem; rows[6] = pDisk; rows[7] = pNet; rows[8] = pFtp; rows[9] = pClk;
+
+        Chrome(d, "LCD", "A TOGGLE  L/R ADJUST  B BACK");
+        DrawPedestal(d);
+        DrawConsole(d, rows, 10, s_accRow, 10, 0);
+        return;
+    }
+
+    /* ----- Type-D screen ----- */
+    if (s_accDev == ACC_DEV_TYPED) {
+        const char* rows[2];
+        char enRow[40];
+        strcpy(enRow, "Enabled   "); strcat(enRow, TypeD_Enabled() ? "Yes" : "No");
+        rows[0] = enRow;
+        rows[1] = "Sends app name over UDP";
+        Chrome(d, "TYPE-D", "A TOGGLE  B BACK");
+        DrawPedestal(d);
+        DrawConsole(d, rows, 2, s_accRow, 1, 0);
+        return;
+    }
+
+    /* ----- XBOX-RGB screen ----- */
+    if (s_accDev == ACC_DEV_RGB) {
+        CtrlRow rows[14]; int n, present = Udp_Present(UDP_DEV_RGB);
+        n = BuildRgbRows(rows);
+        Chrome(d, "XBOX-RGB", present ? "L/R ADJUST  A SELECT  B BACK" : "Not detected   B BACK");
+        DrawPedestal(d);
+        DrawControlRows(d, rows, n, s_accRow, present, 0);
+        return;
+    }
+
+    /* ----- OXFP screen ----- */
+    if (s_accDev == ACC_DEV_OXFP) {
+        CtrlRow rows[14]; int n, present = Udp_Present(UDP_DEV_OXFP);
+        n = BuildOxfpRows(rows);
+        Chrome(d, "OXFP", present ? "L/R ADJUST  A SELECT  B BACK" : "Not detected   B BACK");
+        DrawPedestal(d);
+        DrawControlRows(d, rows, n, s_accRow, present, 1);
+        return;
+    }
+}
+
 void Settings_Render(void) {
     IDirect3DDevice8* d = Gfx_Device();
     if (s_view < 0) { RenderList(d);    return; }
@@ -1387,6 +1983,7 @@ void Settings_Render(void) {
     if (s_view == CAT_FONT) { RenderFont(d);    return; }
     if (s_view == CAT_THEME) { RenderTheme(d);   return; }
     if (s_view == CAT_UPDATE) { RenderUpdate(d);  return; }
+    if (s_view == CAT_ACCESSORIES) { RenderAccessories(d); return; }
     RenderPlaceholder(d, k_items[s_view]);
 }
 

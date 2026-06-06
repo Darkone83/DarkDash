@@ -55,6 +55,12 @@ extern "C" {
     int Fileops_Exists(const char* path);      /* 1 if file or dir exists        */
     int Fileops_IsDir(const char* path);       /* 1 if exists and is a directory */
 
+    /* Slurp a whole file into a freshly malloc'd buffer (caller frees with
+       free()). Returns 0 on success, non-zero on failure. Drop-in replacement
+       for lodepng_load_file -- a generic "file -> bytes" reader with no PNG
+       dependency. *out/*outSize are set to NULL/0 on failure. */
+    int Fileops_LoadFile(unsigned char** out, size_t* outSize, const char* path);
+
     /* ---- chunked copy (one buffer per Pump, for responsive progress) -------- */
 
     typedef struct {

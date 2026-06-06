@@ -19,6 +19,7 @@
 #include "dd_audio.h"
 #include "dd_xbe.h"
 #include "dd_mount.h"
+#include "dd_lcd.h"
 #include "dd_recents.h"
 #include "dd_paths.h"
 #include "dd_browse.h"
@@ -26,7 +27,6 @@
 #include "dd_backdrop.h"
 #include "dd_pedestal.h"
 #include "dd_launcher.h"
-
 #define LAUNCH_MAX_APPS     256
 #define LAUNCH_NAME_MAX     64
 #define LAUNCH_PATH_MAX     256
@@ -42,6 +42,11 @@ static LaunchItem            s_items[LAUNCH_MAX_APPS];
 static int                   s_count = 0;
 static int                   s_cursor = 0;
 static int                   s_scroll = 0;
+/* 1 while a launcher list is the active screen. Type-D reads the highlighted
+   title via Launcher_CurrentAppName(); this flag makes that report NULL once the
+   user backs out to the main menu so Type-D shows "DarkDash" instead of the
+   stale last-highlighted title (the item arrays aren't cleared on leave). */
+static int                   s_active = 0;
 static const LauncherConfig* s_cfg = NULL;
 
 /* pedestal title image: only the selected app's image is decoded (lazy) */
@@ -164,6 +169,15 @@ int Launcher_LoadArtFor(const char* xbePath, Texture* out, int* isFlat) {
         if (Texture_LoadPNG(ph, out)) return 1;
     }
     return 0;
+}
+
+/* The highlighted title's display name (resource-pack -> XBE cert -> folder,
+   already resolved at scan time into .label). NULL if nothing is listed. */
+const char* Launcher_CurrentAppName(void) {
+    if (!s_active) return NULL;
+    if (s_count <= 0) return NULL;
+    if (s_cursor < 0 || s_cursor >= s_count) return NULL;
+    return s_items[s_cursor].label;
 }
 
 /* decode (or clear) the title image for item 'idx'; no-op if unchanged */
@@ -379,6 +393,7 @@ static void RescanCurrent(void) {
 void Launcher_Enter(const LauncherConfig* cfg) {
     s_cfg = cfg;
     s_count = 0; s_cursor = 0; s_scroll = 0;
+    s_active = 1;             /* a launcher list is now the active screen */
     if (!cfg) return;
     RescanCurrent();
     s_pedIdx = -1;
@@ -419,6 +434,7 @@ int Launcher_Update(WORD pressed, WORD held) {
         Audio_PlaySfx(SFX_BACK);
         if (s_ped.tex) Texture_Release(&s_ped);
         s_ped.tex = NULL; s_pedIdx = -1; s_pedFlat = 0;
+        s_active = 0;        /* back to main menu: stop reporting a title to Type-D */
         return 1;
     }
 
@@ -494,6 +510,10 @@ int Launcher_Update(WORD pressed, WORD held) {
             s_ped.tex = NULL; s_pedIdx = -1; s_pedFlat = 0;
             Audio_StopMusic();
             Recents_Add(s_items[s_cursor].label, s_items[s_cursor].xbePath);
+            /* paint the LCD's Now Playing screen before we hand off -- once the
+               game takes over we lose the panel, so this stays up while it runs.
+               No-op if the LCD accessory is off/absent. */
+            Lcd_NowPlaying(s_items[s_cursor].label);
             Mount_LaunchXbe(s_items[s_cursor].xbePath);
             /* fell through -> launch failed; carry on so the menu stays usable */
         }

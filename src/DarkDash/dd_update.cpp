@@ -14,6 +14,7 @@
 #include <winsockx.h>
 #include "xboxinternals.h"
 #include "dd_update.h"
+#include "dd_net.h"     /* shared network-stack owner -- do NOT XNetStartup here */
 #include "xba.h"
 
 /* ---- config ----------------------------------------------------------- */
@@ -165,13 +166,14 @@ static int        s_changelogReady = 0;
 /* ---- socket / net plumbing -------------------------------------------- */
 
 static void NetEnsure(void) {
-    XNetStartupParams xnsp; WSADATA wsa;
+    /* Use the SHARED stack owned by dd_net -- never run a second XNetStartup
+       here. XNetStartup is reference-counted: a duplicate startup from the
+       updater meant Net_Restart()'s single XNetCleanup could only drop the count
+       to 1, so the stack never actually tore down and an in-place network
+       re-config silently failed (FTP/UDP couldn't rebind until a full relaunch).
+       Net_Start() is idempotent, so this just guarantees the stack is up. */
     if (s_netUp) return;
-    ZeroMemory(&xnsp, sizeof(xnsp));
-    xnsp.cfgSizeOfStruct = sizeof(xnsp);
-    xnsp.cfgFlags = XNET_STARTUP_BYPASS_SECURITY;
-    XNetStartup(&xnsp);
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+    Net_Start();
     s_netUp = 1;
 }
 static void CloseSock(void) {

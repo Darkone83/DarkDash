@@ -149,13 +149,24 @@ void Synopsis_Open(const char* xbePath) {
     }
     if (!s_title[0]) SCopy(s_title, sizeof(s_title), "(untitled)");
 
-    /* load the box art (JPG): front = poster.jpg, back = alt_synopsis.jpg */
+    /* Load the box art. XBMC4Gamers packs ship JPG (poster.jpg / alt_synopsis.jpg),
+       usually progressive -- which stb_image (dd_stbi.c) now decodes natively, so
+       no conversion is needed. We still try the JPG first, then fall back to a PNG
+       of the same name (poster.png / alt_synopsis.png); stb handles both. */
     TitleFolder(xbePath, folder, sizeof(folder));
     JoinPath(path, sizeof(path), folder, "_resources\\artwork\\poster.jpg");
     s_havePoster = Texture_LoadJPEG(path, &s_poster) ? 1 : 0;
+    if (!s_havePoster) {
+        JoinPath(path, sizeof(path), folder, "_resources\\artwork\\poster.png");
+        s_havePoster = Texture_LoadPNG(path, &s_poster) ? 1 : 0;
+    }
 
     JoinPath(path, sizeof(path), folder, "_resources\\artwork\\alt_synopsis.jpg");
     s_haveBack = Texture_LoadJPEG(path, &s_back) ? 1 : 0;
+    if (!s_haveBack) {
+        JoinPath(path, sizeof(path), folder, "_resources\\artwork\\alt_synopsis.png");
+        s_haveBack = Texture_LoadPNG(path, &s_back) ? 1 : 0;
+    }
 
     s_view = 0;
     s_scroll = 0.0f;
@@ -186,10 +197,15 @@ int Synopsis_Update(WORD pressed) {
     if (pressed & BTN_DPAD_LEFT) { if (s_view != 0) { s_view = 0; Audio_PlaySfx(SFX_ALT); } }
     if (pressed & BTN_DPAD_RIGHT) { if (s_view != 1 && s_haveBack) { s_view = 1; Audio_PlaySfx(SFX_ALT); } }
 
-    /* text scroll: left analog stick (smooth) + D-pad up/down (step) */
+    /* text scroll: analog stick (smooth, proportional) + D-pad up/down (step).
+       Use whichever stick is being pushed (left preferred, right as fallback) so
+       it responds regardless of which one the user reaches for, and scale the
+       speed by deflection so a gentle push creeps and a full push flies. */
     GetSticks(lx, ly, rx, ry);
-    if (ly > 8000)  s_scroll -= 6.0f;       /* stick up -> scroll toward top   */
-    if (ly < -8000) s_scroll += 6.0f;       /* stick down -> scroll down       */
+    {
+        int v = (ly != 0) ? ly : ry;        /* +up / -down, deadzoned upstream */
+        if (v != 0) s_scroll -= (float)v / 2600.0f;   /* up -> toward top */
+    }
     if (pressed & BTN_DPAD_DOWN) { s_scroll += 24.0f; Audio_PlaySfx(SFX_NAV_DOWN); }
     if (pressed & BTN_DPAD_UP) { s_scroll -= 24.0f; Audio_PlaySfx(SFX_NAV_UP); }
 
@@ -260,15 +276,19 @@ static float OverviewLayout(IDirect3DDevice8* d, float ovX, float ovY, float ovW
 void Synopsis_Draw(IDirect3DDevice8* d) {
     const Texture* frame;
     DWORD text, glow, dim, accent;
-    /* frame_menu_v has thick chrome: ~34px top, ~26px bottom, ~24px sides
-       (insets proven in dd_browse). All content lives inside these. */
+    /* frame_menu_v has thick chrome: ~34px top, ~26px bottom. The asset is ~272
+       wide but we stretch it to 560 here, so its side borders render ~2x wider
+       than in dd_browse -- the old 24px side inset sat inside that chrome, which
+       jammed the artwork and footer against the border. Use a wider side inset
+       so content clears the stretched chrome. */
     float fx = 40.0f, fy = 48.0f, fw = 560.0f, fh = 384.0f;
-    float inL = fx + 24.0f;                 /* left interior edge   */
-    float inR = fx + fw - 24.0f;            /* right interior edge  */
+    float inL = fx + 32.0f;                 /* left interior edge   */
+    float inR = fx + fw - 32.0f;            /* right interior edge  */
     float inT = fy + 34.0f;                 /* top interior edge    */
     float inB = fy + fh - 26.0f;            /* bottom interior edge */
     float px, py, pw, ph;                   /* image rect (left)    */
     float rx, ry, rRight;                   /* text column (right)  */
+    float labelW;                           /* fact-label column width */
     const Texture* img;
     int   haveImg;
 
@@ -280,7 +300,11 @@ void Synopsis_Draw(IDirect3DDevice8* d) {
     dim = Theme_Color("text_dim", 0xFF7FA060);
     frame = Theme_Asset("frame_menu_v");
 
-    UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(180, 0, 0, 0));
+    {
+        DWORD bg = Theme_Color("bg", 0xFF060A08);
+        int br = (int)((bg >> 16) & 0xFF), bgg = (int)((bg >> 8) & 0xFF), bb = (int)(bg & 0xFF);
+        UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(180, br / 3, bgg / 3, bb / 3));
+    }
     if (frame) UI_DrawSprite(frame, fx, fy, fw, fh, 0xFFFFFFFF, 0);
 
     /* ---- left: cover image (front poster.jpg / back alt_synopsis.jpg) ---- */
@@ -288,7 +312,7 @@ void Synopsis_Draw(IDirect3DDevice8* d) {
        inside the interior with margin, preserving that aspect. */
     pw = 170.0f;
     ph = pw * 512.0f / 362.0f;              /* ~240px, portrait              */
-    px = inL + 6.0f;
+    px = inL + 8.0f;                        /* leftmost spot that still clears the chrome (no butting) */
     py = inT + 6.0f;
     if (py + ph > inB - 16.0f) ph = (inB - 16.0f) - py;   /* never exceed interior */
 
@@ -298,7 +322,9 @@ void Synopsis_Draw(IDirect3DDevice8* d) {
         UI_DrawSprite(img, px, py, pw, ph, 0xFFFFFFFF, 0);
     }
     else {
-        UI_FillRect(px, py, pw, ph, UI_ARGB(90, 20, 30, 20));
+        DWORD bg = Theme_Color("bg", 0xFF060A08);
+        int br = (int)((bg >> 16) & 0xFF), bgg = (int)((bg >> 8) & 0xFF), bb = (int)(bg & 0xFF);
+        UI_FillRect(px, py, pw, ph, UI_ARGB(90, br * 70 / 100, bgg * 70 / 100, bb * 70 / 100));
         Font_DrawTextCentered(d, px + pw * 0.5f, py + ph * 0.5f - 8.0f, pw,
             s_view == 1 ? "No Back Art" : "No Art", FONT_SIZE_SMALL, dim);
     }
@@ -321,16 +347,27 @@ void Synopsis_Draw(IDirect3DDevice8* d) {
         (int)(rRight - rx));
     ry += 28.0f;
 
-    ry = FactLine(d, rx, ry, 74.0f, "Developer", s_dev, rRight, dim, text);
-    ry = FactLine(d, rx, ry, 74.0f, "Publisher", s_pub, rRight, dim, text);
-    ry = FactLine(d, rx, ry, 74.0f, "Genre", s_genre, rRight, dim, text);
+    /* label column width: widest fact label + a small gap, so the value column
+       always clears the label instead of overlapping it (the old fixed 74px was
+       narrower than "Developer"/"Publisher" render at, so values rode into the
+       label text). */
+    {
+        int wDev = Font_MeasureText("Developer", FONT_SIZE_SMALL);
+        int wPub = Font_MeasureText("Publisher", FONT_SIZE_SMALL);
+        int wMax = (wDev > wPub) ? wDev : wPub;
+        labelW = (float)wMax + 12.0f;
+    }
+
+    ry = FactLine(d, rx, ry, labelW, "Developer", s_dev, rRight, dim, text);
+    ry = FactLine(d, rx, ry, labelW, "Publisher", s_pub, rRight, dim, text);
+    ry = FactLine(d, rx, ry, labelW, "Genre", s_genre, rRight, dim, text);
     {
         char line[SYN_FLD_MAX];
         int n = 0, i;
         line[0] = 0;
-        if (s_esrb[0]) { const char* L = "ESRB "; for (i = 0; L[i]; i++)line[n++] = L[i]; for (i = 0; s_esrb[i] && n < SYN_FLD_MAX - 2; i++)line[n++] = s_esrb[i]; }
-        if (s_year[0]) { if (n) { line[n++] = ' '; line[n++] = ' '; } { const char* L = "Year "; for (i = 0; L[i]; i++)line[n++] = L[i]; } for (i = 0; s_year[i] && n < SYN_FLD_MAX - 2; i++)line[n++] = s_year[i]; }
-        if (s_rating[0]) { if (n) { line[n++] = ' '; line[n++] = ' '; } { const char* L = "Rating "; for (i = 0; L[i]; i++)line[n++] = L[i]; } for (i = 0; s_rating[i] && n < SYN_FLD_MAX - 2; i++)line[n++] = s_rating[i]; }
+        if (s_esrb[0]) { const char* L = "ESRB "; for (i = 0; L[i] && n < SYN_FLD_MAX - 2; i++)line[n++] = L[i]; for (i = 0; s_esrb[i] && n < SYN_FLD_MAX - 2; i++)line[n++] = s_esrb[i]; }
+        if (s_year[0]) { if (n && n < SYN_FLD_MAX - 3) { line[n++] = ' '; line[n++] = ' '; } { const char* L = "Year "; for (i = 0; L[i] && n < SYN_FLD_MAX - 2; i++)line[n++] = L[i]; } for (i = 0; s_year[i] && n < SYN_FLD_MAX - 2; i++)line[n++] = s_year[i]; }
+        if (s_rating[0]) { if (n && n < SYN_FLD_MAX - 3) { line[n++] = ' '; line[n++] = ' '; } { const char* L = "Rating "; for (i = 0; L[i] && n < SYN_FLD_MAX - 2; i++)line[n++] = L[i]; } for (i = 0; s_rating[i] && n < SYN_FLD_MAX - 2; i++)line[n++] = s_rating[i]; }
         line[n] = 0;
         if (n > 0) { Font_DrawText(d, rx, ry, line, FONT_SIZE_SMALL, glow, (int)(rRight - rx)); ry += 24.0f; }
     }
@@ -366,9 +403,10 @@ void Synopsis_Draw(IDirect3DDevice8* d) {
         }
     }
 
-    /* footer hint, inside the interior bottom */
-    Font_DrawText(d, inL, inB - 2.0f,
+    /* footer hint -- centered in the frame interior. Font_DrawTextCentered takes
+       the box's LEFT edge (cx) + width, so cx=inL centers it across [inL,inR]. */
+    Font_DrawTextCentered(d, inL, inB - 2.0f, inR - inL,
         s_haveBack ? "L/R FRONT/BACK   STICK/UP-DN SCROLL   B CLOSE"
         : "STICK/UP-DN SCROLL   B CLOSE",
-        FONT_SIZE_SMALL, dim, (int)(inR - inL));
+        FONT_SIZE_SMALL, dim);
 }

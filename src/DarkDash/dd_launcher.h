@@ -30,4 +30,10 @@ void Launcher_Render(void);                        /* draw the screen      */
    Caller owns 'out' and must Texture_Release it. */
 int  Launcher_LoadArtFor(const char* xbePath, Texture* out, int* isFlat);
 
+/* The display name of the currently highlighted title -- already resolved by
+   the launcher as resource-pack title -> XBE certificate title -> folder name.
+   Returns NULL if no list is loaded / nothing highlighted, so callers can fall
+   back (e.g. to "DarkDash"). */
+const char* Launcher_CurrentAppName(void);
+
 #endif /* DD_LAUNCHER_H */

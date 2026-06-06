@@ -27,9 +27,6 @@
     <ClCompile Include="input.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="lodepng.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="dd_gfx.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -153,9 +150,6 @@
     <ClCompile Include="dd_ntp.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="picojpeg.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="dd_preview.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -163,6 +157,27 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="dd_edit.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_lcd.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_dc.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_typed.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_udp.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_rgb.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_oxfp.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_stbi.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -179,9 +194,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="input.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="lodepng.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="dd_gfx.h">
@@ -313,9 +325,6 @@
     <ClInclude Include="dd_ntp.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="picojpeg.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="dd_preview.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -323,6 +332,30 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="dd_edit.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_lcd.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_dc.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_typed.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_udp.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_rgb.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_oxfp.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="stb_image.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_stbi.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

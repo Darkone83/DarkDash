@@ -27,11 +27,18 @@ static const DriveMap k_drives[] = {
     { "Z", "\\Device\\Harddisk0\\Partition5" }
 };
 
+/* Bind every entry in k_drives[]. C/E/F/G are the user partitions; X/Y/Z are
+   the game-cache partitions. We mount them all (the faithful XbDiag behaviour) --
+   they're real volumes the user may legitimately browse, and an absent one
+   (e.g. F:/G: on a stock drive) just symlinks to a device that isn't there, so
+   FindFirstFile fails harmlessly and the scan skips it. */
+#define DD_MOUNT_COUNT  ((int)(sizeof(k_drives) / sizeof(k_drives[0])))
+
 void Mount_HddPartitions(void) {
     char linkBuf[8];
     int  i, devLen;
 
-    for (i = 0; i < 7; ++i) {
+    for (i = 0; i < DD_MOUNT_COUNT; ++i) {
         const char* dev = k_drives[i].device;
 
         /* "\??\X:" -- 6 chars, plus NUL */
@@ -44,7 +51,16 @@ void Mount_HddPartitions(void) {
         {
             XBOX_STRING sLink = { 6, 7, linkBuf };
             XBOX_STRING sDev = { (USHORT)devLen, (USHORT)(devLen + 1), (char*)dev };
-            IoCreateSymbolicLink(&sLink, &sDev);   /* 0xC0000035 = already mounted; ignore */
+            /* Delete any existing mapping first, then create ours. Cerbios and
+               other loaders may leave E:/F:/G: pointing at the wrong device (or
+               unmapped), and a bare IoCreateSymbolicLink on an already-bound
+               letter returns 0xC0000035 and is ignored -- so without the delete
+               the stale/missing mapping wins and only C: (which the kernel binds
+               for us) ever resolves. Deleting first makes our known-good
+               partition map authoritative. A delete on an unbound letter just
+               fails harmlessly. */
+            IoDeleteSymbolicLink(&sLink);
+            IoCreateSymbolicLink(&sLink, &sDev);
         }
     }
 }

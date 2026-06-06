@@ -6,7 +6,7 @@
 #include <string.h>
 #include "dd_theme.h"
 #include "dd_texture.h"
-#include "lodepng.h"   /* lodepng_load_file: generic file -> buffer */
+#include "dd_fileops.h"  /* Fileops_LoadFile: generic file -> buffer */
 
 #define UI_BG_DEFAULT 0xFF060A06   /* matches palette bg 060A06 */
 #define INI_MAX     128
@@ -138,7 +138,7 @@ int Theme_Load(const char* themeRoot) {
     strncpy(path, s_root, sizeof(path) - 1); path[sizeof(path) - 1] = 0;
     strncat(path, "\\theme.ini", sizeof(path) - strlen(path) - 1);
 
-    if (lodepng_load_file(&buf, &sz, path) != 0 || !buf || sz == 0) {
+    if (Fileops_LoadFile(&buf, &sz, path) != 0 || !buf || sz == 0) {
         if (buf) free(buf);
         return 0;
     }

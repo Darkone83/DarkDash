@@ -17,6 +17,14 @@ void Sys_DiskUsageStr(const char* drive, char* out, int cap); /* "4.2 / 8.0 GB" 
 int         Sys_FanAuto(void);
 int         Sys_FanSetManual(int pct);
 
+/* Power control via the SMC PIC (reliable on modded boxes, unlike the firmware
+   HALT/REBOOT paths). These do not return on real hardware -- the SMC cuts power
+   or resets shortly after the call. Reset = warm reboot, PowerCycle = cold off/on,
+   PowerOff = shutdown. */
+void        Sys_Reset(void);
+void        Sys_PowerCycle(void);
+void        Sys_PowerOff(void);
+
 int         Sys_RamMB(void);          /* 64 or 128 (detected)            */
 int         Sys_RamFreeMB(void);      /* free physical RAM right now, MB  */
 
