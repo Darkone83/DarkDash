@@ -89,6 +89,8 @@ int Data_Load(void) {
     if (s_set.ftpUser[0] == '\0') lstrcpynA(s_set.ftpUser, "xbox", DD_FTP_CRED_MAX);
     if (s_set.ftpPass[0] == '\0') lstrcpynA(s_set.ftpPass, "xbox", DD_FTP_CRED_MAX);
     s_set.musicPath[DD_MUSIC_PATH_MAX - 1] = '\0';
+    if (s_set.musicMode < DD_MUSIC_NORMAL || s_set.musicMode > DD_MUSIC_SHUFFLE)
+        s_set.musicMode = DD_MUSIC_NORMAL;
     /* fxFlags lived in the old reserved (zero) region; a stored 0 means "never
        set" -> default to all effects on rather than silently-all-off. */
     if (s_set.fxFlags == 0) s_set.fxFlags = DD_FX_DEFAULT;

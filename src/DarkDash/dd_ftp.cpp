@@ -1196,15 +1196,25 @@ void FtpServ_Tick()
     if ((g_ftp.state == FTP_CONNECTED || g_ftp.state == FTP_TRANSFER) &&
         g_ftp.listenSock != INVALID_SOCKET)
     {
-        SOCKADDR_IN ca; int caLen = sizeof(ca);
-        SOCKET cs = accept(g_ftp.listenSock, (SOCKADDR*)&ca, &caLen);
-        if (cs != INVALID_SOCKET)
+        // Drain ALL pending secondary connections this tick (FileZilla may open
+        // several at once). The accepted socket INHERITS the listen socket's
+        // non-blocking mode, so a plain send() can return WSAEWOULDBLOCK and the
+        // 421 never goes out before we close -- FileZilla then sees an abortive
+        // close and reports a failed session instead of reusing the existing one.
+        // Force the socket blocking and linger-on-close so the reply is actually
+        // delivered, then FileZilla falls back to the single live session.
+        const char* k_busy = "421 Only one session permitted.\r\n";
+        int len = 0; while (k_busy[len]) len++;
+        for (;;)
         {
-            // Send 421 synchronously — this socket is about to be closed so we
-            // can't rely on the async send-drain. Use a direct blocking send.
-            // The message is short enough to fit in one TCP segment.
-            const char* k_busy = "421 Only one session permitted.\r\n";
-            int len = 0; while (k_busy[len]) len++;
+            SOCKADDR_IN ca; int caLen = sizeof(ca);
+            SOCKET cs = accept(g_ftp.listenSock, (SOCKADDR*)&ca, &caLen);
+            struct linger lg;
+            u_long blk = 0;
+            if (cs == INVALID_SOCKET) break;
+            ioctlsocket(cs, FIONBIO, &blk);                 /* -> blocking          */
+            lg.l_onoff = 1; lg.l_linger = 1;                /* flush on close       */
+            setsockopt(cs, SOL_SOCKET, SO_LINGER, (const char*)&lg, sizeof(lg));
             send(cs, k_busy, len, 0);
             closesocket(cs);
         }

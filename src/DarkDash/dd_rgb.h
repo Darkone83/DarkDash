@@ -37,6 +37,22 @@ extern "C" {
     int  Rgb_SetColorA(unsigned long rgb, int save);   /* kept: colorA convenience */
     int  Rgb_Reset(void);
 
+    /* ---- live config read-back -------------------------------------------- */
+    /* Ask the device to report its current config (reply lands in dd_udp's
+       capture buffer; poll it with Udp_LastReply, then Rgb_ParseConfig). */
+    int  Rgb_RequestConfig(void);
+
+    /* Parsed snapshot of an XBOX-RGB "get" reply (fields live under "cfg").
+       Absent fields are left as -1; colors are packed 0xRRGGBB. */
+    typedef struct {
+        int  mode, brightness, speed, intensity, paletteCount;
+        long colorA, colorB, colorC, colorD;
+    } RgbDevCfg;
+
+    /* Parse a captured datagram. Returns 1 if it looked like an RGB config reply
+       (at least one known field found), 0 otherwise. */
+    int  Rgb_ParseConfig(const char* json, int len, RgbDevCfg* out);
+
     /* how many of colorA..D a given mode actually uses:
          0  = generated (Rainbow/Plasma/Fire/Custom) -- no editable colors
          1,2 = fixed count (e.g. Solid=1, ClockSpin=2)

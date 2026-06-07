@@ -29,17 +29,41 @@ static int SMBusWrite(BYTE addr, BYTE reg, BYTE val) {
     return HalWriteSMBusValue(addr, reg, FALSE, (DWORD)val) == 0;
 }
 
-void Sys_Init(void) {
+/* Kernel-arbitrated PCI config access (safer than raw 0xCF8/0xCFC port I/O,
+   which shares the config-address register with the kernel). SlotNumber packs
+   dev[4:0]<<5 | func[2:0] -- the PCI_SLOT_NUMBER format. */
+extern "C" VOID __stdcall HalReadWritePCISpace(
+    ULONG BusNumber, ULONG SlotNumber, ULONG RegisterNumber,
+    PVOID Buffer, ULONG Length, BOOLEAN WritePCISpace);
+
+static DWORD PciRead32(BYTE bus, BYTE dev, BYTE func, BYTE reg) {
+    DWORD val = 0;
+    ULONG slot = (((ULONG)dev & 0x1F) << 5) | ((ULONG)func & 0x07);
+    HalReadWritePCISpace(bus, slot, reg, &val, sizeof(val), FALSE);
+    return val;
+}
+
+/* Xbox reference crystal: 16.666... MHz, feeds both the CPUMPLL FSB and the
+   NV2A NVPLL. Written as the repeating decimal to match the reference impls. */
+static const double XTAL_HZ = 16666666.6667;
+
+void Sys_SmbusReset(void) {
     /* W1C-clear the nForce SMBus global status, releasing any stuck/in-progress
-       transaction (softmod payloads can leave one pending). Without this the
-       kernel's SMBus retry loop can spin forever -> dashboard hang. No-op when
-       the controller is already idle. */
+       transaction (softmod payloads can leave one pending; an overclocked box
+       with secondary SMBus masters -- Type-D/OXFP -- can also leave the bus
+       mid-transaction). Without this the kernel's SMBus retry loop can spin
+       forever -> dashboard hang, or a probe falsely reads "absent". No-op when
+       the controller is already idle. Mirror of XbDiag's SMBusControllerReset. */
     __asm {
         mov dx, 0xC000
         mov al, 0xFF
         out dx, al
     }
     KeStallExecutionProcessor(2000);   /* let the bus settle (PIC/ADM <100us) */
+}
+
+void Sys_Init(void) {
+    Sys_SmbusReset();
 }
 
 int Sys_ReadTemps(int* cpuC, int* boardC) {
@@ -279,12 +303,138 @@ int Sys_RamFreeMB(void) {
         Xcalibur          @ 0xE0  -> 1.6 / 1.6b
     Returns a short human string; "Unknown" if none answer.
 ---------------------------------------------------------------------------*/
-const char* Sys_XboxRevision(void) {
-    BYTE v;
-    if (SMBusRead(0x8A, 0x00, &v)) return "1.0 - 1.1 (Conexant)";
-    if (SMBusRead(0xD4, 0x00, &v)) return "1.2 - 1.5 (Focus)";
-    if (SMBusRead(0xE0, 0x00, &v)) return "1.6 (Xcalibur)";
+static const char* RevisionDetect(void) {
+    BYTE c0 = 0, c1 = 0, c2 = 0, enc = 0;
+    char ver[4];
+
+    /* Clear any stuck bus first so the PIC reads are reliable on overclocked /
+       softmod hardware (same reason XbDiag resets before probing). */
+    Sys_SmbusReset();
+
+    /* The SMC/PIC reports its build string one character per read of reg 0x01,
+       cycling its internal pointer -- so the three chars can arrive at any
+       rotation. Read three, then match every rotation of each known pattern.
+       (method: PrometheOS xboxConfig::getXboxVersion) */
+    SMBusRead(SMBADDR_PIC, 0x01, &c0);
+    SMBusRead(SMBADDR_PIC, 0x01, &c1);
+    SMBusRead(SMBADDR_PIC, 0x01, &c2);
+    ver[0] = (char)c0; ver[1] = (char)c1; ver[2] = (char)c2; ver[3] = 0;
+
+    if (!strcmp(ver, "01D") || !strcmp(ver, "D01") ||
+        !strcmp(ver, "1D0") || !strcmp(ver, "0D1")) return "DevKit";
+    if (!strcmp(ver, "DBG") || !strcmp(ver, "B11")) return "DebugKit";
+    if (!strcmp(ver, "P01")) return "1.0";
+    if (!strcmp(ver, "P05")) return "1.1";
+    if (!strcmp(ver, "P11") || !strcmp(ver, "1P1") || !strcmp(ver, "11P")) {
+        /* 1.2/1.3 share the PIC string with 1.4/1.5; the Focus encoder (0xD4)
+           only exists on 1.4/1.5, so its presence disambiguates. */
+        if (SMBusRead(0xD4, 0x00, &enc)) return "1.4 / 1.5";
+        return "1.2 / 1.3";
+    }
+    if (!strcmp(ver, "P2L")) {
+        /* 1.6 vs 1.6b: NV2A RAM strap (EMRS) bits 18-19 == 3 -> Hynix (1.6b),
+           else Samsung (1.6). */
+        unsigned long strap = ((*((volatile unsigned long*)0xFD101000)) & 0x000C0000UL) >> 18;
+        return (strap == 3) ? "1.6b" : "1.6";
+    }
+
+    /* PIC string unrecognized (e.g. an unusual SMC) -- fall back to the encoder
+       heuristic so we still report a sensible range. */
+    if (SMBusRead(0x8A, 0x00, &enc)) return "1.0 - 1.1 (Conexant)";
+    if (SMBusRead(0xD4, 0x00, &enc)) return "1.2 - 1.5 (Focus)";
+    if (SMBusRead(0xE0, 0x00, &enc)) return "1.6 (Xcalibur)";
     return "Unknown";
+}
+
+/* These hardware facts never change at runtime, and the detect paths touch the
+   SMBus (incl. a settling stall), so compute once and cache -- the About screen
+   rebuilds its text every frame and must not re-probe (or stall) each time. */
+const char* Sys_XboxRevision(void) {
+    static const char* s_rev = 0;
+    if (!s_rev) s_rev = RevisionDetect();
+    return s_rev;
+}
+
+/* ---- CPU / GPU clock (PLL-based; reads the real rate, OC included) --------
+   The displayed speed used to be a hardcoded "733 MHz", so an overclock never
+   showed. These read the actual PLL configuration instead of assuming stock.
+   (method: XbDiag SysInfo / StressTestCPU, which matches PrometheOS.) */
+
+   /* MSR 0x2A bits [27:22] (masked 0x2F) = the CPU core ratio index the CPU writes
+      during init -- authoritative even on Tualatin upgrades where the bootloader
+      CPUCTL value may be stale. Returns ratio x10 (e.g. 55 == 5.5x), 0 if unknown. */
+static DWORD CpuRatioX10FromMsr(DWORD msr_lo) {
+    BYTE pat = (BYTE)((msr_lo >> 22) & 0x2F);
+    switch (pat) {
+    case 0x01: return 30;  case 0x05: return 35;  case 0x02: return 40;
+    case 0x06: return 45;  case 0x00: return 50;  case 0x04: return 55;
+    case 0x0B: return 60;  case 0x0F: return 65;  case 0x09: return 70;
+    case 0x0D: return 75;  case 0x0A: return 80;  case 0x26: return 85;
+    case 0x20: return 90;  case 0x24: return 95;  case 0x2B: return 100;
+    case 0x2F: return 105; case 0x2A: return 130; case 0x2C: return 140;
+    default:   return 0;
+    }
+}
+
+static DWORD CpuMHzDetect(void) {
+    /* CPUMPLL (PCI 0:3:0 offset 0x6C): byte0 = FSB divider, byte1 = FSB mult.
+       FSB = XTAL * mult/div; CPU = FSB * ratio. */
+    DWORD cpumpll = PciRead32(0, 3, 0, 0x6C);
+    DWORD fsb_div = cpumpll & 0xFF;
+    DWORD fsb_mult = (cpumpll >> 8) & 0xFF;
+    DWORD msr_lo = 0, ratio, result;
+    double fsb_hz, cpu_mhz;
+
+    if (fsb_div == 0 || fsb_mult == 0) return 733;
+    fsb_hz = XTAL_HZ * ((double)fsb_mult / (double)fsb_div);
+
+    __asm {
+        mov  ecx, 0x2A
+        rdmsr
+        mov  msr_lo, eax
+    }
+    ratio = CpuRatioX10FromMsr(msr_lo);
+    if (ratio == 0) return 733;
+
+    cpu_mhz = (fsb_hz * ((double)ratio / 10.0)) / 1.0e6;
+    result = (DWORD)(cpu_mhz + 0.5);
+    if (result < 400 || result > 1600) return 733;   /* implausible -> stock */
+    return result;
+}
+
+static DWORD GpuMHzDetect(void) {
+    /* NV2A PRAMDAC NVPLL at MMIO 0xFD680500: M=bits[7:0], N=bits[15:8],
+       P=bits[18:16]. F = (XTAL * N / 2^P) / M. */
+    volatile DWORD* pll;
+    DWORD reg, M, N, P, mhz;
+    double gpu_hz;
+
+    /* confirm the NV2A is really there before dereferencing its MMIO window */
+    if ((PciRead32(0, 0, 0, 0x00) & 0xFFFF) != 0x10DE) return 233;
+
+    pll = (volatile DWORD*)(0xFD000000UL + 0x00680500UL);
+    reg = *pll;
+    M = (reg >> 0) & 0xFF;
+    N = (reg >> 8) & 0xFF;
+    P = (reg >> 16) & 0x07;
+    if (M == 0 || N == 0) return 233;
+
+    gpu_hz = ((double)N * XTAL_HZ / (double)(1u << P)) / (double)M;
+    mhz = (DWORD)(gpu_hz / 1.0e6 + 0.5);
+    if (mhz < 150 || mhz > 400) return 233;          /* implausible -> stock */
+    return mhz;
+}
+
+DWORD Sys_CpuMHz(void) {
+    static DWORD s_mhz = 0;             /* fixed at runtime: detect once, cache */
+    if (!s_mhz) s_mhz = CpuMHzDetect();
+    return s_mhz;
+}
+
+DWORD Sys_GpuMHz(void) {
+    static DWORD s_mhz = 0;
+    if (!s_mhz) s_mhz = GpuMHzDetect();
+    return s_mhz;
 }
 
 /*---------------------------------------------------------------------------

@@ -110,3 +110,62 @@ int Rgb_Reset(void) {
     if (!Rgb_Present()) return 0;
     return Udp_SendToDevice(UDP_DEV_RGB, k, (int)(sizeof(k) - 1));
 }
+
+/* ---- live config read-back ------------------------------------------------
+   Rgb_RequestConfig asks the firmware for its current config; the reply (the
+   "cfg" object) is captured by dd_udp. Rgb_ParseConfig scans for "key": and
+   reads the int that follows -- colors are packed 0xRRGGBB ints here (unlike
+   OXFP's [r,g,b]). Nesting under "cfg" is irrelevant to a flat key scan since
+   every key we read is RGB-unique. No JSON library, no sscanf. C89 style. */
+int Rgb_RequestConfig(void) {
+    static const char k[] = "{\"op\":\"get\"}";
+    if (!Rgb_Present()) return 0;
+    return Udp_QueryDevice(UDP_DEV_RGB, k, (int)(sizeof(k) - 1));
+}
+
+static const char* JFind(const char* j, const char* key) {
+    int kl = 0;
+    while (key[kl]) kl++;
+    while (*j) {
+        if (*j == '"') {
+            int i = 0;
+            const char* q = j + 1;
+            while (i < kl && q[i] == key[i]) i++;
+            if (i == kl && q[i] == '"' && q[i + 1] == ':') return q + i + 2;
+        }
+        j++;
+    }
+    return 0;
+}
+
+static int JLong(const char* p, long* out) {
+    long v = 0;
+    int neg = 0, any = 0;
+    if (!p) return 0;
+    while (*p == ' ') p++;
+    if (*p == '-') { neg = 1; p++; }
+    while (*p >= '0' && *p <= '9') { v = v * 10 + (long)(*p - '0'); p++; any = 1; }
+    if (!any) return 0;
+    *out = neg ? -v : v;
+    return 1;
+}
+
+int Rgb_ParseConfig(const char* json, int len, RgbDevCfg* out) {
+    const char* p;
+    long v;
+    int got = 0;
+    (void)len;
+    if (!json || !out) return 0;
+    out->mode = out->brightness = out->speed = out->intensity = out->paletteCount = -1;
+    out->colorA = out->colorB = out->colorC = out->colorD = -1;
+    if ((p = JFind(json, "mode")) != 0 && JLong(p, &v)) { out->mode = (int)v; got = 1; }
+    if ((p = JFind(json, "brightness")) != 0 && JLong(p, &v)) { out->brightness = (int)v; got = 1; }
+    if ((p = JFind(json, "speed")) != 0 && JLong(p, &v)) { out->speed = (int)v; got = 1; }
+    if ((p = JFind(json, "intensity")) != 0 && JLong(p, &v)) { out->intensity = (int)v; got = 1; }
+    if ((p = JFind(json, "paletteCount")) != 0 && JLong(p, &v)) { out->paletteCount = (int)v; got = 1; }
+    if ((p = JFind(json, "colorA")) != 0 && JLong(p, &v)) { out->colorA = v & 0xFFFFFFL; got = 1; }
+    if ((p = JFind(json, "colorB")) != 0 && JLong(p, &v)) { out->colorB = v & 0xFFFFFFL; got = 1; }
+    if ((p = JFind(json, "colorC")) != 0 && JLong(p, &v)) { out->colorC = v & 0xFFFFFFL; got = 1; }
+    if ((p = JFind(json, "colorD")) != 0 && JLong(p, &v)) { out->colorD = v & 0xFFFFFFL; got = 1; }
+    return got;
+}

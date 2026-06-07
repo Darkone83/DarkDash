@@ -38,6 +38,10 @@ extern "C" {
     void Audio_StartMusic(int loop);  /* play bg.mp3 (loop!=0 to loop) */
     void Audio_StopMusic(void);
 
+    /* 1 when a non-looping track has reached its natural end (and its buffered
+       tail has drained). 0 while looping or stopped. Drives Shuffle advancing. */
+    int  Audio_MusicFinished(void);
+
     /* Background-music volume, 0..100 percent. Set takes effect live if music is
        already playing, and is re-applied on the next StartMusic. */
     void Audio_SetMusicVolume(int pct);

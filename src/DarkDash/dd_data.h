@@ -25,6 +25,12 @@ extern "C" {
     /* video resolution preference (applied at boot in Gfx_Init) */
     enum { DD_RES_AUTO = 0, DD_RES_480 = 1, DD_RES_720 = 2 };
 
+    /* background-music selection (musicMode). NORMAL keeps the existing
+       built-in / custom-file behaviour (driven by musicCustom + musicPath);
+       NONE plays nothing; SHUFFLE picks a random .mp3 from the music dir each
+       time playback starts. 0 == NORMAL so old saves keep their behaviour. */
+    enum { DD_MUSIC_NORMAL = 0, DD_MUSIC_NONE = 1, DD_MUSIC_SHUFFLE = 2 };
+
     /* effect toggle bits packed into DD_Settings.fxFlags (all default ON) */
 #define DD_FX_SCANLINES  0x01    /* CRT scanlines + roll          */
 #define DD_FX_SELECT     0x02    /* selection spring/pop/chromatic */
@@ -58,8 +64,7 @@ extern "C" {
 
         int  screensaverMin;                 /* idle screensaver: 0 = off, else minutes      */
 
-        /* room to grow without bumping the on-disk version every time */
-        int  reserved[1];
+        int  musicMode;                      /* DD_MUSIC_* (was reserved[0]; 0 = NORMAL)     */
     } DD_Settings;
 
     /* Load settings.dat into memory (defaults if missing/old/corrupt). Safe to

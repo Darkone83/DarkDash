@@ -20,6 +20,9 @@ typedef struct {
     SOCKET  sock;            /* bound listen socket for this device's port      */
     DWORD   lastSeen;        /* GetTickCount of last signature match (0 = never)*/
     DWORD   addr;            /* last-known device IP (network order, 0 = none)  */
+    char    reply[1600];     /* most recent datagram payload (== DISCO_RXBUF)   */
+    int     replyLen;        /* bytes in reply (0 = none captured)              */
+    DWORD   replyMs;         /* GetTickCount when reply was captured            */
 } DiscoDev;
 
 static DiscoDev s_dev[UDP_DEV_COUNT] = {
@@ -167,6 +170,18 @@ static void DrainDevice(DiscoDev* dv) {
             (SOCKADDR*)&from, &fromLen);
         if (n <= 0) break;                /* WSAEWOULDBLOCK or closed -> done   */
         s_rx[n] = 0;
+        /* Keep the latest datagram from this device so the menus can read its
+           live config back (config read-back on screen entry). Capture happens
+           regardless of the presence signature, since a "get" reply may not
+           carry the discovery beacon string. */
+        {
+            int cp = (n < DISCO_RXBUF - 1) ? n : DISCO_RXBUF - 1;
+            int k;
+            for (k = 0; k < cp; k++) dv->reply[k] = s_rx[k];
+            dv->reply[cp] = 0;
+            dv->replyLen = cp;
+            dv->replyMs = GetTickCount();
+        }
         if (ContainsSig(s_rx, n, dv->sig)) {
             dv->lastSeen = GetTickCount();
             dv->addr = from.sin_addr.s_addr;
@@ -207,6 +222,18 @@ int Udp_Present(int dev) {
     return ((now - s_dev[dev].lastSeen) <= DISCO_STALE_MS) ? 1 : 0;
 }
 
+int Udp_LastReply(int dev, char* buf, int cap, unsigned long* whenMs) {
+    int i, n;
+    if (dev < 0 || dev >= UDP_DEV_COUNT) return 0;
+    if (whenMs) *whenMs = (unsigned long)s_dev[dev].replyMs;
+    n = s_dev[dev].replyLen;
+    if (n <= 0 || !buf || cap <= 0) return 0;
+    if (n > cap - 1) n = cap - 1;
+    for (i = 0; i < n; i++) buf[i] = s_dev[dev].reply[i];
+    buf[n] = 0;
+    return n;
+}
+
 int Udp_SendToDevice(int dev, const void* data, int len) {
     SOCKADDR_IN sa;
     int sent;
@@ -222,6 +249,30 @@ int Udp_SendToDevice(int dev, const void* data, int len) {
     sa.sin_addr.s_addr = s_dev[dev].addr ? s_dev[dev].addr : INADDR_BROADCAST;
 
     sent = sendto(s_sock, (const char*)data, len, 0,
+        (struct sockaddr*)&sa, sizeof(sa));
+    return (sent == len) ? 1 : 0;
+}
+
+/* Like Udp_SendToDevice, but the datagram leaves the device's *listen* socket
+   instead of the shared send socket. Firmware replies unicast to the sender's
+   source port, so a request that expects a reply (e.g. "get") must go out this
+   way -- only then does DrainDevice see the answer and stash it for read-back. */
+int Udp_QueryDevice(int dev, const void* data, int len) {
+    SOCKADDR_IN sa;
+    int sent;
+
+    if (dev < 0 || dev >= UDP_DEV_COUNT) return 0;
+    if (!data || len <= 0) return 0;
+    if (s_dev[dev].sock == INVALID_SOCKET)
+        s_dev[dev].sock = BindListen(s_dev[dev].port);
+    if (s_dev[dev].sock == INVALID_SOCKET) return 0;
+
+    ZeroMemory(&sa, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((u_short)s_dev[dev].port);
+    sa.sin_addr.s_addr = s_dev[dev].addr ? s_dev[dev].addr : INADDR_BROADCAST;
+
+    sent = sendto(s_dev[dev].sock, (const char*)data, len, 0,
         (struct sockaddr*)&sa, sizeof(sa));
     return (sent == len) ? 1 : 0;
 }

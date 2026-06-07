@@ -48,6 +48,7 @@ extern "C" {
 
     void Lcd_Init(void);
     void Lcd_Tick(void);
+    void Lcd_PollSensors(void);        /* read sensors into cache; call separately from the main loop, away from Lcd_Tick */
     void Lcd_Shutdown(void);
 
     int  Lcd_IsPresent(void);          /* 1 if a panel answered at the set address */
@@ -68,6 +69,14 @@ extern "C" {
 
     int  Lcd_Brightness(void);         /* OLED contrast 0..255                    */
     void Lcd_SetBrightness(int v);     /* applies live + persists                 */
+
+    /* Theia/emulator-safe mode: skip the US2066 OLED extended commands (contrast)
+       and CGRAM custom glyphs, so a firmware LCD emulator -- which only implements
+       the plain HD44780 subset -- renders correctly instead of getting a corrupted
+       cursor and garbage characters. On a real panel it just loses live brightness
+       and custom glyphs; text is unaffected. */
+    int  Lcd_CompatMode(void);
+    void Lcd_SetCompatMode(int on);
 
     /* Draw a static "Now Playing" screen for the title that's about to launch.
        Called right before the dashboard hands off to a game (after which we lose

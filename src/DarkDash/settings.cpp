@@ -115,6 +115,13 @@ enum { ACC_DEV_LCD = 0, ACC_DEV_TYPED, ACC_DEV_RGB, ACC_DEV_OXFP, ACC_DEV_COUNT 
 static int s_accDev = -1;
 static int s_accRow = 0;
 
+/* On entering the RGB/OXFP screen we pull the device's CURRENT config over UDP
+   and adopt it (so the menu reflects the live device, not dc.dat defaults).
+   One-shot per entry so it never fights the user's live adjustments. */
+static int   s_accSync = 0;          /* 1 = a pull is in progress for s_accDev  */
+static DWORD s_accSyncStart = 0;     /* entry time: only accept replies newer    */
+static DWORD s_accSyncSent = 0;      /* last "get" send (for periodic re-ask)    */
+
 /* live working values for the RGB / OXFP control screens (sent as we adjust).
    colors are palette indices (into k_palette) so L/R scrolls presets. */
 static int s_rgbMode = 0, s_rgbBright = 128, s_rgbSpeed = 128, s_rgbIntensity = 128;
@@ -134,6 +141,22 @@ static const unsigned long k_palette[] = {
     0xFFFFFFUL, 0xFFC0A0UL, 0x80FF00UL, 0xFFE000UL    /* white, warm, lime, gold */
 };
 #define PALETTE_COUNT ((int)(sizeof(k_palette)/sizeof(k_palette[0])))
+
+/* map an arbitrary device RGB to the closest swatch in k_palette (the menus
+   only carry palette indices, so a read-back color snaps to the nearest preset). */
+static int NearestPalette(int r, int g, int b) {
+    int i, best = 0;
+    long bestD = 0x7FFFFFFFL;
+    for (i = 0; i < PALETTE_COUNT; i++) {
+        int pr = (int)((k_palette[i] >> 16) & 0xFF);
+        int pg = (int)((k_palette[i] >> 8) & 0xFF);
+        int pb = (int)(k_palette[i] & 0xFF);
+        long dr = (long)pr - r, dg = (long)pg - g, db = (long)pb - b;
+        long d = dr * dr + dg * dg + db * db;
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+}
 static int s_fxRow = 0;    /* cursor within the Effects sub-menu   */
 static const int k_fxBits[4] = { DD_FX_SCANLINES, DD_FX_SELECT, DD_FX_IDLE, DD_FX_EDGE };
 static const char* const k_fxNames[4] = { "Scanlines", "Selection FX", "Idle Motion", "Edge Flash" };
@@ -230,6 +253,53 @@ static void ScanMp3(void) {
         s_mp3Count++;
     } while (FindNextFile(h, &fd));
     FindClose(h);
+}
+
+/* Resolve the saved music choice and (re)start playback. One place so boot and
+   the picker behave identically. NONE stops playback; SHUFFLE picks a random
+   .mp3 from the music dir (falling back to built-in if none); NORMAL plays the
+   custom file when set, otherwise the built-in bg track. */
+void Settings_StartMusic(int loop) {
+    DD_Settings* st = Data_Get();
+    Audio_SetMusicVolume(st->musicVolume);
+
+    if (st->musicMode == DD_MUSIC_NONE) {
+        Audio_StopMusic();
+        return;
+    }
+
+    if (st->musicMode == DD_MUSIC_SHUFFLE) {
+        static unsigned long seed = 0;   /* tiny LCG mixed with the tick: cheap, varies per call */
+        ScanMp3();
+        Audio_StopMusic();
+        if (s_mp3Count > 0) {
+            char full[260];
+            int  idx;
+            seed = seed * 1103515245UL + 12345UL + GetTickCount();
+            idx = (int)((seed >> 8) % (unsigned long)s_mp3Count);
+            strcpy(full, MUSIC_DIR); strcat(full, "\\"); strcat(full, s_mp3[idx]);
+            Audio_SetMusicPath(full);
+            Audio_StartMusic(0);         /* NON-looping: when it ends, the tick rolls the next track */
+        }
+        else {
+            Audio_SetMusicPath(0);       /* nothing to shuffle -> built-in, looped */
+            Audio_StartMusic(1);
+        }
+        return;
+    }
+
+    /* DD_MUSIC_NORMAL: custom file if one is set, else the built-in track */
+    Audio_StopMusic();
+    Audio_SetMusicPath((st->musicCustom && st->musicPath[0]) ? st->musicPath : 0);
+    Audio_StartMusic(loop);
+}
+
+/* Per-frame music pump. Only Shuffle needs it: when the current (non-looping)
+   track has played to its end, roll the next random track. Cheap no-op in every
+   other mode. Call once per frame from the main loop. */
+void Settings_MusicTick(void) {
+    if (Data_Get()->musicMode != DD_MUSIC_SHUFFLE) return;
+    if (Audio_MusicFinished()) Settings_StartMusic(0);   /* pick + start the next track */
 }
 
 /* scan D:\fonts for *.ddf; index 0 is always "Default" (baked failsafe), then
@@ -383,7 +453,7 @@ static int UpdateList(WORD pressed) {
         Audio_PlaySfx(SFX_SELECT);
         s_view = s_cursor; s_row = 0; s_audioPick = 0; s_audioMsg = 0;
         s_fxSub = 0;   /* video Effects sub-menu starts closed */
-        s_accDev = -1; s_accRow = 0;   /* accessories starts at the device list */
+        s_accDev = -1; s_accRow = 0; s_accSync = 0;   /* accessories starts at the device list */
         Select_Reset();   /* snap the highlight to the new panel's first row */
         if (s_view == CAT_CLOCK) { Sys_GetClock(&s_clk); s_clkMsg = 0; }
         if (s_view == CAT_NETWORK) {
@@ -428,25 +498,36 @@ static int UpdateList(WORD pressed) {
 static void UpdateAudio(WORD pressed) {
     DD_Settings* st = Data_Get();
     if (s_audioPick) {
-        if (pressed & BTN_DPAD_DOWN) { if (s_mp3Cursor < s_mp3Count - 1) { s_mp3Cursor++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+        /* combined picker: row 0 = None, row 1 = Shuffle, then the .mp3 files */
+        int pickCount = 2 + s_mp3Count;
+        if (pressed & BTN_DPAD_DOWN) { if (s_mp3Cursor < pickCount - 1) { s_mp3Cursor++; Audio_PlaySfx(SFX_NAV_DOWN); } }
         if (pressed & BTN_DPAD_UP) { if (s_mp3Cursor > 0) { s_mp3Cursor--; Audio_PlaySfx(SFX_NAV_UP); } }
         if (pressed & BTN_A) {
-            if (s_mp3Count > 0) {
-                char full[260];
-                strcpy(full, MUSIC_DIR); strcat(full, "\\"); strcat(full, s_mp3[s_mp3Cursor]);
-                st->musicCustom = 1;
-                strncpy(st->musicPath, full, DD_MUSIC_PATH_MAX - 1); st->musicPath[DD_MUSIC_PATH_MAX - 1] = 0;
-                Audio_StopMusic(); Audio_SetMusicPath(full);
-                Audio_SetMusicVolume(st->musicVolume); Audio_StartMusic(1);
-                Data_Save(); Audio_PlaySfx(SFX_SELECT);
+            if (s_mp3Cursor == 0) {                  /* None */
+                st->musicMode = DD_MUSIC_NONE;
+                Settings_StartMusic(1); Data_Save(); Audio_PlaySfx(SFX_SELECT);
+            }
+            else if (s_mp3Cursor == 1) {             /* Shuffle */
+                st->musicMode = DD_MUSIC_SHUFFLE;
+                Settings_StartMusic(1); Data_Save(); Audio_PlaySfx(SFX_SELECT);
+            }
+            else {                                   /* a specific file */
+                int fi = s_mp3Cursor - 2;
+                if (fi >= 0 && fi < s_mp3Count) {
+                    char full[260];
+                    strcpy(full, MUSIC_DIR); strcat(full, "\\"); strcat(full, s_mp3[fi]);
+                    st->musicMode = DD_MUSIC_NORMAL;
+                    st->musicCustom = 1;
+                    strncpy(st->musicPath, full, DD_MUSIC_PATH_MAX - 1); st->musicPath[DD_MUSIC_PATH_MAX - 1] = 0;
+                    Settings_StartMusic(1); Data_Save(); Audio_PlaySfx(SFX_SELECT);
+                }
             }
             s_audioPick = 0;
         }
-        if (pressed & BTN_X) {
+        if (pressed & BTN_X) {                        /* shortcut: built-in default */
+            st->musicMode = DD_MUSIC_NORMAL;
             st->musicCustom = 0; st->musicPath[0] = 0;
-            Audio_StopMusic(); Audio_SetMusicPath(0);
-            Audio_SetMusicVolume(st->musicVolume); Audio_StartMusic(1);
-            Data_Save(); Audio_PlaySfx(SFX_ALT); s_audioPick = 0;
+            Settings_StartMusic(1); Data_Save(); Audio_PlaySfx(SFX_ALT); s_audioPick = 0;
         }
         return;
     }
@@ -734,8 +815,13 @@ typedef struct { int type; int idx; const char* label; } CtrlRow;
 #define CR_LABELX  (CR_MENUX + 28.0f)
 #define CR_WIDGETX (CR_MENUX + 150.0f)   /* where bars/swatches start            */
 #define CR_WIDGETW   86.0f               /* bar / swatch width (virtual px)       */
+/* Mode/Anim NAME values get their own column: the "Mode"/"Anim" labels are short,
+   so the name can start left of the bars and run to the frame interior. This lets
+   13-char names ("UNSC/Covenant", "Palette Cycle/Chase") fit in full. */
+#define CR_NAMEVALX  (CR_MENUX + 112.0f) /* mode/anim name value start (left of bars) */
+#define CR_VALRIGHT  (CR_MENUX + 252.0f) /* frame interior right limit (stay inside)  */
 
-/* Build the RGB row list for the current mode. Returns row count. */
+   /* Build the RGB row list for the current mode. Returns row count. */
 static int BuildRgbRows(CtrlRow* r) {
     int n = 0, cc, i;
     r[n].type = RR_MODE;      r[n].label = "Mode";       r[n].idx = 0; n++;
@@ -776,10 +862,76 @@ static int BuildOxfpRows(CtrlRow* r) {
     return n;
 }
 
+/* Adopt a device config snapshot into the working menu values + persist to
+   dc.dat. Only fields the reply actually carried are applied (the rest keep
+   their loaded dc.dat value), and ints are clamped to valid ranges. Colors
+   snap to the nearest palette swatch. */
+static void ApplyOxfpCfg(const OxfpDevCfg* c) {
+    if (c->mode >= 0 && c->mode < OXFP_MODE_COUNT) s_oxfpMode = c->mode;
+    if (c->brightness >= 0) { s_oxfpBright = c->brightness; if (s_oxfpBright > 255) s_oxfpBright = 255; }
+    if (c->animMode >= 0 && c->animMode < OXFP_ANIM_COUNT) s_oxfpAnim = c->animMode;
+    if (c->animSpeed >= 0) { s_oxfpAnimSpeed = c->animSpeed; if (s_oxfpAnimSpeed > 255) s_oxfpAnimSpeed = 255; }
+    if (c->green[0] >= 0) s_oxfpStatusIx[0] = NearestPalette(c->green[0], c->green[1], c->green[2]);
+    if (c->red[0] >= 0) s_oxfpStatusIx[1] = NearestPalette(c->red[0], c->red[1], c->red[2]);
+    if (c->orange[0] >= 0) s_oxfpStatusIx[2] = NearestPalette(c->orange[0], c->orange[1], c->orange[2]);
+    if (c->animA[0] >= 0) s_oxfpAnimIx[0] = NearestPalette(c->animA[0], c->animA[1], c->animA[2]);
+    if (c->animB[0] >= 0) s_oxfpAnimIx[1] = NearestPalette(c->animB[0], c->animB[1], c->animB[2]);
+    Dc_SaveOxfp2(s_oxfpMode, s_oxfpBright, s_oxfpAnim, s_oxfpAnimSpeed,
+        s_oxfpStatusIx[0], s_oxfpStatusIx[1], s_oxfpStatusIx[2],
+        s_oxfpAnimIx[0], s_oxfpAnimIx[1]);
+}
+
+static void ApplyRgbCfg(const RgbDevCfg* c) {
+    if (c->mode >= 0 && c->mode < RGB_MODE_COUNT) s_rgbMode = c->mode;
+    if (c->brightness >= 0) { s_rgbBright = c->brightness; if (s_rgbBright > 255) s_rgbBright = 255; }
+    if (c->speed >= 0) { s_rgbSpeed = c->speed; if (s_rgbSpeed > 255) s_rgbSpeed = 255; }
+    if (c->intensity >= 0) { s_rgbIntensity = c->intensity; if (s_rgbIntensity > 255) s_rgbIntensity = 255; }
+    if (c->paletteCount >= 1) { s_rgbPalCount = c->paletteCount; if (s_rgbPalCount > 4) s_rgbPalCount = 4; }
+    if (c->colorA >= 0) s_rgbColIx[0] = NearestPalette((int)((c->colorA >> 16) & 0xFF), (int)((c->colorA >> 8) & 0xFF), (int)(c->colorA & 0xFF));
+    if (c->colorB >= 0) s_rgbColIx[1] = NearestPalette((int)((c->colorB >> 16) & 0xFF), (int)((c->colorB >> 8) & 0xFF), (int)(c->colorB & 0xFF));
+    if (c->colorC >= 0) s_rgbColIx[2] = NearestPalette((int)((c->colorC >> 16) & 0xFF), (int)((c->colorC >> 8) & 0xFF), (int)(c->colorC & 0xFF));
+    if (c->colorD >= 0) s_rgbColIx[3] = NearestPalette((int)((c->colorD >> 16) & 0xFF), (int)((c->colorD >> 8) & 0xFF), (int)(c->colorD & 0xFF));
+    Dc_SaveRgb2(s_rgbMode, s_rgbBright, s_rgbSpeed, s_rgbIntensity, s_rgbPalCount,
+        s_rgbColIx[0], s_rgbColIx[1], s_rgbColIx[2], s_rgbColIx[3]);
+}
+
 /*---- UpdateAccessories ------------------------------------------------------
    Two levels: a device list (LCD / Type-D), then each device's own screen.
    Device state/logic lives in dd_lcd / dd_typed; this is just the UI surface. */
 static void UpdateAccessories(WORD pressed) {
+    /* One-shot live-config pull: while a pull is in progress for the open RGB/
+       OXFP screen, re-ask every 300ms and adopt the first valid reply that
+       arrived after we entered. Times out at 2s; clears itself once applied so
+       it never overwrites the user's live edits. */
+    if (s_accSync && (s_accDev == ACC_DEV_RGB || s_accDev == ACC_DEV_OXFP)) {
+        int  udev = (s_accDev == ACC_DEV_OXFP) ? UDP_DEV_OXFP : UDP_DEV_RGB;
+        char buf[1600];
+        unsigned long when = 0;
+        DWORD now = GetTickCount();
+        int n;
+        if (!Udp_Present(udev) || (now - s_accSyncStart) > 2000UL) {
+            s_accSync = 0;                       /* gone or timed out: keep dc.dat */
+        }
+        else {
+            if (s_accSyncSent == 0 || (now - s_accSyncSent) > 300UL) {
+                if (s_accDev == ACC_DEV_OXFP) Oxfp_RequestConfig();
+                else Rgb_RequestConfig();
+                s_accSyncSent = now;
+            }
+            n = Udp_LastReply(udev, buf, sizeof(buf), &when);
+            if (n > 0 && when >= s_accSyncStart) {
+                if (s_accDev == ACC_DEV_OXFP) {
+                    OxfpDevCfg oc;
+                    if (Oxfp_ParseConfig(buf, n, &oc)) { ApplyOxfpCfg(&oc); s_accSync = 0; }
+                }
+                else {
+                    RgbDevCfg rc;
+                    if (Rgb_ParseConfig(buf, n, &rc)) { ApplyRgbCfg(&rc); s_accSync = 0; }
+                }
+            }
+        }
+    }
+
     if (s_accDev < 0) {
         if (pressed & BTN_DPAD_DOWN) { if (s_accRow < ACC_DEV_COUNT - 1) { s_accRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
         if (pressed & BTN_DPAD_UP) { if (s_accRow > 0) { s_accRow--; Audio_PlaySfx(SFX_NAV_UP); } }
@@ -796,17 +948,29 @@ static void UpdateAccessories(WORD pressed) {
             else if (s_accRow == ACC_DEV_OXFP) {
                 s_oxfpMode = Dc_OxfpMode(); s_oxfpBright = Dc_OxfpBright();
                 s_oxfpAnim = Dc_OxfpAnim(); s_oxfpAnimSpeed = Dc_OxfpAnimSpeed();
+                /* clamp in case dc.dat holds a value from an older mode/anim list */
+                if (s_oxfpMode < 0 || s_oxfpMode >= OXFP_MODE_COUNT) s_oxfpMode = 0;
+                if (s_oxfpAnim < 0 || s_oxfpAnim >= OXFP_ANIM_COUNT) s_oxfpAnim = 0;
                 s_oxfpStatusIx[0] = Dc_OxfpStatus(0); s_oxfpStatusIx[1] = Dc_OxfpStatus(1);
                 s_oxfpStatusIx[2] = Dc_OxfpStatus(2);
                 s_oxfpAnimIx[0] = Dc_OxfpAnimColor(0); s_oxfpAnimIx[1] = Dc_OxfpAnimColor(1);
             }
             s_accDev = s_accRow; s_accRow = 0; Audio_PlaySfx(SFX_SELECT);
+            /* kick off a live-config pull so the screen shows the device's
+               current state rather than dc.dat defaults (one-shot, see poll). */
+            s_accSync = 0; s_accSyncSent = 0; s_accSyncStart = GetTickCount();
+            if (s_accDev == ACC_DEV_OXFP && Oxfp_Present()) {
+                s_accSync = 1; Oxfp_RequestConfig(); s_accSyncSent = GetTickCount();
+            }
+            else if (s_accDev == ACC_DEV_RGB && Rgb_Present()) {
+                s_accSync = 1; Rgb_RequestConfig(); s_accSyncSent = GetTickCount();
+            }
         }
         return;
     }
 
     if (s_accDev == ACC_DEV_LCD) {
-        int nRows = 10;  /* Enabled, Address, Interval, Brightness, + 6 page toggles */
+        int nRows = 11;  /* Enabled, Address, Interval, Brightness, Compat, + 6 page toggles */
         if (pressed & BTN_DPAD_DOWN) { if (s_accRow < nRows - 1) { s_accRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
         if (pressed & BTN_DPAD_UP) { if (s_accRow > 0) { s_accRow--; Audio_PlaySfx(SFX_NAV_UP); } }
 
@@ -829,12 +993,15 @@ static void UpdateAccessories(WORD pressed) {
             if (pressed & BTN_DPAD_LEFT)  br -= 24;
             Lcd_SetBrightness(br); Audio_PlaySfx(SFX_ALT);
         }
-        else if (s_accRow >= 4 && (pressed & BTN_A)) {
+        else if (s_accRow == 4 && (pressed & (BTN_A | BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
+            Lcd_SetCompatMode(!Lcd_CompatMode()); Audio_PlaySfx(SFX_ALT);
+        }
+        else if (s_accRow >= 5 && (pressed & BTN_A)) {
             static const int k_pageBit[6] = {
                 LCD_PAGE_TEMPS, LCD_PAGE_MEM, LCD_PAGE_DISK,
                 LCD_PAGE_NET, LCD_PAGE_FTP, LCD_PAGE_CLOCK
             };
-            Lcd_TogglePage(k_pageBit[s_accRow - 4]); Audio_PlaySfx(SFX_ALT);
+            Lcd_TogglePage(k_pageBit[s_accRow - 5]); Audio_PlaySfx(SFX_ALT);
         }
         return;
     }
@@ -1098,7 +1265,7 @@ int Settings_Update(WORD pressed, WORD held) {
            out to the category list -- so swallow B at that level */
         UpdateAccessories(pressed);
         if (s_accDev >= 0 && (pressed & BTN_B)) {
-            s_accDev = -1; s_accRow = 0; Audio_PlaySfx(SFX_BACK);
+            s_accDev = -1; s_accRow = 0; s_accSync = 0; Audio_PlaySfx(SFX_BACK);
             return 0;
         }
     }
@@ -1114,7 +1281,7 @@ int Settings_Update(WORD pressed, WORD held) {
             st->fanAuto = s_fanAuto; st->fanPercent = s_fanPct; Data_Save();
         }
         if (s_view == CAT_UPDATE) Upd_Cancel();   /* abort any in-flight check */
-        if (s_view == CAT_ACCESSORIES) { s_accDev = -1; s_accRow = 0; }
+        if (s_view == CAT_ACCESSORIES) { s_accDev = -1; s_accRow = 0; s_accSync = 0; }
         s_view = -1; s_row = 0;
         Select_Reset();   /* snap back to the category list position */
     }
@@ -1185,7 +1352,14 @@ static void RenderAbout(IDirect3DDevice8* d) {
     strcpy(lines[nLines++], "Author    Darkone83");
     strcpy(lines[nLines++], "");
     lines[nLines][0] = 0; strcat(lines[nLines], "Console   "); strcat(lines[nLines++], Sys_XboxRevision());
-    strcpy(lines[nLines++], "CPU       Pentium III  733 MHz");
+    {
+        lines[nLines][0] = 0; strcat(lines[nLines], "CPU       Pentium III  ");
+        IntToText((int)Sys_CpuMHz(), num); strcat(lines[nLines], num); strcat(lines[nLines++], " MHz");
+    }
+    {
+        lines[nLines][0] = 0; strcat(lines[nLines], "GPU       NV2A  ");
+        IntToText((int)Sys_GpuMHz(), num); strcat(lines[nLines], num); strcat(lines[nLines++], " MHz");
+    }
     {
         int mb = Sys_RamMB(), fr = Sys_RamFreeMB();
         lines[nLines][0] = 0; strcat(lines[nLines], "RAM       ");
@@ -1264,21 +1438,23 @@ static void RenderAudio(IDirect3DDevice8* d) {
         int   ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
         const Texture* menu = Theme_Asset("frame_menu_v");
         float menuX = 352.0f, menuY = 48.0f, rowY0 = 90.0f, rowDY = 34.0f;
-        int i, vis = (s_mp3Count < 9) ? s_mp3Count : 9;
-        Chrome(d, "SELECT MUSIC", "A USE   X DEFAULT   B BACK");
+        int pickCount = 2 + s_mp3Count;              /* None + Shuffle + files */
+        int i, vis = (pickCount < 9) ? pickCount : 9;
+        Chrome(d, "SELECT MUSIC", "A USE   X BUILT-IN   B BACK");
         DrawPedestal(d);
         Iso_Begin();
         if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
-        if (s_mp3Count == 0) {
-            Font_DrawTextIso(d, menuX + 28.0f, rowY0, "No .mp3 files", FONT_SIZE_MEDIUM, dim);
-        }
-        else {
+        {
             float gy = rowY0 + rowDY * (float)s_mp3Cursor - 6.0f;
             Iso_FillRect(menuX + 16.0f, gy, 214.0f, 30.0f, UI_ARGB(110, ar, ag, ab), 1);
             for (i = 0; i < vis; i++) {
                 DWORD c = (i == s_mp3Cursor) ? glow : text;
-                Font_DrawTextIso(d, menuX + 26.0f, rowY0 + rowDY * (float)i + 2.0f, s_mp3[i], FONT_SIZE_SMALL, c);
+                const char* label = (i == 0) ? "None" : (i == 1) ? "Shuffle" : s_mp3[i - 2];
+                Font_DrawTextIso(d, menuX + 26.0f, rowY0 + rowDY * (float)i + 2.0f, label, FONT_SIZE_SMALL, c);
             }
+            if (s_mp3Count == 0)
+                Font_DrawTextIso(d, menuX + 26.0f, rowY0 + rowDY * (float)vis + 8.0f,
+                    "(no .mp3 files)", FONT_SIZE_SMALL, dim);
         }
         Iso_End();
         return;
@@ -1287,12 +1463,19 @@ static void RenderAudio(IDirect3DDevice8* d) {
     k = IntToText(st->musicVolume, num); num[k] = '%'; num[k + 1] = 0;
     strcpy(volRow, "Volume    "); strcat(volRow, num);
     strcpy(trkRow, "Track     ");
-    strcat(trkRow, (st->musicCustom && st->musicPath[0]) ? s_mp3[0] : "Built-in");
-    /* show the custom file's name if set */
-    if (st->musicCustom && st->musicPath[0]) {
+    if (st->musicMode == DD_MUSIC_NONE) {
+        strcat(trkRow, "None");
+    }
+    else if (st->musicMode == DD_MUSIC_SHUFFLE) {
+        strcat(trkRow, "Shuffle");
+    }
+    else if (st->musicCustom && st->musicPath[0]) {
         const char* p = st->musicPath; const char* base = p;
         while (*p) { if (*p == '\\') base = p + 1; p++; }
-        strcpy(trkRow, "Track     "); strcat(trkRow, base);
+        strcat(trkRow, base);
+    }
+    else {
+        strcat(trkRow, "Built-in");
     }
     rows[0] = volRow; rows[1] = trkRow;
 
@@ -1781,6 +1964,28 @@ static void DrawSwatch(float vx, float vy, unsigned long rgb, DWORD border) {
     Iso_FillRect(vx, vy, w, h, UI_ARGB(255, r, g, b), 0);
 }
 
+/* Draw a mode/anim NAME value so it always fits inside the frame: full MEDIUM
+   when it fits the name column, auto-dropping to SMALL for the long names, and
+   clipped at the frame interior so it can never cross the right border. */
+static void DrawNameValue(IDirect3DDevice8* d, float ry, const char* s, DWORD c) {
+    /* Short names sit at the bar column, aligned with the other value widgets
+       (Animation, Plasma, Solid...). A long name that would clip there shifts
+       left into the wider name column so it shows in full -- still at MEDIUM if it
+       fits, dropping to SMALL only for the very longest ("UNSC/Covenant"). Both
+       paths clip at the frame interior so the text never crosses the border. */
+    float barMax = CR_VALRIGHT - CR_WIDGETX;
+    if ((float)Font_MeasureText(s, FONT_SIZE_MEDIUM) <= barMax) {
+        Font_DrawTextIsoClip(d, CR_WIDGETX, ry + 2.0f, s, FONT_SIZE_MEDIUM, c, barMax);
+        return;
+    }
+    {
+        float wideMax = CR_VALRIGHT - CR_NAMEVALX;
+        int   size = FONT_SIZE_MEDIUM;
+        if ((float)Font_MeasureText(s, FONT_SIZE_MEDIUM) > wideMax) size = FONT_SIZE_SMALL;
+        Font_DrawTextIsoClip(d, CR_NAMEVALX, ry + 2.0f, s, size, c, wideMax);
+    }
+}
+
 /* Draw a built control-row list with value text + bars + swatches, selection
    glow, and adaptive spacing to fit the frame (same scheme as DrawConsole). */
 static void DrawControlRows(IDirect3DDevice8* d, const CtrlRow* rows, int count,
@@ -1829,13 +2034,12 @@ static void DrawControlRows(IDirect3DDevice8* d, const CtrlRow* rows, int count,
 
         switch (rr->type) {
         case RR_MODE:
-            Font_DrawTextIsoClip(d, CR_WIDGETX, ry + 2.0f,
-                isOxfp ? Oxfp_ModeName(s_oxfpMode) : Rgb_ModeName(s_rgbMode),
-                FONT_SIZE_MEDIUM, c, 110.0f);
+            /* name column + auto-shrink so long names ("UNSC/Covenant",
+               "Palette Cycle") render in full instead of clipping at the bar column */
+            DrawNameValue(d, ry, isOxfp ? Oxfp_ModeName(s_oxfpMode) : Rgb_ModeName(s_rgbMode), c);
             break;
         case RR_ANIMMODE:
-            Font_DrawTextIsoClip(d, CR_WIDGETX, ry + 2.0f, Oxfp_AnimName(s_oxfpAnim),
-                FONT_SIZE_MEDIUM, c, 110.0f);
+            DrawNameValue(d, ry, Oxfp_AnimName(s_oxfpAnim), c);
             break;
         case RR_BRIGHT:
             DrawValBar(CR_WIDGETX, ry + 4.0f, isOxfp ? s_oxfpBright : s_rgbBright, ar, ag, ab);
@@ -1905,9 +2109,9 @@ static void RenderAccessories(IDirect3DDevice8* d) {
 
     /* ----- LCD screen ----- */
     if (s_accDev == ACC_DEV_LCD) {
-        char enRow[40], adRow[40], ivRow[40], brRow[40];
+        char enRow[40], adRow[40], ivRow[40], brRow[40], coRow[40];
         char pTemps[40], pMem[40], pDisk[40], pNet[40], pFtp[40], pClk[40];
-        const char* rows[10]; char num[8]; int k, pages;
+        const char* rows[11]; char num[8]; int k, pages;
 
         strcpy(enRow, "Enabled   ");
         if (!Lcd_Enabled())          strcat(enRow, "No");
@@ -1918,6 +2122,7 @@ static void RenderAccessories(IDirect3DDevice8* d) {
         strcpy(ivRow, "Interval  "); strcat(ivRow, num);
         k = IntToText(Lcd_Brightness() * 100 / 255, num); num[k] = '%'; num[k + 1] = 0;
         strcpy(brRow, "Bright    "); strcat(brRow, num);
+        strcpy(coRow, "Compat    "); strcat(coRow, Lcd_CompatMode() ? "On" : "Off");
 
         pages = Lcd_Pages();
         strcpy(pTemps, "Temps     "); strcat(pTemps, (pages & LCD_PAGE_TEMPS) ? "On" : "Off");
@@ -1927,12 +2132,12 @@ static void RenderAccessories(IDirect3DDevice8* d) {
         strcpy(pFtp, "FTP       "); strcat(pFtp, (pages & LCD_PAGE_FTP) ? "On" : "Off");
         strcpy(pClk, "Clock     "); strcat(pClk, (pages & LCD_PAGE_CLOCK) ? "On" : "Off");
 
-        rows[0] = enRow; rows[1] = adRow; rows[2] = ivRow; rows[3] = brRow;
-        rows[4] = pTemps; rows[5] = pMem; rows[6] = pDisk; rows[7] = pNet; rows[8] = pFtp; rows[9] = pClk;
+        rows[0] = enRow; rows[1] = adRow; rows[2] = ivRow; rows[3] = brRow; rows[4] = coRow;
+        rows[5] = pTemps; rows[6] = pMem; rows[7] = pDisk; rows[8] = pNet; rows[9] = pFtp; rows[10] = pClk;
 
         Chrome(d, "LCD", "A TOGGLE  L/R ADJUST  B BACK");
         DrawPedestal(d);
-        DrawConsole(d, rows, 10, s_accRow, 10, 0);
+        DrawConsole(d, rows, 11, s_accRow, 11, 0);
         return;
     }
 

@@ -33,7 +33,7 @@ static const BYTE k_rowBase[4] = { 0x00, 0x20, 0x40, 0x60 };
 #define VAL_COL 9
 
 #define DDLCD_MAGIC   0x444C4344UL   /* 'DLCD' */
-#define DDLCD_VER     2
+#define DDLCD_VER     3
 
 /* ---- persisted config --------------------------------------------------- */
 typedef struct {
@@ -44,6 +44,7 @@ typedef struct {
     int   pages;          /* page-type bitmask         */
     int   intervalMs;     /* rotation interval         */
     int   brightness;     /* v2: OLED contrast 0..255  */
+    int   compat;         /* v3: Theia/emulator-safe mode (skip OLED ext cmds + CGRAM) */
 } LcdBlob;
 
 static LcdBlob s_cfg;
@@ -80,11 +81,40 @@ static void LCopy(char* d, int cap, const char* s) { int i = 0; if (cap <= 0)ret
 static void IToA(int v, char* out) { char t[12]; int n = 0, i = 0, neg = 0; if (v < 0) { neg = 1; v = -v; } if (v == 0)t[n++] = '0'; while (v) { t[n++] = (char)('0' + v % 10); v /= 10; } if (neg)out[i++] = '-'; while (n)out[i++] = t[--n]; out[i] = 0; }
 
 /* ---- SMBus low level ---------------------------------------------------- */
+/* Theia/emulator compat mode. The working dashboards (PrometheOS/Cerbios/XBMC)
+   drive this exact panel WRITE-ONLY: per-char HalWriteSMBusValue(addr,0x40,FALSE,
+   ch) and per-command (addr,0x80,...), one byte per transaction, with no delay
+   and -- critically -- they NEVER read the slave. An SMBus read makes the Theia
+   ESP32 service a master-read in its onRequest handler with clock-stretching,
+   which is the most fragile path in its I2C-slave firmware; a single botched
+   read can half-wedge the peripheral so the following write stream dies ("works
+   briefly, then locks"). So in compat we mirror them exactly: write-only, never
+   probe by reading. The per-transaction gap below is a non-yielding KeStall that mirrors the
+   receiver firmware's delayShort (60us) -- belt-and-suspenders RX pacing. The
+   actual freeze fix is in Lcd_Tick: the sensor reads share this bus, and a read
+   burst with no settle desyncs the ESP32 slave until it wedges, so we settle the
+   bus after each sensor read before driving the panel.
+   Real US2066 hardware needs none of this. */
+#define LCD_COMPAT_TX_GAP_US  60
+   /* Compat service cadence: how often the whole LCD service runs in Theia mode.
+      ~4Hz here keeps the seconds clock smooth while staying in PrometheOS/firmware
+      territory (they run ~1Hz). Raise toward 1000 to match them exactly. */
+#define LCD_COMPAT_TICK_MS  250
 static int SmbW(BYTE reg, BYTE val) {
-    return HalWriteSMBusValue(s_addr8, reg, FALSE, (DWORD)val) == 0;
+    int ok = HalWriteSMBusValue(s_addr8, reg, FALSE, (DWORD)val) == 0;
+    /* Non-yielding settle between LCD transactions (compat) -- mirrors the
+       receiver firmware's delayShort (delayMicroseconds(60)). KeStall, not Sleep:
+       Sleep yields the thread (pointless here); this tight busy-wait gives the
+       ESP32 slave's RX a clean ~60us gap between our 2-byte writes. */
+    if (s_cfg.compat) KeStallExecutionProcessor(LCD_COMPAT_TX_GAP_US);
+    return ok;
 }
 static int SmbProbe(void) {
     DWORD v = 0;
+    /* Compat is write-only: never read the Theia slave (its onRequest/clock-
+       stretch path is the lockup trigger). The user opted into compat for a
+       forwarded panel, so assume present and just drive it, like PrometheOS. */
+    if (s_cfg.compat) return 1;
     return HalReadSMBusValue(s_addr8, 0x00, FALSE, &v) == 0;
 }
 
@@ -96,6 +126,7 @@ static void LCDCmd(BYTE cmd) {
 
 static void LCDChar(BYTE data) {
     if (data != 0xFF && (data < 0x20 || data > 0x7E)) data = ' ';
+    if (s_cfg.compat && data == 0xFF) data = ' ';   /* Theia: ASCII only, no glyphs */
     if (s_lRow < 0 || s_lRow >= LCD_ROWS || s_lCol < 0 || s_lCol >= LCD_COLS) {
         SmbW(0x40, data); return;
     }
@@ -185,6 +216,11 @@ static int  DiskPageCount(void);   /* forward: used by RebuildPageOrder */
    the fundamental command set. The function-set bytes mirror the working init
    (0x38) with only the RE bit flipped, so the display's line config is kept. */
 static void LcdSetContrastHW(BYTE val) {
+    /* Theia/emulator-safe mode: a firmware LCD emulator has no RE/SD command-set
+       state, so the OLED contrast unlock (0x3A/0x79/0x81/val/...) is misread as
+       SET_DDRAM + other commands and corrupts its cursor. Brightness is also
+       meaningless on a forwarded virtual panel, so skip the whole sequence. */
+    if (s_cfg.compat) return;
     LCDCmd(0x3A);   /* function set, RE=1 (extended)   -- 0x38 | RE             */
     LCDCmd(0x79);   /* OLED Characterization, SD=1     -- OLED commands enabled */
     LCDCmd(0x81);   /* Set Contrast Control                                     */
@@ -199,6 +235,7 @@ static void LcdSetContrastHW(BYTE val) {
    steps mostly buy smoothness near the top end where the change is visible. */
 static void LcdFadeTo(BYTE target) {
     int steps = 48, i, v;
+    if (s_cfg.compat) return;       /* no contrast control in emulator-safe mode */
     for (i = 1; i <= steps; i++) {
         v = (int)target * i / steps;
         LcdSetContrastHW((BYTE)v);
@@ -207,6 +244,25 @@ static void LcdFadeTo(BYTE target) {
 }
 
 static void LCDHardwareInit(void) {
+    if (s_cfg.compat) {
+        /* Theia is an HD44780 emulator -- its firmware only decodes HD44780
+           commands (clear/home/set-DDRAM/display-control); US2066 OLED bytes
+           land in its "Other" bucket, and several (0xD5/0xDA/0xDC/0x81/0xD9/
+           0xF1/0xDB) are even MISREAD as Set-DDRAM, with 0x09 misread as
+           display-off. So drive it with the HD44780 driver's bring-up, not the
+           US2066 init: function set, display on, clear, entry mode. No CGRAM,
+           no OLED contrast (Theia has neither). */
+        Sleep(15);
+        LCDCmd(HD44780_FUNC_SET); Sleep(5);
+        LCDCmd(HD44780_FUNC_SET); Sleep(1);
+        LCDCmd(HD44780_FUNC_SET);
+        LCDCmd(HD44780_DISP_ON);
+        LCDCmd(HD44780_CLEAR);    Sleep(2);
+        LCDCmd(HD44780_ENTRY_SET);
+        s_glyphSet = 0;
+        return;
+    }
+    /* BAREMETAL PATH (real US2066, direct connect): full init unchanged. */
     Sleep(15);
     LCDCmd(HD44780_FUNC_SET); Sleep(5);
     LCDCmd(HD44780_FUNC_SET); Sleep(1);
@@ -227,6 +283,10 @@ static void LCDHardwareInit(void) {
 #define BAR_GLYPH_BASE  1            /* glyph codes 1..5 = 1..5 columns filled  */
 static void LoadBarGlyphs(void) {
     int g, row;
+    /* CGRAM uploads send [0x40][byte] blocks the emulator reads as characters
+       (garbage on screen), and custom glyph codes render as blanks there anyway,
+       so skip glyph programming in Theia/emulator-safe mode. */
+    if (s_cfg.compat) return;
     for (g = 1; g <= 5; g++) {
         /* CGRAM address for glyph g = g*8 (8 rows per glyph) */
         LCDCmd((BYTE)(0x40 | (g * 8)));
@@ -260,6 +320,7 @@ static const BYTE k_splashGlyphs[7][8] = {
 };
 static void LoadSplashGlyphs(void) {
     int g, row;
+    if (s_cfg.compat) return;       /* see LoadBarGlyphs: no CGRAM under the emulator */
     for (g = 1; g <= 7; g++) {
         LCDCmd((BYTE)(0x40 | (g * 8)));
         for (row = 0; row < 8; row++) SmbW(0x40, k_splashGlyphs[g - 1][row]);
@@ -270,12 +331,14 @@ static void LoadSplashGlyphs(void) {
 /* Load only the glyph set that's needed; reloading swaps the CGRAM contents and
    invalidates the shadow so the screen redraws. */
 static void EnsureBarGlyphs(void) {
+    if (s_cfg.compat) return;        /* compat draws bars in ASCII; no CGRAM swap */
     if (s_glyphSet == GLYPHS_BAR) return;
     LoadBarGlyphs();
     s_glyphSet = GLYPHS_BAR;
     ShadowInvalidate();          /* glyph appearance changed -> force full redraw */
 }
 static void EnsureSplashGlyphs(void) {
+    if (s_cfg.compat) return;        /* compat draws the frame in ASCII */
     if (s_glyphSet == GLYPHS_SPLASH) return;
     LoadSplashGlyphs();
     s_glyphSet = GLYPHS_SPLASH;
@@ -285,6 +348,7 @@ static void EnsureSplashGlyphs(void) {
 /* write a raw glyph code (0..7) at the current cursor, bypassing the ASCII
    filter in LCDChar. Updates the shadow so diffing still works. */
 static void LCDRawGlyph(BYTE code) {
+    if (s_cfg.compat) { LCDChar(' '); return; }   /* never emit glyph codes to Theia */
     if (s_lRow < 0 || s_lRow >= LCD_ROWS || s_lCol < 0 || s_lCol >= LCD_COLS) {
         SmbW(0x40, code); return;
     }
@@ -324,6 +388,16 @@ static void LCDBar(int row, int col0, int cells, unsigned long done, unsigned lo
     full = filledSub / 5;                        /* fully-filled cells           */
     rem = filledSub % 5;                        /* partial columns in next cell */
     LCDGoto(row, col0);
+    if (s_cfg.compat) {
+        /* COMPAT: Theia renders custom glyphs as blanks, so build the bar from
+           printable ASCII -- '#' full, '-' partial, ' ' empty. */
+        for (i = 0; i < cells; i++) {
+            if (i < full)              LCDChar('#');
+            else if (i == full && rem) LCDChar('-');
+            else                       LCDChar(' ');
+        }
+        return;
+    }
     for (i = 0; i < cells; i++) {
         if (i < full)              LCDRawGlyph(5);            /* full cell        */
         else if (i == full && rem) LCDRawGlyph((BYTE)rem);   /* partial cell     */
@@ -353,6 +427,7 @@ static void CfgReset(void) {
     s_cfg.pages = LCD_PAGE_TEMPS | LCD_PAGE_NET | LCD_PAGE_FTP | LCD_PAGE_CLOCK;
     s_cfg.intervalMs = 5000;
     s_cfg.brightness = 200;       /* bright but not maxed (~78%) */
+    s_cfg.compat = 0;             /* native US2066 by default; opt in for Theia */
 }
 
 static void CfgLoad(void) {
@@ -378,6 +453,7 @@ static void CfgLoad(void) {
         s_cfg.enabled = s_cfg.enabled ? 1 : 0;
         if (s_cfg.brightness < 16) s_cfg.brightness = 16;     /* never fully dark */
         if (s_cfg.brightness > 255) s_cfg.brightness = 255;
+        s_cfg.compat = s_cfg.compat ? 1 : 0;
         s_cfg.version = DDLCD_VER;
         s_cfg.magic = DDLCD_MAGIC;
     }
@@ -421,6 +497,24 @@ static void RebuildPageOrder(void) {
 static void PageSplash(void) {
     char l1[21], l2[21];
     int i;
+
+    if (s_cfg.compat) {
+        /* COMPAT: ASCII frame (Theia shows custom glyph codes as blanks). */
+        char bar[21], ver[21];
+        bar[0] = '+';
+        for (i = 1; i < LCD_COLS - 1; i++) bar[i] = '-';
+        bar[LCD_COLS - 1] = '+'; bar[LCD_COLS] = 0;
+        ver[0] = 'v'; ver[1] = ' '; ver[2] = 0;
+        { int n = 0; while (DARKDASH_VERSION[n] && n < 18 - 2) { ver[2 + n] = DARKDASH_VERSION[n]; n++; } ver[2 + n] = 0; }
+        LCDCenterW(l1, "DarkDash", LCD_COLS - 2);
+        LCDCenterW(l2, ver, LCD_COLS - 2);
+        LCDGoto(0, 0); LCDPuts(bar, LCD_COLS);
+        LCDGoto(1, 0); LCDChar('|'); LCDPuts(l1, LCD_COLS - 2); LCDChar('|');
+        LCDGoto(2, 0); LCDChar('|'); LCDPuts(l2, LCD_COLS - 2); LCDChar('|');
+        LCDGoto(3, 0); LCDPuts(bar, LCD_COLS);
+        return;
+    }
+
     EnsureSplashGlyphs();          /* box-drawing glyph set */
 
     /* row 0: top border  TL + Htop x18 + TR */
@@ -652,18 +746,39 @@ static void DrawPage(int pageBit) {
     }
 }
 
+/* Compat (Theia): page/FTP changes are NOT cleared -- PrometheOS and XBMC never
+   clear during operation. Every page writes all four full-width rows, so the
+   per-cell diff overwrites only the cells that actually differ from the previous
+   page (no full-screen rewrite, no CLEAR command). Baremetal path is identical;
+   compat differs only by the calm cadence + ASCII glyphs + no panel reads. */
+static void DrawPageFlip(int pageBit) {
+    DrawPage(pageBit);
+}
+
+
 /* ---- re-probe + init at the current address ----------------------------- */
 static void ProbeAndInit(void) {
+    int tries;
     s_present = 0;
     s_addr8 = (s_cfg.addrChoice == LCD_ADDR_3D) ? LCD_ADDR8_3D : LCD_ADDR8_3C;
     if (!s_cfg.enabled) return;
-    if (!SmbProbe()) return;             /* nothing at this address */
+    /* Detection robustness (overclocked / softmod boxes): clear any stuck nForce
+       SMBus state before probing -- a busy controller makes SmbProbe falsely
+       report "nothing here". Reset, then give it a couple of tries; OC timing
+       can need a beat for the panel to ACK. (pattern: XbDiag SMBusControllerReset) */
+    Sys_SmbusReset();
+    for (tries = 0; tries < 3; tries++) {
+        if (SmbProbe()) break;
+        Sys_SmbusReset();
+        Sleep(20);
+    }
+    if (tries >= 3) return;              /* nothing at this address */
     LCDHardwareInit();
     ShadowInvalidate();
     Sleep(10);
     LcdSetContrastHW(0);                  /* start dark so the splash fades in */
     PageSplash();
-    LcdFadeTo((BYTE)s_cfg.brightness);    /* smooth power-on fade-up */
+    LcdFadeTo((BYTE)s_cfg.brightness);    /* smooth power-on fade-up (no-op compat) */
     s_pageTimer = GetTickCount();
     s_sensorTimer = GetTickCount();
     s_present = 1;
@@ -677,20 +792,59 @@ void Lcd_Init(void) {
     ProbeAndInit();
 }
 
+/* Sensor poll -- DECOUPLED from the LCD write path, mirroring PrometheOS, whose
+   main thread reads temps into a cache while a SEPARATE thread writes the panel
+   from that cache. The main loop calls this well away from Lcd_Tick (after the
+   frame present) so a READ on the shared SMBus (0x98/0x20: repeated-START, another
+   chip driving SDA) is never microseconds before a Theia WRITE (0x78). That tight,
+   every-cycle adjacency -- which PrometheOS never has -- is what desyncs the ESP32
+   slave's I2C state machine until it wedges (works after power-up, runs a bit,
+   then freezes). Same SMBus reads, same addresses, same ~1Hz rate as before and as
+   PrometheOS; only the timing relative to the panel writes changes. */
+void Lcd_PollSensors(void) {
+    DWORD now;
+    if (!s_present || !s_cfg.enabled) return;
+    /* Only touch the SMBus when the TEMPS page is actually showing. Every other
+       page (MEM/DISK/NET/FTP/CLOCK) needs no sensor read at all, so this keeps
+       foreign read transactions (repeated-START to 0x98/0x20) off the shared bus
+       except during the brief window temps are on screen -- far fewer chances for
+       the Theia slave to catch a repeated-START mid-state and wedge. */
+    if (s_pageN == 0 || s_pageOrder[s_pageCur] != LCD_PAGE_TEMPS) return;
+    now = GetTickCount();
+    if (now - s_sensorTimer < 1000) return;   /* SMBus is slow; ~1/sec is plenty */
+    s_sensorTimer = now;
+    s_sensorOK = (Sys_ReadTemps(&s_cpuC, &s_boardC) ? 1 : 0);
+    if (!Sys_ReadFanPct(&s_fanPct)) s_fanPct = 0;
+    /* Belt-and-suspenders for the cross-frame edge (this read -> next frame's
+       Lcd_Tick write): give the bus a clean idle gap so the slave resyncs before
+       the next panel write. Compat only; a directly-wired US2066 doesn't need it. */
+    if (s_cfg.compat) KeStallExecutionProcessor(300);
+}
+
 void Lcd_Tick(void) {
     DWORD now;
     if (!s_present || !s_cfg.enabled) return;
 
     now = GetTickCount();
 
-    /* refresh sensors ~1/sec (not every frame -- SMBus is slow) */
-    if (now - s_sensorTimer >= 1000) {
-        s_sensorTimer = now;
-        s_sensorOK = (Sys_ReadTemps(&s_cpuC, &s_boardC) ? 1 : 0);
-        if (!Sys_ReadFanPct(&s_fanPct)) s_fanPct = 0;
+    /* Calm cadence for Theia (compat). PrometheOS's render loop and your firmware
+       telemetry both run ~1Hz; nothing drives this panel at frame rate. Gating
+       the whole service here turns DarkDash's 60Hz dribble into a few quiet
+       batches/sec, letting the ESP32 slave's receive path fully catch up between
+       updates. Tunable; 1000ms == PrometheOS. Baremetal is unthrottled. */
+    if (s_cfg.compat) {
+        static DWORD s_compatTick = 0;
+        if ((now - s_compatTick) < LCD_COMPAT_TICK_MS) return;
+        s_compatTick = now;
     }
 
-    /* page rotation */
+    /* Sensors are NOT read here -- the pages draw from the cache filled by
+       Lcd_PollSensors(), which the main loop calls at a separate point in the
+       frame. This keeps Lcd_Tick a pure WRITER (like PrometheOS's lcdRender
+       thread): a sensor read and a Theia write are never back-to-back on the
+       shared bus, which is the adjacency that wedges the ESP32 slave. */
+
+       /* page rotation */
     if (s_pageN == 0) { RebuildPageOrder(); if (s_pageN == 0) return; }
 
     /* FTP auto-focus: while a transfer is in progress, pin the FTP page (if it's
@@ -706,7 +860,7 @@ void Lcd_Tick(void) {
 
         if (fst == 3) {
             s_ftpWasXfer = 1;
-            DrawPage(LCD_PAGE_FTP);
+            DrawPageFlip(LCD_PAGE_FTP);
             s_pageTimer = now;          /* don't advance rotation while pinned   */
             return;
         }
@@ -727,9 +881,10 @@ void Lcd_Tick(void) {
         s_pageCur = (s_pageCur + 1) % s_pageN;
     }
 
-    /* redraw current page every tick; the shadow buffer makes unchanged cells
-       free, so live values (clock seconds, FTP progress) update smoothly */
-    DrawPage(s_pageOrder[s_pageCur]);
+    /* Redraw the current page; the shadow diff makes unchanged cells free, so
+       only changed cells go on the bus. In compat the whole service is cadence-
+       gated above (~PrometheOS rate), so this is a few calm batches/sec. */
+    DrawPageFlip(s_pageOrder[s_pageCur]);
 }
 
 void Lcd_Shutdown(void) {
@@ -789,6 +944,16 @@ void Lcd_SetBrightness(int v) {
     s_cfg.brightness = v;
     if (s_present) LcdSetContrastHW((BYTE)v);   /* apply live */
     CfgSave();
+}
+
+int  Lcd_CompatMode(void) { if (!s_cfgLoaded)CfgLoad(); return s_cfg.compat; }
+void Lcd_SetCompatMode(int on) {
+    if (!s_cfgLoaded)CfgLoad();
+    on = on ? 1 : 0;
+    if (on == s_cfg.compat) return;
+    s_cfg.compat = on;
+    CfgSave();
+    ProbeAndInit();                 /* re-init under the new mode + clean redraw */
 }
 
 void Lcd_NowPlaying(const char* title) {

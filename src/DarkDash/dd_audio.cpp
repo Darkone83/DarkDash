@@ -170,6 +170,8 @@ static HANDLE              s_musicThread = NULL;
 static LONG                s_musicStop = 0;
 static LONG                s_musicEOF = 0;
 static int                 s_musicLoop = 1;
+static DWORD               s_musicEofTick = 0;   /* GetTickCount when a non-looping track hit decoder EOF */
+static DWORD               s_musicDrainMs = 1500;/* ms for the already-buffered tail to finish playing    */
 static CRITICAL_SECTION    s_musicCS;
 static int                 s_csReady = 0;
 
@@ -211,6 +213,7 @@ static void FillHalf(int nHalf) {
         if (s_musicPos >= s_musicSize) {
             if (!s_musicLoop) {
                 InterlockedExchange(&s_musicEOF, 1);
+                if (s_musicEofTick == 0) s_musicEofTick = GetTickCount();  /* tail starts draining now */
                 memset(pDst + dwFilled, 0, dwLen1 - dwFilled);
                 dwFilled = dwLen1;
                 break;
@@ -265,7 +268,9 @@ static DWORD WINAPI MusicThreadProc(LPVOID pParam) {
         int   playHalf, fillHalf;
 
         if (!s_music) { lastFilled = -1; Sleep(4); continue; }
-        if (InterlockedCompareExchange(&s_musicEOF, 1, 1)) { Sleep(4); continue; }
+        /* After a non-looping track hits EOF we keep filling: FillHalf pads
+           silence, so the genuine tail plays out once and everything after it is
+           silence (no stale re-loop) until the shuffle pump starts the next track. */
 
         s_music->GetCurrentPosition(&dwPlay, &dwWrite);
         playHalf = (dwPlay < (DWORD)AUDIO_STREAM_HALF) ? 0 : 1;
@@ -352,6 +357,17 @@ void Audio_SetMusicVolume(int pct) {
 
 int Audio_GetMusicVolume(void) { return (int)s_musicVolPct; }
 
+/* 1 only when a non-looping track has played to its natural end: the decoder hit
+   EOF AND the buffered tail has had time to drain. Returns 0 while looping music
+   plays and 0 when music is stopped (s_music NULL) -- so a deliberate stop (game
+   launch / screensaver) never looks like a finished track. */
+int Audio_MusicFinished(void) {
+    if (!s_music) return 0;
+    if (!InterlockedCompareExchange(&s_musicEOF, 1, 1)) return 0;
+    if (s_musicEofTick == 0) return 0;
+    return ((DWORD)(GetTickCount() - s_musicEofTick) >= s_musicDrainMs) ? 1 : 0;
+}
+
 void Audio_StartMusic(int loop) {
     char path[AUDIO_PATH_MAX];
     unsigned char* data = NULL;
@@ -382,6 +398,7 @@ void Audio_StartMusic(int loop) {
     s_musicLoop = loop ? 1 : 0;
     s_carryBytes = 0;
     InterlockedExchange(&s_musicEOF, 0);
+    s_musicEofTick = 0;
 
     /* probe the first frame for channels/hz */
     mp3dec_init(&s_musicDec);
@@ -401,6 +418,12 @@ void Audio_StartMusic(int loop) {
     wfx.wBitsPerSample = 16;
     wfx.nBlockAlign = (WORD)(info.channels * 2);
     wfx.nAvgBytesPerSec = (DWORD)(info.hz * info.channels * 2);
+
+    /* how long the full ring takes to play -- used as the upper-bound wait for the
+       buffered tail to finish after a non-looping track's decoder hits EOF. */
+    s_musicDrainMs = wfx.nAvgBytesPerSec
+        ? (DWORD)((DWORD)AUDIO_STREAM_BUFSIZE * 1000UL / wfx.nAvgBytesPerSec)
+        : 1500;
 
     ZeroMemory(&dsbd, sizeof(dsbd));
     dsbd.dwSize = sizeof(dsbd);

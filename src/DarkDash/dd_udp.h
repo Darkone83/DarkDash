@@ -46,6 +46,15 @@ extern "C" {
        (never seen), falls back to broadcasting on the device's port. */
     int  Udp_SendToDevice(int dev, const void* data, int len);
 
+    /* Same target as Udp_SendToDevice, but sent from the device's listen socket
+       so the firmware's unicast reply is captured (use for "get"-style queries). */
+    int  Udp_QueryDevice(int dev, const void* data, int len);
+
+    /* Most recent datagram captured from a device, for reading its live config
+       back. Copies up to cap-1 bytes into buf (NUL-terminated), returns the
+       length (0 if none yet), and fills *whenMs with the GetTickCount at capture. */
+    int  Udp_LastReply(int dev, char* buf, int cap, unsigned long* whenMs);
+
 #ifdef __cplusplus
 }
 #endif

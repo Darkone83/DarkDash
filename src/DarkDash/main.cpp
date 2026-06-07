@@ -494,12 +494,7 @@ void __cdecl main(void) {
     Backdrop_Init();
     Fx_Init();               /* CRT scanline texture + overlay effects */
     Audio_Init();
-    {
-        DD_Settings* st = Data_Get();
-        if (st->musicCustom && st->musicPath[0]) Audio_SetMusicPath(st->musicPath);
-        Audio_SetMusicVolume(st->musicVolume);   /* before play, so it starts at level */
-    }
-    Audio_StartMusic(1);   /* loop bg.mp3 (or the custom track) */
+    Settings_StartMusic(1);   /* honor the saved choice: built-in / custom / None / Shuffle */
 
     /* FTP service: mark it wanted if enabled -- it will bring itself up once
        the network/DHCP is actually ready (Net_IsUp is false this early at boot,
@@ -831,6 +826,7 @@ void __cdecl main(void) {
         if (saverOn) Saver_Update();
 
         Audio_Update();   /* service Xbox DS mixer every frame */
+        Settings_MusicTick();   /* advance Shuffle to the next track when one ends */
         Gfx_BeginFrame(Theme_BG());
         if (saverOn) {
             Saver_Render();
@@ -851,6 +847,9 @@ void __cdecl main(void) {
         if (Data_FxOn(DD_FX_EDGE))      Fx_DrawEdgeGlow();
         if (Fx_BootActive()) Fx_DrawBoot();
         Gfx_EndFrame();
+        Lcd_PollSensors();  /* read temps/fan into cache AFTER the present, a full
+                               frame away from Lcd_Tick's panel writes -- keeps the
+                               sensor reads off the bus right before a Theia write */
     }
 
     Ftp_Stop();

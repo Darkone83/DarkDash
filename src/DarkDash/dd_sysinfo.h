@@ -6,6 +6,7 @@
 #define DD_SYSINFO_H
 
 void Sys_Init(void);                              /* clear stuck SMBus once  */
+void Sys_SmbusReset(void);                         /* W1C-clear nForce SMBus (call before probing on OC/softmod) */
 int  Sys_ReadTemps(int* cpuC, int* boardC);       /* 1 if read, degrees C    */
 int  Sys_ReadFanPct(int* pct);                    /* 1 if read, 0..100       */
 void Sys_DiskFreeStr(const char* drive, char* out, int cap);  /* "12.3 GB"   */
@@ -39,5 +40,7 @@ int         Sys_SetClock(const SysClock* c);
 int         Sys_SetClockDirect(const SysClock* c);   /* set fields as-is (NTP; no EEPROM-TZ reconvert) */
 
 const char* Sys_XboxRevision(void);   /* "1.2 - 1.5 (Focus)" etc.        */
+DWORD       Sys_CpuMHz(void);         /* measured CPU clock (OC-aware)    */
+DWORD       Sys_GpuMHz(void);         /* measured NV2A GPU clock          */
 
 #endif /* DD_SYSINFO_H */

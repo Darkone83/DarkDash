@@ -16,4 +16,13 @@ void Settings_Enter(void);
 int  Settings_Update(WORD pressed, WORD held);  /* returns 1 to exit (B) */
 void Settings_Render(void);
 
+/* Resolve the saved background-music choice (Built-in / custom file / None /
+   Shuffle) and (re)start playback. The single entry point used by both boot
+   (main.cpp) and the Audio picker, so every mode behaves the same everywhere. */
+void Settings_StartMusic(int loop);
+
+/* Per-frame pump: advances Shuffle to the next random track when the current one
+   ends. No-op in other music modes. Call once per frame from the main loop. */
+void Settings_MusicTick(void);
+
 #endif /* SETTINGS_H */
