@@ -55,7 +55,9 @@ footprint, leaving plenty of headroom on a stock console.
   button press brings you straight back. Set the timeout (or turn it off) in
   **Settings → Video**.
 - **Sound** — DarkDash has background music and menu sound effects. Pick your
-  own music track and set the volume in **Settings → Audio**.
+  own music track — or choose **None** for silence, or **Shuffle** to play a
+  random track and roll to another each time one finishes — and set the volume
+  in **Settings → Audio**.
 - **Themes** — DarkDash is fully reskinnable. Swap colors, the glow, the
   background, the on-screen artwork, and the menu icons with drop-in theme
   folders. A theme can override as much or as little as it likes — anything it
