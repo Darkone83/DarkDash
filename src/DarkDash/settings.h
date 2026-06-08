@@ -25,4 +25,8 @@ void Settings_StartMusic(int loop);
    ends. No-op in other music modes. Call once per frame from the main loop. */
 void Settings_MusicTick(void);
 
+/* Now-Playing toast: returns 1 while it should be drawn, filling *name and a
+   0..1 *alpha (held, then faded). Only active just after a Shuffle track change. */
+int Settings_NowPlaying(const char** name, float* alpha);
+
 #endif /* SETTINGS_H */

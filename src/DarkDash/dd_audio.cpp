@@ -172,6 +172,13 @@ static LONG                s_musicEOF = 0;
 static int                 s_musicLoop = 1;
 static DWORD               s_musicEofTick = 0;   /* GetTickCount when a non-looping track hit decoder EOF */
 static DWORD               s_musicDrainMs = 1500;/* ms for the already-buffered tail to finish playing    */
+#define SEG_BYTES  2048                          /* ~512 stereo samples per level cell */
+#define NSEG       (AUDIO_STREAM_BUFSIZE / SEG_BYTES)
+static LONG  s_segLow[NSEG];                      /* per-buffer-segment bass level  (fill writes) */
+static LONG  s_segHigh[NSEG];                     /* per-buffer-segment treble level (fill writes) */
+static int   s_lpState = 0;                       /* one-pole lowpass state (fill thread)         */
+static LONG  s_levelLow = 0;                      /* smoothed bass output  (main thread)          */
+static LONG  s_levelHigh = 0;                     /* smoothed treble output (main thread)         */
 static CRITICAL_SECTION    s_musicCS;
 static int                 s_csReady = 0;
 
@@ -244,6 +251,31 @@ static void FillHalf(int nHalf) {
     }
 
     LeaveCriticalSection(&s_musicCS);
+
+    /* per-segment band levels for the audio just written (lock-free: the main
+       thread reads these by play-cursor position -- no second buffer Lock). A
+       one-pole lowpass splits bass (lp) from treble (residual). */
+    {
+        int seg0 = (int)((nHalf * AUDIO_STREAM_HALF) / SEG_BYTES);
+        int nseg = AUDIO_STREAM_HALF / SEG_BYTES;
+        int sps = SEG_BYTES / 2, sg, k;
+        short* sp = (short*)pData1;
+        int lp = s_lpState;
+        for (sg = 0; sg < nseg; sg++) {
+            unsigned long bsum = 0, tsum = 0;
+            for (k = 0; k < sps; k++) {
+                int v = sp[sg * sps + k]; lp += (v - lp) >> 4;     /* ~440Hz lowpass */
+                { int bb = lp, hh = v - lp; if (bb < 0) bb = -bb; if (hh < 0) hh = -hh; bsum += (unsigned long)bb; tsum += (unsigned long)hh; }
+            }
+            {
+                LONG lo = (LONG)(bsum / sps) * 3; if (lo > 32767) lo = 32767;
+                LONG hi = (LONG)(tsum / sps) * 6; if (hi > 32767) hi = 32767;
+                s_segLow[seg0 + sg] = lo; s_segHigh[seg0 + sg] = hi;
+            }
+        }
+        s_lpState = lp;
+    }
+
     s_music->Unlock(pData1, dwLen1, NULL, 0);
 }
 
@@ -368,6 +400,31 @@ int Audio_MusicFinished(void) {
     return ((DWORD)(GetTickCount() - s_musicEofTick) >= s_musicDrainMs) ? 1 : 0;
 }
 
+/* Low (bass) and high (treble) loudness, each 0..255. Lock-free: reads the play
+   cursor and looks up the per-segment level the fill thread precomputed, then
+   applies fast-attack / slower-decay smoothing. lo/hi may be NULL. */
+void Audio_MusicLevels(int* lo, int* hi) {
+    DWORD play = 0, wr = 0; LONG tlo = 0, thi = 0, a, b;
+    if (s_music && SUCCEEDED(s_music->GetCurrentPosition(&play, &wr))) {
+        int seg = (int)(play / SEG_BYTES);
+        if (seg < 0) seg = 0; else if (seg >= NSEG) seg = NSEG - 1;
+        tlo = s_segLow[seg]; thi = s_segHigh[seg];
+    }
+    { LONG c = s_levelLow;  s_levelLow = (tlo > c) ? (c + (tlo - c) * 3 / 4) : (c + (tlo - c) / 3); }
+    { LONG c = s_levelHigh; s_levelHigh = (thi > c) ? (c + (thi - c) * 7 / 8) : (c + (thi - c) / 2); }
+    a = s_levelLow >> 7;  if (a > 255) a = 255;
+    b = s_levelHigh >> 7; if (b > 255) b = 255;
+    if (lo) *lo = (int)a;
+    if (hi) *hi = (int)b;
+}
+
+/* Combined music loudness, 0..255 (kept for any single-band callers). */
+int Audio_MusicLevel(void) {
+    int lo = 0, hi = 0;
+    Audio_MusicLevels(&lo, &hi);
+    return (lo > hi) ? lo : hi;
+}
+
 void Audio_StartMusic(int loop) {
     char path[AUDIO_PATH_MAX];
     unsigned char* data = NULL;
@@ -457,7 +514,7 @@ void Audio_StopMusic(void) {
 
     if (s_music) { s_music->Stop(); s_music->Release(); s_music = NULL; }
     if (s_musicData) { free(s_musicData); s_musicData = NULL; }
-    s_musicSize = 0; s_musicPos = 0; s_carryBytes = 0;
+    s_musicSize = 0; s_musicPos = 0; s_carryBytes = 0; s_levelLow = 0; s_levelHigh = 0; s_lpState = 0;
 }
 
 int Audio_DbgReady(void) { return s_ds ? 1 : 0; }

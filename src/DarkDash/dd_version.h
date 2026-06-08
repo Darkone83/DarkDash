@@ -5,7 +5,7 @@
 #ifndef DD_VERSION_H
 #define DD_VERSION_H
 
-#define DARKDASH_VERSION  "0.1.2"
-#define DARKDASH_BUILD    "2026-06-06"
+#define DARKDASH_VERSION  "0.1.3"
+#define DARKDASH_BUILD    "2026-06-07"
 
 #endif /* DD_VERSION_H */

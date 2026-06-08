@@ -180,6 +180,9 @@
     <ClCompile Include="dd_stbi.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="dd_plasma.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Text Include="Media\Copy Assets Here.txt">
@@ -356,6 +359,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="dd_stbi.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_plasma.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

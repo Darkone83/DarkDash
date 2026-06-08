@@ -41,6 +41,8 @@ extern "C" {
     /* 1 when a non-looping track has reached its natural end (and its buffered
        tail has drained). 0 while looping or stopped. Drives Shuffle advancing. */
     int  Audio_MusicFinished(void);
+    int  Audio_MusicLevel(void);   /* 0..255 combined loudness; 0 when stopped */
+    void Audio_MusicLevels(int* lo, int* hi);   /* split bass / treble, each 0..255 */
 
     /* Background-music volume, 0..100 percent. Set takes effect live if music is
        already playing, and is re-applied on the next StartMusic. */

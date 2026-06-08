@@ -39,6 +39,7 @@
     <ClCompile Include="dd_oxfp.cpp" />
     <ClCompile Include="dd_paths.cpp" />
     <ClCompile Include="dd_pedestal.cpp" />
+    <ClCompile Include="dd_plasma.cpp" />
     <ClCompile Include="dd_preview.cpp" />
     <ClCompile Include="dd_recents.cpp" />
     <ClCompile Include="dd_rgb.cpp" />
@@ -98,6 +99,7 @@
     <ClInclude Include="dd_oxfp.h" />
     <ClInclude Include="dd_paths.h" />
     <ClInclude Include="dd_pedestal.h" />
+    <ClInclude Include="dd_plasma.h" />
     <ClInclude Include="dd_preview.h" />
     <ClInclude Include="dd_recents.h" />
     <ClInclude Include="dd_rgb.h" />

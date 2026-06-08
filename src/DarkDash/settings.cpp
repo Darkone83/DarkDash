@@ -158,8 +158,8 @@ static int NearestPalette(int r, int g, int b) {
     return best;
 }
 static int s_fxRow = 0;    /* cursor within the Effects sub-menu   */
-static const int k_fxBits[4] = { DD_FX_SCANLINES, DD_FX_SELECT, DD_FX_IDLE, DD_FX_EDGE };
-static const char* const k_fxNames[4] = { "Scanlines", "Selection FX", "Idle Motion", "Edge Flash" };
+static const int k_fxBits[5] = { DD_FX_SCANLINES, DD_FX_SELECT, DD_FX_IDLE, DD_FX_EDGE, DD_FX_PLASMA };
+static const char* const k_fxNames[5] = { "Scanlines", "Selection FX", "Idle Motion", "Edge Flash", "Plasma Orb" };
 
 /* Theme panel: discovered theme folder names + cursor + apply message */
 #define THEMES_DIR "D:\\themes"
@@ -255,6 +255,58 @@ static void ScanMp3(void) {
     FindClose(h);
 }
 
+/* case-insensitive match to the built-in default track name */
+static int IsBgTrack(const char* n) {
+    static const char* b = "bg.mp3";
+    int i;
+    for (i = 0; b[i]; i++) {
+        char c = n[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != b[i]) return 0;
+    }
+    return n[i] == 0;
+}
+
+/* Pick a random index into s_mp3 for Shuffle, EXCLUDING the built-in bg.mp3
+   (it lives in the music dir but isn't a "song") and avoiding an immediate
+   repeat of the last track. Returns -1 when there's nothing real to shuffle. */
+static int s_lastShufIdx = -1;
+static unsigned long s_shufSeed = 0;
+static int PickShuffleIdx(void) {
+    int pool[MUSIC_MAX], np = 0, i, choice;
+    for (i = 0; i < s_mp3Count; i++)
+        if (!IsBgTrack(s_mp3[i])) pool[np++] = i;
+    if (np == 0) return -1;
+    if (np == 1) return pool[0];
+    s_shufSeed = s_shufSeed * 1103515245UL + 12345UL;
+    s_shufSeed ^= (unsigned long)GetTickCount() << 13;
+    choice = (int)((s_shufSeed >> 11) % (unsigned long)np);
+    if (pool[choice] == s_lastShufIdx) choice = (choice + 1) % np;   /* no immediate repeat */
+    return pool[choice];
+}
+
+/* --- "Now Playing" toast: armed whenever Shuffle starts a real track; drawn
+   under the pedestal by the splash and faded out by Settings_NowPlaying(). --- */
+static char  s_npName[64];
+static DWORD s_npStart = 0;        /* GetTickCount at toast start; 0 = inactive */
+#define NP_HOLD_MS 2600            /* full-opacity hold                          */
+#define NP_FADE_MS 900             /* fade-out tail                              */
+
+static void NowPlayingSet(const char* file) {
+    int i;
+    for (i = 0; i < 63 && file[i]; i++) s_npName[i] = file[i];
+    s_npName[i] = 0;
+    /* drop a trailing .mp3 / .MP3 so the toast shows a clean name */
+    if (i >= 4) {
+        char* e = s_npName + i - 4;
+        if (e[0] == '.' && (e[1] == 'm' || e[1] == 'M') &&
+            (e[2] == 'p' || e[2] == 'P') && e[3] == '3')
+            e[0] = 0;
+    }
+    s_npStart = GetTickCount();
+    if (s_npStart == 0) s_npStart = 1; /* reserve 0 as the "inactive" sentinel */
+}
+
 /* Resolve the saved music choice and (re)start playback. One place so boot and
    the picker behave identically. NONE stops playback; SHUFFLE picks a random
    .mp3 from the music dir (falling back to built-in if none); NORMAL plays the
@@ -265,25 +317,28 @@ void Settings_StartMusic(int loop) {
 
     if (st->musicMode == DD_MUSIC_NONE) {
         Audio_StopMusic();
+        s_npStart = 0;
         return;
     }
 
     if (st->musicMode == DD_MUSIC_SHUFFLE) {
-        static unsigned long seed = 0;   /* tiny LCG mixed with the tick: cheap, varies per call */
         ScanMp3();
         Audio_StopMusic();
-        if (s_mp3Count > 0) {
-            char full[260];
-            int  idx;
-            seed = seed * 1103515245UL + 12345UL + GetTickCount();
-            idx = (int)((seed >> 8) % (unsigned long)s_mp3Count);
-            strcpy(full, MUSIC_DIR); strcat(full, "\\"); strcat(full, s_mp3[idx]);
-            Audio_SetMusicPath(full);
-            Audio_StartMusic(0);         /* NON-looping: when it ends, the tick rolls the next track */
-        }
-        else {
-            Audio_SetMusicPath(0);       /* nothing to shuffle -> built-in, looped */
-            Audio_StartMusic(1);
+        {
+            int idx = PickShuffleIdx();
+            if (idx >= 0) {
+                char full[260];
+                s_lastShufIdx = idx;
+                strcpy(full, MUSIC_DIR); strcat(full, "\\"); strcat(full, s_mp3[idx]);
+                Audio_SetMusicPath(full);
+                Audio_StartMusic(0);         /* NON-looping: the tick rolls the next track on end */
+                NowPlayingSet(s_mp3[idx]);   /* arm the under-pedestal toast */
+            }
+            else {
+                Audio_SetMusicPath(0);       /* no real songs -> built-in, looped */
+                Audio_StartMusic(1);
+                s_npStart = 0;               /* nothing real to announce */
+            }
         }
         return;
     }
@@ -292,6 +347,7 @@ void Settings_StartMusic(int loop) {
     Audio_StopMusic();
     Audio_SetMusicPath((st->musicCustom && st->musicPath[0]) ? st->musicPath : 0);
     Audio_StartMusic(loop);
+    s_npStart = 0;
 }
 
 /* Per-frame music pump. Only Shuffle needs it: when the current (non-looping)
@@ -300,6 +356,19 @@ void Settings_StartMusic(int loop) {
 void Settings_MusicTick(void) {
     if (Data_Get()->musicMode != DD_MUSIC_SHUFFLE) return;
     if (Audio_MusicFinished()) Settings_StartMusic(0);   /* pick + start the next track */
+}
+
+/* Drawn under the pedestal: full opacity for NP_HOLD_MS after a track change,
+   then a short fade. Self-disarms once the fade completes. */
+int Settings_NowPlaying(const char** name, float* alpha) {
+    DWORD el;
+    if (s_npStart == 0) return 0;
+    el = GetTickCount() - s_npStart;
+    if (el >= (DWORD)(NP_HOLD_MS + NP_FADE_MS)) { s_npStart = 0; return 0; }
+    *name = s_npName;
+    if (el <= (DWORD)NP_HOLD_MS) *alpha = 1.0f;
+    else *alpha = 1.0f - (float)(el - (DWORD)NP_HOLD_MS) / (float)NP_FADE_MS;
+    return 1;
 }
 
 /* scan D:\fonts for *.ddf; index 0 is always "Default" (baked failsafe), then
@@ -1165,7 +1234,7 @@ static void UpdateVideo(WORD pressed) {
 
     /* ---- Effects sub-menu: toggle the four effect flags ---- */
     if (s_fxSub) {
-        if (pressed & BTN_DPAD_DOWN) { if (s_fxRow < 3) { s_fxRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+        if (pressed & BTN_DPAD_DOWN) { if (s_fxRow < 4) { s_fxRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
         if (pressed & BTN_DPAD_UP) { if (s_fxRow > 0) { s_fxRow--; Audio_PlaySfx(SFX_NAV_UP); } }
         if (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT | BTN_A)) {
             st->fxFlags ^= k_fxBits[s_fxRow];      /* flip the bit */
@@ -1548,10 +1617,10 @@ static void RenderVideo(IDirect3DDevice8* d) {
 
     /* ---- Effects sub-menu: four On/Off toggles ---- */
     if (s_fxSub) {
-        char fxRows[4][40];
-        const char* rp[4];
+        char fxRows[5][40];
+        const char* rp[5];
         int i;
-        for (i = 0; i < 4; i++) {
+        for (i = 0; i < 5; i++) {
             int onoff = (st->fxFlags & k_fxBits[i]) ? 1 : 0;
             strcpy(fxRows[i], k_fxNames[i]);
             /* pad to a column, then On/Off */
@@ -1561,7 +1630,7 @@ static void RenderVideo(IDirect3DDevice8* d) {
         }
         Chrome(d, "EFFECTS", "A TOGGLE   B BACK");
         DrawPedestal(d);
-        DrawConsole(d, rp, 4, s_fxRow, 4, 0);
+        DrawConsole(d, rp, 5, s_fxRow, 5, 0);
         {
             DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
             Font_DrawText(d, 60.0f, 410.0f, "Customize the dashboard effects",

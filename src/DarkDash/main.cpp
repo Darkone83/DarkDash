@@ -19,6 +19,7 @@
 #include "dd_ui.h"
 #include "dd_iso.h"
 #include "dd_theme.h"
+#include "dd_plasma.h"
 #include "dd_texture.h"
 #include "font.h"
 #include "input.h"
@@ -308,6 +309,12 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
         }
         Egg_Draw(44, 168, 272, 234);   /* spinning logo quad over the orb region */
     }
+    else if (Data_FxOn(DD_FX_PLASMA)) {
+        /* Plasma orb: procedural energy ball replaces the static hero orb,
+           tinted from the theme. Occupies the same flat orb rect. (Skips the
+           transition glitch -- the plasma is always in motion anyway.) */
+        Plasma_Draw(44.0f, 168.0f, 272.0f, 234.0f, accent, glow);
+    }
     else if (orb) {
         if (glitch > 0) {
             DWORD r = GetTickCount() * 1664525u + 1013904223u;
@@ -347,6 +354,29 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
                             UI_ARGB(a, gr, gg, gb), 1);
                 }
             }
+        }
+    }
+
+    /* --- "Now Playing" toast under the pedestal: appears on a Shuffle track
+       change and fades itself out. Two centred lines in the hero column. --- */
+    {
+        const char* np = 0;
+        float npA = 0.0f;
+        if (Settings_NowPlaying(&np, &npA) && np && np[0]) {
+            float cx = 180.0f, maxW = 264.0f;
+            float lh = (float)Font_LineHeight(FONT_SIZE_SMALL);
+            float ly = 396.0f;
+            int   a = (int)(npA * 255.0f);
+            int   lw = Font_MeasureText("NOW PLAYING", FONT_SIZE_SMALL);
+            int   nw = Font_MeasureText(np, FONT_SIZE_SMALL);
+            DWORD cl, cn;
+            if (a > 255) a = 255;
+            if (a < 0) a = 0;
+            cl = ((DWORD)a << 24) | (accent & 0x00FFFFFF);
+            cn = ((DWORD)a << 24) | (text & 0x00FFFFFF);
+            if ((float)nw > maxW) nw = (int)maxW;
+            Font_DrawText(d, cx - (float)lw * 0.5f, ly, "NOW PLAYING", FONT_SIZE_SMALL, cl, 0);
+            Font_DrawText(d, cx - (float)nw * 0.5f, ly + lh, np, FONT_SIZE_SMALL, cn, (int)maxW);
         }
     }
 

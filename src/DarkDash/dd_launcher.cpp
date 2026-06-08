@@ -42,6 +42,21 @@ static LaunchItem            s_items[LAUNCH_MAX_APPS];
 static int                   s_count = 0;
 static int                   s_cursor = 0;
 static int                   s_scroll = 0;
+
+/* ---- left-stick hold-to-scroll (with acceleration) ----------------------- */
+#define ANALOG_SCROLL_TH   13000   /* |left-stick Y| to engage (deadzone is lower)   */
+#define ANALOG_STEP_SLOW     240   /* ms between steps at the start of a hold        */
+#define ANALOG_STEP_FAST      45   /* ms between steps once fully ramped up          */
+#define ANALOG_RAMP_MS      1400   /* hold this long to reach full speed             */
+#define ANALOG_PED_SETTLE    140   /* ms of no movement before cover art reloads     */
+#define ANALOG_SFX_MS        110   /* min ms between nav tick sounds while scrolling  */
+
+static int                   s_stickDir = 0;       /* -1 up, +1 down, 0 idle          */
+static DWORD                 s_stickHoldStart = 0; /* tick when this hold engaged      */
+static DWORD                 s_stickNextStep = 0;  /* next allowed step time           */
+static DWORD                 s_stickNextSfx = 0;   /* next allowed nav-tick time       */
+static int                   s_pedPending = 0;     /* cursor moved; art reload deferred */
+static DWORD                 s_pedSettleAt = 0;    /* reload the pedestal once past this */
 /* 1 while a launcher list is the active screen. Type-D reads the highlighted
    title via Launcher_CurrentAppName(); this flag makes that report NULL once the
    user backs out to the main menu so Type-D shows "DarkDash" instead of the
@@ -371,6 +386,46 @@ static void ClampScroll(void) {
     if (s_scroll < 0) s_scroll = 0;
 }
 
+/* uppercased first character of an item's label -- the "letter" it groups under.
+   Digits/symbols just group under their own char, which is fine for jumping. */
+static char ItemInitial(int idx) {
+    char c;
+    if (idx < 0 || idx >= s_count || !s_items[idx].label) return 0;
+    c = s_items[idx].label[0];
+    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    return c;
+}
+
+/* Alpha-jump: hop the cursor a whole letter at a time through the (already
+   alphabetical) list. dir +1 = start of the next letter group; dir -1 = start of
+   the current group, or the previous group's start if already at the top of one.
+   Big libraries get traversed in a few presses. */
+static void AlphaJump(int dir) {
+    int i = s_cursor;
+    char cur;
+    if (s_count <= 0) return;
+    cur = ItemInitial(s_cursor);
+
+    if (dir > 0) {
+        while (i < s_count - 1 && ItemInitial(i) == cur) i++;   /* -> first of next letter */
+    }
+    else {
+        while (i > 0 && ItemInitial(i - 1) == cur) i--;         /* -> start of this group  */
+        if (i == s_cursor && i > 0) {                            /* already at top: prev group */
+            char prev = ItemInitial(i - 1);
+            i--;
+            while (i > 0 && ItemInitial(i - 1) == prev) i--;
+        }
+    }
+
+    if (i != s_cursor) {
+        s_cursor = i;
+        ClampScroll();
+        LoadPedestal(s_cursor);   /* discrete + infrequent -> immediate load is fine */
+        Audio_PlaySfx(dir > 0 ? SFX_NAV_DOWN : SFX_NAV_UP);
+    }
+}
+
 /* (re)scan the current category's built-in roots + user custom paths into the
    item list. Preserves nothing -- callers manage cursor/scroll around it. */
 static void RescanCurrent(void) {
@@ -401,7 +456,7 @@ void Launcher_Enter(const LauncherConfig* cfg) {
 }
 
 int Launcher_Update(WORD pressed, WORD held) {
-    (void)held;   /* hold-to-repeat scroll arrives in A5 */
+    (void)held;   /* analog hold-to-scroll (below) reads the stick directly via GetSticks */
 
     /* If the folder picker is open it owns all input. On confirm, add the
        chosen folder as a custom path for this category, persist, and re-scan
@@ -485,6 +540,11 @@ int Launcher_Update(WORD pressed, WORD held) {
         if (pressed & BTN_DPAD_UP) {
             if (s_cursor > 0) { s_cursor--; Audio_PlaySfx(SFX_NAV_UP); ClampScroll(); LoadPedestal(s_cursor); }
         }
+        /* D-Pad LEFT / RIGHT: alpha-jump -- skip to the previous / next letter
+           group. Pairs with single-step (D-pad U/D), page (LT/RT), and analog
+           hold-scroll for fast traversal of large libraries. */
+        if (pressed & BTN_DPAD_RIGHT) AlphaJump(+1);
+        if (pressed & BTN_DPAD_LEFT)  AlphaJump(-1);
         /* LT / RT jump a full page -- big libraries are painful one row at a
            time. Page == the visible row count, so the cursor lands a screenful
            away and the list pages with it. Clamped to the list ends. */
@@ -500,6 +560,64 @@ int Launcher_Update(WORD pressed, WORD held) {
                 s_cursor -= LAUNCH_ROWS_VISIBLE;
                 if (s_cursor < 0) s_cursor = 0;
                 Audio_PlaySfx(SFX_NAV_UP); ClampScroll(); LoadPedestal(s_cursor);
+            }
+        }
+
+        /* Left analog stick: hold-to-scroll, accelerating the longer it's held.
+           Push up = previous, down = next. The cover-art (pedestal) decode is
+           deferred until the scroll settles, and the nav tick is throttled, so
+           fast scrolling stays smooth and doesn't machine-gun the SFX. */
+        {
+            int lx, ly, rx, ry, dir = 0;
+            GetSticks(lx, ly, rx, ry);
+            if (ly > ANALOG_SCROLL_TH)       dir = -1;   /* up   -> previous */
+            else if (ly < -ANALOG_SCROLL_TH) dir = +1;   /* down -> next     */
+
+            if (dir == 0) {
+                s_stickDir = 0;                          /* released; settle loads art */
+            }
+            else {
+                DWORD now = GetTickCount();
+                if (dir != s_stickDir) {                 /* fresh push: step now, start ramp */
+                    s_stickDir = dir;
+                    s_stickHoldStart = now;
+                    s_stickNextStep = now;
+                    s_stickNextSfx = 0;
+                }
+                if (now >= s_stickNextStep) {
+                    int moved = 0;
+                    if (dir > 0) { if (s_cursor < s_count - 1) { s_cursor++; moved = 1; } }
+                    else { if (s_cursor > 0) { s_cursor--; moved = 1; } }
+
+                    if (moved) {
+                        DWORD heldMs = now - s_stickHoldStart;
+                        DWORD ramp = (heldMs > ANALOG_RAMP_MS) ? ANALOG_RAMP_MS : heldMs;
+                        DWORD interval = ANALOG_STEP_SLOW -
+                            (ramp * (ANALOG_STEP_SLOW - ANALOG_STEP_FAST) / ANALOG_RAMP_MS);
+                        ClampScroll();
+                        s_pedPending = 1;                /* defer the art decode */
+                        s_pedSettleAt = now + ANALOG_PED_SETTLE;
+                        if (now >= s_stickNextSfx) {     /* throttle the tick */
+                            Audio_PlaySfx(dir > 0 ? SFX_NAV_DOWN : SFX_NAV_UP);
+                            s_stickNextSfx = now + ANALOG_SFX_MS;
+                        }
+                        s_stickNextStep = now + interval;
+                    }
+                    else {
+                        s_stickNextStep = now + ANALOG_STEP_SLOW;  /* at an end: idle quietly */
+                    }
+                }
+            }
+        }
+
+        /* Deferred cover-art load: once a scroll burst settles (stick released,
+           or a short pause), decode the highlighted title's art once. LoadPedestal
+           no-ops when the index hasn't changed, so this is cheap if already current. */
+        if (s_pedPending) {
+            DWORD now = GetTickCount();
+            if (s_stickDir == 0 || now >= s_pedSettleAt) {
+                LoadPedestal(s_cursor);
+                s_pedPending = 0;
             }
         }
         if (pressed & BTN_A) {

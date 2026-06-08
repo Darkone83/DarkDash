@@ -36,6 +36,7 @@ extern "C" {
 #define DD_FX_SELECT     0x02    /* selection spring/pop/chromatic */
 #define DD_FX_IDLE       0x04    /* iso breathe + bloom wander + orb shimmer */
 #define DD_FX_EDGE       0x08    /* edge-glow flash on select     */
+#define DD_FX_PLASMA     0x10    /* hero orb -> animated plasma ball (off by default) */
 #define DD_FX_DEFAULT    (DD_FX_SCANLINES | DD_FX_SELECT | DD_FX_IDLE | DD_FX_EDGE)
 
     typedef struct DD_Settings {
