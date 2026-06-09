@@ -21,6 +21,9 @@
 #define ARC_PTS        (ARC_SEG + 1)
 #define ARC_VERTS      (ARC_PTS * 2)
 #define ARC_MAX_OUT    18.0f       /* max excursion OUTSIDE the quad (~px)   */
+#define ARC_TUCK        5.0f       /* pull anchors INSIDE the border (~px) so
+                                      they tuck behind the frame instead of
+                                      floating in the inset gap on the sides   */
 #define ARC_HALF_W     1.8f        /* ribbon half-width (radial)             */
 #define ARC_JAG        5.0f        /* jagged displacement amplitude          */
 #define ARC_JAG_MS     45          /* re-roll the crackle every N ms         */
@@ -133,7 +136,11 @@ void Arcs_Draw(float fx, float fy, float fw, float fh) {
             int   alpha;
             DWORD col;
 
-            if (out < 0.0f) out = 0.0f;
+            /* tuck the anchors inside the border: strongest at the ends, zero at
+               the peak (scales with 1-arch), so the outward reach is untouched. */
+            out -= ARC_TUCK * (1.0f - arch);
+
+            if (out < -ARC_TUCK) out = -ARC_TUCK;          /* allow a little inside */
             else if (out > ARC_MAX_OUT) out = ARC_MAX_OUT;
 
             /* end taper: fade the bolt into the frame at both anchors */

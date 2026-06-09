@@ -29,6 +29,11 @@ footprint, leaving plenty of headroom on a stock console.
   per section — just browse to the folder and pick it, no typing required. A
   quick **refresh** rescans without leaving the menu, handy right after copying
   new titles over FTP.
+- **Hide what you don't use** — press **BLACK** on any title to hide it from its
+  list, handy for tidying duplicates or tucking away setup tools you rarely
+  touch. Press **START** to toggle a *show-hidden* view where hidden titles
+  reappear (marked as hidden) so you can bring them back. Your hidden list is
+  saved across reboots.
 - **Cover art & titles** — if a title folder has a `_resources` pack, DarkDash
   uses its cover art (PNG or JPG) and game title, shown as a floating hologram on
   the pedestal. If not, it falls back to the title image baked into the game
@@ -54,6 +59,10 @@ footprint, leaving plenty of headroom on a stock console.
   showpiece of your cover art across the screen with a rainbow light beam. Any
   button press brings you straight back. Set the timeout (or turn it off) in
   **Settings → Video**.
+- **Main-menu effects** — optional eye-candy for the hero pedestal and the menu
+  frame, like a music-reactive plasma orb and short energy arcs that crawl along
+  the frame border. All off by default; switch them on in **Settings → Video →
+  Effects**.
 - **Sound** — DarkDash has background music and menu sound effects. Pick your
   own music track — or choose **None** for silence, or **Shuffle** to play a
   random track and roll to another each time one finishes — and set the volume
@@ -73,7 +82,8 @@ footprint, leaving plenty of headroom on a stock console.
 - **FTP** — turn on the built-in FTP server to move files to and from your Xbox
   over the network.
 - **Accessories** — DarkDash can control DarkoneCustoms hardware add-ons from
-  **Settings → Accessories**: a front-panel LCD, the Type-D info module, and the
+  **Settings → Accessories**: a front-panel LCD (which can show the current
+  track while Shuffle is playing), the Type-D info module, and the
   XBOX-RGB and OXFP lighting controllers. Connected devices are selectable; the
   rest stay greyed out until they're found.
 - **Fan control** — let the console manage the fan automatically, or set a
@@ -105,6 +115,8 @@ footprint, leaving plenty of headroom on a stock console.
 | **WHITE** | Show title info (cover art + details), if the title has a `_resources` pack |
 | **Y** | Add a scan folder for this section (browse and pick) |
 | **X** | Refresh — rescan this section in place |
+| **BLACK** | Hide / unhide the highlighted title |
+| **START** | Toggle the show-hidden view |
 | **B** | Back |
 
 ### File Manager
