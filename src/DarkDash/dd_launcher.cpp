@@ -9,6 +9,7 @@
 ---------------------------------------------------------------------------*/
 #include <xtl.h>
 #include <string.h>
+#include <stdlib.h>
 #include "dd_gfx.h"
 #include "dd_ui.h"
 #include "dd_iso.h"
@@ -18,6 +19,7 @@
 #include "input.h"
 #include "dd_audio.h"
 #include "dd_xbe.h"
+#include "dd_stbi.h"
 #include "dd_mount.h"
 #include "dd_lcd.h"
 #include "dd_recents.h"
@@ -26,8 +28,15 @@
 #include "dd_synopsis.h"
 #include "dd_backdrop.h"
 #include "dd_pedestal.h"
+#include "dd_dc.h"
+#include "dd_typedart.h"
+#include "dd_hidden.h"
 #include "dd_launcher.h"
-#define LAUNCH_MAX_APPS     256
+#define LAUNCH_MAX_APPS     2048
+#define LAUNCH_MAX_DEPTH    4      /* game folders up to N levels below a root;
+                                      1 = old flat behavior (immediate subfolders
+                                      only). Only the recursion is capped -- a
+                                      default.xbe is added wherever it's found. */
 #define LAUNCH_NAME_MAX     64
 #define LAUNCH_PATH_MAX     256
 #define LAUNCH_ROWS_VISIBLE 9
@@ -42,8 +51,12 @@ static LaunchItem            s_items[LAUNCH_MAX_APPS];
 static int                   s_count = 0;
 static int                   s_cursor = 0;
 static int                   s_scroll = 0;
+static int                   s_showHidden = 0;   /* 1 = include hidden entries
+                                                    in the list (marked) so they
+                                                    can be un-hidden; reset on
+                                                    every category enter */
 
-/* ---- left-stick hold-to-scroll (with acceleration) ----------------------- */
+                                                    /* ---- left-stick hold-to-scroll (with acceleration) ----------------------- */
 #define ANALOG_SCROLL_TH   13000   /* |left-stick Y| to engage (deadzone is lower)   */
 #define ANALOG_STEP_SLOW     240   /* ms between steps at the start of a hold        */
 #define ANALOG_STEP_FAST      45   /* ms between steps once fully ramped up          */
@@ -195,6 +208,65 @@ const char* Launcher_CurrentAppName(void) {
     return s_items[s_cursor].label;
 }
 
+/* Load a title's cover art straight to RGBA for off-screen use (the Type-D
+   push). Mirrors the launcher's resource-pack priority -- opencase.png, then
+   poster.jpg -- but returns raw pixels rather than a GPU texture. Returns a
+   malloc'd RGBA buffer (free with DD_StbFree) and fills *w,*h, or NULL when the
+   title has no resource-pack art. The embedded XBE title image is deliberately
+   NOT covered here: it is stored GPU-swizzled (and sometimes DXT1), so the
+   pack-less fallback is handled on its own path. */
+static unsigned char* LoadRGBAFile(const char* path, int* w, int* h) {
+    HANDLE         hf;
+    DWORD          sz, got = 0, attr;
+    unsigned char* file;
+    unsigned char* rgba;
+
+    attr = GetFileAttributesA(path);
+    if (attr == 0xFFFFFFFF || (attr & FILE_ATTRIBUTE_DIRECTORY)) return NULL;
+    hf = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf == INVALID_HANDLE_VALUE) return NULL;
+    sz = GetFileSize(hf, NULL);
+    if (sz == 0 || sz == 0xFFFFFFFF) { CloseHandle(hf); return NULL; }
+    file = (unsigned char*)malloc(sz);
+    if (!file) { CloseHandle(hf); return NULL; }
+    if (!ReadFile(hf, file, sz, &got, NULL) || got != sz) {
+        free(file); CloseHandle(hf); return NULL;
+    }
+    CloseHandle(hf);
+    rgba = DD_StbLoadImageMem(file, (int)sz, w, h);
+    free(file);
+    return rgba;
+}
+
+unsigned char* Launcher_LoadArtRGBA(const char* xbePath, int* w, int* h) {
+    char folder[LAUNCH_PATH_MAX], path[LAUNCH_PATH_MAX];
+    unsigned char* rgba;
+
+    if (w) *w = 0;
+    if (h) *h = 0;
+    if (!xbePath || !xbePath[0]) return NULL;
+
+    TitleFolder(xbePath, folder, sizeof(folder));
+
+    JoinPath(path, sizeof(path), folder, "_resources\\artwork\\opencase.png");
+    rgba = LoadRGBAFile(path, w, h);
+    if (rgba) return rgba;
+
+    JoinPath(path, sizeof(path), folder, "_resources\\artwork\\poster.jpg");
+    rgba = LoadRGBAFile(path, w, h);
+    return rgba;
+}
+
+/* The highlighted title's .xbe path. Unlike Launcher_CurrentAppName this is NOT
+   gated on the launcher being the active screen, so Settings can ask "what is
+   selected?" to push its art. NULL if nothing is listed. */
+const char* Launcher_CurrentXbePath(void) {
+    if (s_count <= 0) return NULL;
+    if (s_cursor < 0 || s_cursor >= s_count) return NULL;
+    return s_items[s_cursor].xbePath;
+}
+
 /* decode (or clear) the title image for item 'idx'; no-op if unchanged */
 static void LoadPedestal(int idx) {
     if (idx == s_pedIdx) return;
@@ -294,8 +366,10 @@ static void CacheSave(const char* id) {
     CloseHandle(h);
 }
 
-/* enumerate immediate subfolders of root that contain a default.xbe */
-static void ScanRoot(const char* root) {
+/* enumerate subfolders of root that contain a default.xbe; descend into
+   subfolders that don't (alphabetical buckets, category trees, etc.) up to
+   LAUNCH_MAX_DEPTH levels. call with depth 0. */
+static void ScanRoot(const char* root, int depth) {
     char            pattern[LAUNCH_PATH_MAX];
     char            folder[LAUNCH_PATH_MAX];
     char            xbe[LAUNCH_PATH_MAX];
@@ -345,7 +419,14 @@ static void ScanRoot(const char* root) {
                 it->titleId = tid;
             }
 
-            s_count++;
+            /* hide list: in normal browsing a hidden path is excluded entirely
+               (the slot is reused). In show-hidden mode we keep it so the user
+               can un-hide it; the render marks it. */
+            if (!Hidden_Is(it->xbePath) || s_showHidden)
+                s_count++;
+        }
+        else if (depth + 1 < LAUNCH_MAX_DEPTH) {
+            ScanRoot(folder, depth + 1);   /* no default.xbe here -> descend */
         }
     } while (FindNextFile(h, &fd));
 
@@ -434,12 +515,12 @@ static void RescanCurrent(void) {
     s_count = 0;
     CacheLoad(s_cfg->cacheId);               /* prior cert results, if any */
     for (i = 0; i < s_cfg->rootCount; i++)
-        ScanRoot(s_cfg->roots[i]);
+        ScanRoot(s_cfg->roots[i], 0);
     /* also scan any user-added custom paths for this category */
     {
         int np = Paths_Count(s_cfg->cacheId), k;
         for (k = 0; k < np; k++)
-            ScanRoot(Paths_Get(s_cfg->cacheId, k));
+            ScanRoot(Paths_Get(s_cfg->cacheId, k), 0);
     }
     CacheSave(s_cfg->cacheId);                /* refresh cache with this scan */
     SortItems();                              /* alphabetical by label */
@@ -448,11 +529,47 @@ static void RescanCurrent(void) {
 void Launcher_Enter(const LauncherConfig* cfg) {
     s_cfg = cfg;
     s_count = 0; s_cursor = 0; s_scroll = 0;
+    s_showHidden = 0;        /* always enter in normal view */
     s_active = 1;             /* a launcher list is now the active screen */
     if (!cfg) return;
     RescanCurrent();
     s_pedIdx = -1;
     LoadPedestal(s_cursor);   /* decode the first app's title image */
+}
+
+/* One-shot "NOW LOADING" screen for a launch: the selected title's pedestal +
+   art centred like the screensaver, with NOW LOADING beneath. Rendered and
+   presented ONCE; because the hand-off (Mount_LaunchXbe) does not return, this
+   frame stays on the front buffer through the blocking Type-D art push and the
+   launch, so the multi-second transfer reads as a deliberate load rather than a
+   freeze. Uses s_ped, already decoded for the highlighted item. */
+static void DrawLoadingScreen(void) {
+    IDirect3DDevice8* d = Gfx_Device();
+    DWORD          now = GetTickCount();
+    const float    dxV = 140.0f, dyV = 20.0f;   /* screensaver recentre offsets */
+    const Texture* ped;
+    int            lw;
+
+    if (!d) return;
+
+    Gfx_BeginFrame(Theme_BG());
+
+    /* themed platform base, same sprite/position the launcher and saver use */
+    ped = Theme_Asset("platform_round");
+    if (ped)
+        UI_DrawSprite(ped, 70.0f + dxV, 270.0f + dyV, 220.0f, 116.0f,
+            UI_ARGB(255, 255, 255, 255), 0);
+
+    /* the title showpiece, centred, full opaque, fixed green beam (no drift) */
+    if (s_ped.tex)
+        Pedestal_DrawSaver(&s_ped, s_pedFlat, now, dxV, dyV, 255, 32, 255, 96);
+
+    /* NOW LOADING centred under the platform (hero column 180 + recentre 140) */
+    lw = Font_MeasureText("NOW LOADING", FONT_SIZE_MEDIUM);
+    Font_DrawText(d, 320.0f - (float)lw * 0.5f, 415.0f, "NOW LOADING",
+        FONT_SIZE_MEDIUM, UI_ARGB(255, 255, 255, 255), 0);
+
+    Gfx_EndFrame();
 }
 
 int Launcher_Update(WORD pressed, WORD held) {
@@ -530,6 +647,46 @@ int Launcher_Update(WORD pressed, WORD held) {
         { const char* suf = " path"; int j = 0; while (suf[j] && i < 39) ttl[i++] = suf[j++]; }
         ttl[i] = 0;
         Browse_Open(ttl);
+        return 0;
+    }
+
+    /* BLACK = hide / un-hide the highlighted entry. In normal view this drops
+       it from the list immediately (reversible). In show-hidden view it flips
+       the persistent flag but keeps the row on screen so you can toggle freely;
+       the marker reflects the current state. */
+    if (pressed & BTN_BLACK) {
+        if (s_count > 0 && s_cursor >= 0 && s_cursor < s_count) {
+            const char* xp = s_items[s_cursor].xbePath;
+            int wantHide = !Hidden_Is(xp);
+            Hidden_Set(xp, wantHide);
+            Audio_PlaySfx(SFX_SELECT);
+            if (!s_showHidden && wantHide) {
+                /* remove the just-hidden row in place; no full re-scan needed */
+                int k;
+                for (k = s_cursor; k < s_count - 1; k++) s_items[k] = s_items[k + 1];
+                s_count--;
+                if (s_cursor >= s_count) s_cursor = (s_count > 0) ? s_count - 1 : 0;
+                ClampScroll();
+                s_pedIdx = -1;
+                LoadPedestal(s_cursor);
+            }
+        }
+        return 0;
+    }
+
+    /* START = toggle the show-hidden view (so hidden entries can be reverted).
+       Rebuilds the list with the filter on/off; keeps the cursor near where it
+       was. */
+    if (pressed & BTN_START) {
+        int keep = s_cursor;
+        s_showHidden = !s_showHidden;
+        Audio_PlaySfx(SFX_SELECT);
+        RescanCurrent();
+        s_cursor = (keep < s_count) ? keep : (s_count > 0 ? s_count - 1 : 0);
+        if (s_cursor < 0) s_cursor = 0;
+        ClampScroll();
+        s_pedIdx = -1;
+        LoadPedestal(s_cursor);
         return 0;
     }
 
@@ -621,9 +778,14 @@ int Launcher_Update(WORD pressed, WORD held) {
             }
         }
         if (pressed & BTN_A) {
+            /* Type-D "Now Playing": fire only if a present unit has its art
+               toggle on (XL Art and/or Type-D Art). */
+            int artOn = TypeDArt_WillSend();
             Audio_PlaySfx(SFX_SELECT);
-            /* release the pedestal texture, stop the music, then hand off.
+            /* show the loading screen while s_ped art is still loaded, then
+               release the pedestal texture, stop the music, and hand off.
                Mount_LaunchXbe does not return on success. */
+            if (artOn) DrawLoadingScreen();
             if (s_ped.tex) Texture_Release(&s_ped);
             s_ped.tex = NULL; s_pedIdx = -1; s_pedFlat = 0;
             Audio_StopMusic();
@@ -632,6 +794,9 @@ int Launcher_Update(WORD pressed, WORD held) {
                game takes over we lose the panel, so this stays up while it runs.
                No-op if the LCD accessory is off/absent. */
             Lcd_NowPlaying(s_items[s_cursor].label);
+            /* push the cover art to the Type-D (blocking; masked by the loading
+               screen already on the front buffer). No-op for pack-less titles. */
+            if (artOn) TypeDArt_SendArtFor(s_items[s_cursor].xbePath);
             Mount_LaunchXbe(s_items[s_cursor].xbePath);
             /* fell through -> launch failed; carry on so the menu stays usable */
         }
@@ -674,6 +839,8 @@ void Launcher_Render(void) {
     /* header */
     if (hdr) UI_DrawSprite(hdr, 8.0f, 8.0f, 300.0f, 40.0f, 0xFFFFFFFF, 0);
     Font_DrawText(d, 26.0f, 14.0f, title, FONT_SIZE_LARGE, accent, 0);
+    if (s_showHidden)
+        Font_DrawText(d, 500.0f, 18.0f, "[ HIDDEN ]", FONT_SIZE_SMALL, glow, 0);
 
     /* pedestal (left): platform base, then the light + title showpiece.
        _resources case art renders as a flat flickering hologram; an XBE title
@@ -706,8 +873,20 @@ void Launcher_Render(void) {
         for (i = 0; i < visible; i++) {
             int  idx = s_scroll + i;
             char row[30];
-            DWORD c = (idx == s_cursor) ? glow : text;
-            FitLabel(row, sizeof(row), s_items[idx].label, 26);
+            int  hid = s_showHidden ? Hidden_Is(s_items[idx].xbePath) : 0;
+            DWORD c = (idx == s_cursor) ? glow : (hid ? dim : text);
+            if (hid) {
+                /* "x " marker so hidden entries are obvious while reverting */
+                char tmp[28];
+                int k = 0;
+                FitLabel(tmp, sizeof(tmp), s_items[idx].label, 24);
+                row[0] = 'x'; row[1] = ' ';
+                while (tmp[k] && k < 27) { row[2 + k] = tmp[k]; k++; }
+                row[2 + k] = 0;
+            }
+            else {
+                FitLabel(row, sizeof(row), s_items[idx].label, 26);
+            }
             Font_DrawTextIso(d, menuX + 24.0f, rowY0 + rowDY * (float)i,
                 row, FONT_SIZE_SMALL, c);
         }
@@ -717,7 +896,10 @@ void Launcher_Render(void) {
 
     /* footer */
     if (foot) UI_DrawSprite(foot, 8.0f, 442.0f, 624.0f, 32.0f, 0xFFFFFFFF, 0);
-    Font_DrawText(d, 24.0f, 449.0f, "A LAUNCH  LT/RT PAGE  WHITE INFO  Y ADD PATH  X REFRESH  B BACK", FONT_SIZE_SMALL, text, 0);
+    if (s_showHidden)
+        Font_DrawText(d, 24.0f, 449.0f, "SHOWING HIDDEN   A LAUNCH  BLACK UNHIDE  START EXIT  B BACK", FONT_SIZE_SMALL, text, 0);
+    else
+        Font_DrawText(d, 24.0f, 449.0f, "A LAUNCH  X REFRESH  WHITE INFO  BLACK HIDE  START HIDDEN  B BACK", FONT_SIZE_SMALL, text, 0);
 
     /* overlays on top of everything */
     Browse_Draw(d);

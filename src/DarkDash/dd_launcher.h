@@ -36,4 +36,13 @@ int  Launcher_LoadArtFor(const char* xbePath, Texture* out, int* isFlat);
    back (e.g. to "DarkDash"). */
 const char* Launcher_CurrentAppName(void);
 
+/* Load the highlighted/any title's resource-pack cover art (opencase.png ->
+   poster.jpg) as a malloc'd RGBA buffer; free with DD_StbFree. Fills *w,*h.
+   NULL if the title has no pack art. (Embedded XBE title image not covered.) */
+unsigned char* Launcher_LoadArtRGBA(const char* xbePath, int* w, int* h);
+
+/* Full .xbe path of the currently highlighted title (not gated on the launcher
+   being the active screen). NULL if nothing is listed. */
+const char* Launcher_CurrentXbePath(void);
+
 #endif /* DD_LAUNCHER_H */

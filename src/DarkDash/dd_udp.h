@@ -36,10 +36,19 @@ extern "C" {
        Either way, a device is "present" if its signature was seen within a
        staleness window. Menus grey out when absent so we never fire control
        packets at a device that isn't there. */
-    enum { UDP_DEV_RGB = 0, UDP_DEV_OXFP = 1, UDP_DEV_COUNT = 2 };
+    enum { UDP_DEV_RGB = 0, UDP_DEV_OXFP = 1, UDP_DEV_TYPED = 2, UDP_DEV_COUNT = 3 };
 
     void Udp_DiscoTick(void);          /* pump discovery every frame (background) */
     int  Udp_Present(int dev);         /* 1 if the device was seen recently        */
+
+    /* Last-known IPv4 of a discovered device, in network byte order (0 if never
+       seen). Used to open a unicast TCP connection (e.g. Type-D image push). */
+    unsigned long Udp_DeviceIp(int dev);
+
+    /* Per-id Type-D presence (beacon "TYPE_D_ID:<n>"): 1-4 regular Type-D, 5 = XL,
+       6 = Expansion. Returns the unit's IP (network order, 0 if absent/stale). */
+    unsigned long Udp_TypeDIp(int id);
+    int           Udp_TypeDPresent(int id);
 
     /* Send a unicast datagram to a specific device's last-known IP:port (for
        control packets). Returns 1 on success. If we have no address for it yet

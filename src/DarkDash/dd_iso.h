@@ -41,6 +41,13 @@ extern "C" {
     void Iso_FillRect(float vx, float vy, float vw, float vh,
         DWORD colour, int additive);
 
+    /* A vertex-coloured triangle STRIP authored in virtual coords, drawn on the
+       tilted plane (so it tilts/breathes with the panels). Per-vertex colour
+       carries the alpha falloff. Used for free-form chrome FX like frame arcs.
+       additive!=0 for a glow look. n is the vertex count (>=3). */
+    typedef struct { float vx, vy; DWORD colour; } IsoStripPt;
+    void Iso_DrawStrip(const IsoStripPt* pts, int n, int additive);
+
     /* Project a virtual-layout anchor through the iso transform.
        Returns the VIRTUAL screen coords where it lands (feed straight to
        Font_DrawText / UI_* which scale virtual->backbuffer). */

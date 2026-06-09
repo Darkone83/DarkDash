@@ -18,6 +18,7 @@
 #include "dd_gfx.h"
 #include "dd_ui.h"
 #include "dd_iso.h"
+#include "dd_arcs.h"
 #include "dd_theme.h"
 #include "dd_plasma.h"
 #include "dd_texture.h"
@@ -43,6 +44,7 @@
 #include "dd_lcd.h"
 #include "dd_udp.h"
 #include "dd_typed.h"
+#include "dd_typedart.h"
 #include "dd_oxfp.h"
 #include "dd_rgb.h"
 #include "dd_screensaver.h"
@@ -415,6 +417,13 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
 
         /* --- frame + text (the part that swings). No rect here -- ever. --- */
         Iso_Begin();
+        /* Frame arcs: occasional Jacob's-ladder bolts hugging the border, drawn
+           BEFORE the panel so the frame occludes their roots. Only at rest (not
+           mid-swing, where the capture would clip them) and only when enabled. */
+        if (!turning && Data_FxOn(DD_FX_ARCS)) {
+            Arcs_Tick(GetTickCount());
+            Arcs_Draw(menuX, menuY, 272.0f, 384.0f);
+        }
         if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
         for (i = 0; i < MENU_COUNT; i++) {
             DWORD c = (i == sel) ? glow : text;
@@ -578,6 +587,7 @@ void __cdecl main(void) {
         Lcd_Tick();   /* refresh the physical LCD accessory (background service) */
         TypeD_Tick(); /* broadcast Type-D status (background, rate-limited)       */
         Udp_DiscoTick(); /* discover XBOX-RGB / OXFP for accessory menu gating    */
+        TypeDArt_BootResumeTick(); /* once discovered, drop last session's held art */
         pressed = (WORD)(btn & ~prev);
         whiteReleased = ((prev & BTN_WHITE) && !(btn & BTN_WHITE)) ? 1 : 0;
         prev = btn;

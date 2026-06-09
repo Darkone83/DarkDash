@@ -12,7 +12,7 @@
 #include "dd_dc.h"
 
 #define DC_MAGIC   0x44434443UL   /* 'DCDC' */
-#define DC_VER     3
+#define DC_VER     5
 
 /* The on-disk blob. Keep fields append-only across versions; never reorder or
    remove (that would break migration of older files). */
@@ -39,6 +39,12 @@ typedef struct {
     int   oxfpGreen, oxfpRed, oxfpOrange;
     int   oxfpAnimA, oxfpAnimB;
 
+    /* --- v4: Type-D "Now Playing" cover art pushed on game launch --- */
+    int   typedArtEnabled;
+
+    /* --- v5: same art for the regular Type-D units (ids 1-4); XL is v4 --- */
+    int   typedCtrlArtEnabled;
+
     /* future: append new fields here, bump DC_VER, default them in DcMigrate */
 } DcBlob;
 
@@ -63,6 +69,8 @@ static void DcDefaults(DcBlob* b) {
     b->oxfpAnim = 0; b->oxfpAnimSpeed = 128;
     b->oxfpGreen = 4; b->oxfpRed = 0; b->oxfpOrange = 2;
     b->oxfpAnimA = 0; b->oxfpAnimB = 8;
+    b->typedArtEnabled = 0;       /* opt-in; further gated by device discovery */
+    b->typedCtrlArtEnabled = 0;   /* opt-in; regular Type-D (1-4) art */
 }
 
 /* Migrate an older-but-valid blob up to the current version in place. Each
@@ -80,6 +88,14 @@ static void DcMigrate(DcBlob* b) {
     if (b->version < 3) {
         /* v3 fields likewise already at defaults from the pre-seed */
         b->version = 3;
+    }
+    if (b->version < 4) {
+        /* v4 field (typedArtEnabled) already at default from the pre-seed */
+        b->version = 4;
+    }
+    if (b->version < 5) {
+        /* v5 field (typedCtrlArtEnabled) already at default from the pre-seed */
+        b->version = 5;
     }
     b->version = DC_VER;
     b->magic = DC_MAGIC;
@@ -141,6 +157,20 @@ int  Dc_TypeDEnabled(void) { if (!s_loaded) Dc_Load(); return s_dc.typedEnabled;
 void Dc_SetTypeDEnabled(int on) {
     if (!s_loaded) Dc_Load();
     s_dc.typedEnabled = on ? 1 : 0;
+    Dc_Save();
+}
+
+int  Dc_TypeDArtEnabled(void) { if (!s_loaded) Dc_Load(); return s_dc.typedArtEnabled; }
+void Dc_SetTypeDArtEnabled(int on) {
+    if (!s_loaded) Dc_Load();
+    s_dc.typedArtEnabled = on ? 1 : 0;
+    Dc_Save();
+}
+
+int  Dc_TypeDCtrlArtEnabled(void) { if (!s_loaded) Dc_Load(); return s_dc.typedCtrlArtEnabled; }
+void Dc_SetTypeDCtrlArtEnabled(int on) {
+    if (!s_loaded) Dc_Load();
+    s_dc.typedCtrlArtEnabled = on ? 1 : 0;
     Dc_Save();
 }
 

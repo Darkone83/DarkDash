@@ -31,6 +31,8 @@
 #include "dd_ftp.h"
 #include "dd_lcd.h"
 #include "dd_typed.h"
+#include "dd_typedart.h"
+#include "dd_launcher.h"
 #include "dd_udp.h"
 #include "dd_rgb.h"
 #include "dd_oxfp.h"
@@ -158,8 +160,8 @@ static int NearestPalette(int r, int g, int b) {
     return best;
 }
 static int s_fxRow = 0;    /* cursor within the Effects sub-menu   */
-static const int k_fxBits[5] = { DD_FX_SCANLINES, DD_FX_SELECT, DD_FX_IDLE, DD_FX_EDGE, DD_FX_PLASMA };
-static const char* const k_fxNames[5] = { "Scanlines", "Selection FX", "Idle Motion", "Edge Flash", "Plasma Orb" };
+static const int k_fxBits[6] = { DD_FX_SCANLINES, DD_FX_SELECT, DD_FX_IDLE, DD_FX_EDGE, DD_FX_PLASMA, DD_FX_ARCS };
+static const char* const k_fxNames[6] = { "Scanlines", "Selection FX", "Idle Motion", "Edge Flash", "Plasma Orb", "Frame Arcs" };
 
 /* Theme panel: discovered theme folder names + cursor + apply message */
 #define THEMES_DIR "D:\\themes"
@@ -289,8 +291,15 @@ static int PickShuffleIdx(void) {
    under the pedestal by the splash and faded out by Settings_NowPlaying(). --- */
 static char  s_npName[64];
 static DWORD s_npStart = 0;        /* GetTickCount at toast start; 0 = inactive */
-#define NP_HOLD_MS 2600            /* full-opacity hold                          */
+#define NP_HOLD_MS 10000          /* full-opacity hold                          */
 #define NP_FADE_MS 900             /* fade-out tail                              */
+
+/* Persistent "current shuffle track" state for the LCD Now-Playing page. Unlike
+   the toast above (s_npStart, which self-zeroes after the fade), this holds for
+   the whole track so the panel can show a live elapsed time. Cleared whenever
+   playback stops or the mode leaves Shuffle. */
+static char  s_curTrack[64];
+static DWORD s_curTrackStart = 0;  /* GetTickCount when the track began; 0 = none */
 
 static void NowPlayingSet(const char* file) {
     int i;
@@ -305,6 +314,11 @@ static void NowPlayingSet(const char* file) {
     }
     s_npStart = GetTickCount();
     if (s_npStart == 0) s_npStart = 1; /* reserve 0 as the "inactive" sentinel */
+
+    /* mirror into the persistent LCD state (survives the toast fade) */
+    for (i = 0; i < 63 && s_npName[i]; i++) s_curTrack[i] = s_npName[i];
+    s_curTrack[i] = 0;
+    s_curTrackStart = s_npStart;
 }
 
 /* Resolve the saved music choice and (re)start playback. One place so boot and
@@ -318,6 +332,7 @@ void Settings_StartMusic(int loop) {
     if (st->musicMode == DD_MUSIC_NONE) {
         Audio_StopMusic();
         s_npStart = 0;
+        s_curTrackStart = 0;
         return;
     }
 
@@ -338,6 +353,7 @@ void Settings_StartMusic(int loop) {
                 Audio_SetMusicPath(0);       /* no real songs -> built-in, looped */
                 Audio_StartMusic(1);
                 s_npStart = 0;               /* nothing real to announce */
+                s_curTrackStart = 0;
             }
         }
         return;
@@ -348,6 +364,7 @@ void Settings_StartMusic(int loop) {
     Audio_SetMusicPath((st->musicCustom && st->musicPath[0]) ? st->musicPath : 0);
     Audio_StartMusic(loop);
     s_npStart = 0;
+    s_curTrackStart = 0;
 }
 
 /* Per-frame music pump. Only Shuffle needs it: when the current (non-looping)
@@ -368,6 +385,18 @@ int Settings_NowPlaying(const char** name, float* alpha) {
     *name = s_npName;
     if (el <= (DWORD)NP_HOLD_MS) *alpha = 1.0f;
     else *alpha = 1.0f - (float)(el - (DWORD)NP_HOLD_MS) / (float)NP_FADE_MS;
+    return 1;
+}
+
+/* Live shuffle "Now Playing" for the LCD page: 1 while Shuffle is playing a real
+   track, filling *name (cleaned, .mp3 stripped) and *elapsedMs (since the track
+   began). Returns 0 in every other music mode / when nothing real is playing, so
+   the LCD page hides itself outside Shuffle. name/elapsedMs may be NULL. */
+int Settings_ShuffleNowPlaying(const char** name, DWORD* elapsedMs) {
+    if (Data_Get()->musicMode != DD_MUSIC_SHUFFLE) return 0;
+    if (s_curTrackStart == 0) return 0;
+    if (name)      *name = s_curTrack;
+    if (elapsedMs) *elapsedMs = GetTickCount() - s_curTrackStart;
     return 1;
 }
 
@@ -423,7 +452,7 @@ static void DrawPedestal(IDirect3DDevice8* d) {
    past 'selectable' are shown dim (read-only). If pinLast, the final row is
    drawn at the bottom of the frame (used for an "Apply"/action row). */
 static void DrawConsole(IDirect3DDevice8* d, const char* const* rows, int count,
-    int selRow, int selectable, int pinLast) {
+    int selRow, int selectable, int pinLast, DWORD disabledMask = 0) {
     DWORD accent = Theme_Color("accent", 0xFF7FE000);
     DWORD text = Theme_Color("text", 0xFFD8F8C0);
     DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
@@ -476,7 +505,8 @@ static void DrawConsole(IDirect3DDevice8* d, const char* const* rows, int count,
 
     Iso_Begin();
     if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
-    if (selRow >= 0 && (selRow < selectable || (pinLast && selRow == count - 1))) {
+    if (selRow >= 0 && (selRow < selectable || (pinLast && selRow == count - 1))
+        && !(disabledMask & (1u << selRow))) {
         float gy;
         if (pinLast && selRow == count - 1) gy = bottomY - 6.0f;
         else                                gy = rowY0 + rowDY * (float)(selRow - first) - 6.0f;
@@ -485,10 +515,14 @@ static void DrawConsole(IDirect3DDevice8* d, const char* const* rows, int count,
     }
     for (i = 0; i < count; i++) {
         int isAction = (pinLast && i == count - 1);
-        DWORD c = (i == selRow) ? glow
-            : (isAction) ? text
-            : (i >= selectable) ? dim : text;
+        int disabled = (disabledMask & (1u << i)) ? 1 : 0;
+        DWORD c;
         float ry;
+        if (isAction)        c = text;        /* pinned action: always live */
+        else if (disabled)        c = dim;         /* greyed: not selectable      */
+        else if (i == selRow)     c = glow;
+        else if (i >= selectable) c = dim;
+        else                      c = text;
         if (isAction) {
             ry = bottomY;                               /* pinned at the foot */
         }
@@ -1039,7 +1073,7 @@ static void UpdateAccessories(WORD pressed) {
     }
 
     if (s_accDev == ACC_DEV_LCD) {
-        int nRows = 11;  /* Enabled, Address, Interval, Brightness, Compat, + 6 page toggles */
+        int nRows = 12;  /* Enabled, Address, Interval, Brightness, Compat, + 7 page toggles */
         if (pressed & BTN_DPAD_DOWN) { if (s_accRow < nRows - 1) { s_accRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
         if (pressed & BTN_DPAD_UP) { if (s_accRow > 0) { s_accRow--; Audio_PlaySfx(SFX_NAV_UP); } }
 
@@ -1066,9 +1100,9 @@ static void UpdateAccessories(WORD pressed) {
             Lcd_SetCompatMode(!Lcd_CompatMode()); Audio_PlaySfx(SFX_ALT);
         }
         else if (s_accRow >= 5 && (pressed & BTN_A)) {
-            static const int k_pageBit[6] = {
+            static const int k_pageBit[7] = {
                 LCD_PAGE_TEMPS, LCD_PAGE_MEM, LCD_PAGE_DISK,
-                LCD_PAGE_NET, LCD_PAGE_FTP, LCD_PAGE_CLOCK
+                LCD_PAGE_NET, LCD_PAGE_FTP, LCD_PAGE_CLOCK, LCD_PAGE_NOWPLAYING
             };
             Lcd_TogglePage(k_pageBit[s_accRow - 5]); Audio_PlaySfx(SFX_ALT);
         }
@@ -1076,7 +1110,36 @@ static void UpdateAccessories(WORD pressed) {
     }
 
     if (s_accDev == ACC_DEV_TYPED) {
-        if (pressed & BTN_A) { TypeD_SetEnabled(!TypeD_Enabled()); Audio_PlaySfx(SFX_ALT); }
+        /* gate the art rows on their device class being detected on the network:
+           a non-present row is unselectable (nav skips it, A is inert) so we
+           never enable art -- or fire a send -- for a device that isn't there. */
+        int xlPresent = Udp_TypeDPresent(5);
+        int ctrlPresent = (Udp_TypeDPresent(1) || Udp_TypeDPresent(2) ||
+            Udp_TypeDPresent(3) || Udp_TypeDPresent(4));
+        int anyPresent = (xlPresent || ctrlPresent);
+        int sel[4];
+        sel[0] = 1;             /* Enabled: always selectable          */
+        sel[1] = xlPresent;     /* XL Art: only if the XL is present    */
+        sel[2] = ctrlPresent;   /* Type-D Art: only if a 1-4 is present */
+        sel[3] = anyPresent;    /* Resume: only if any unit is present  */
+
+        /* if the highlight is parked on a now-unselectable row, snap home */
+        if (s_accRow < 0 || s_accRow > 3 || !sel[s_accRow]) s_accRow = 0;
+
+        if (pressed & BTN_DPAD_DOWN) {
+            int r = s_accRow;
+            while (r < 3) { r++; if (sel[r]) { s_accRow = r; Audio_PlaySfx(SFX_NAV_DOWN); break; } }
+        }
+        if (pressed & BTN_DPAD_UP) {
+            int r = s_accRow;
+            while (r > 0) { r--; if (sel[r]) { s_accRow = r; Audio_PlaySfx(SFX_NAV_UP); break; } }
+        }
+        if (pressed & BTN_A) {
+            if (s_accRow == 0) { TypeD_SetEnabled(!TypeD_Enabled()); Audio_PlaySfx(SFX_ALT); }
+            else if (s_accRow == 1 && sel[1]) { Dc_SetTypeDArtEnabled(!Dc_TypeDArtEnabled()); Audio_PlaySfx(SFX_ALT); }           /* XL Art */
+            else if (s_accRow == 2 && sel[2]) { Dc_SetTypeDCtrlArtEnabled(!Dc_TypeDCtrlArtEnabled()); Audio_PlaySfx(SFX_ALT); }   /* Type-D Art (1-4) */
+            else if (s_accRow == 3 && sel[3]) { TypeDArt_Resume(); Audio_PlaySfx(SFX_SELECT); }
+        }
         return;
     }
 
@@ -1234,7 +1297,7 @@ static void UpdateVideo(WORD pressed) {
 
     /* ---- Effects sub-menu: toggle the four effect flags ---- */
     if (s_fxSub) {
-        if (pressed & BTN_DPAD_DOWN) { if (s_fxRow < 4) { s_fxRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+        if (pressed & BTN_DPAD_DOWN) { if (s_fxRow < 5) { s_fxRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
         if (pressed & BTN_DPAD_UP) { if (s_fxRow > 0) { s_fxRow--; Audio_PlaySfx(SFX_NAV_UP); } }
         if (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT | BTN_A)) {
             st->fxFlags ^= k_fxBits[s_fxRow];      /* flip the bit */
@@ -1617,10 +1680,10 @@ static void RenderVideo(IDirect3DDevice8* d) {
 
     /* ---- Effects sub-menu: four On/Off toggles ---- */
     if (s_fxSub) {
-        char fxRows[5][40];
-        const char* rp[5];
+        char fxRows[6][40];
+        const char* rp[6];
         int i;
-        for (i = 0; i < 5; i++) {
+        for (i = 0; i < 6; i++) {
             int onoff = (st->fxFlags & k_fxBits[i]) ? 1 : 0;
             strcpy(fxRows[i], k_fxNames[i]);
             /* pad to a column, then On/Off */
@@ -1630,7 +1693,7 @@ static void RenderVideo(IDirect3DDevice8* d) {
         }
         Chrome(d, "EFFECTS", "A TOGGLE   B BACK");
         DrawPedestal(d);
-        DrawConsole(d, rp, 5, s_fxRow, 5, 0);
+        DrawConsole(d, rp, 6, s_fxRow, 6, 0);
         {
             DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
             Font_DrawText(d, 60.0f, 410.0f, "Customize the dashboard effects",
@@ -2179,8 +2242,8 @@ static void RenderAccessories(IDirect3DDevice8* d) {
     /* ----- LCD screen ----- */
     if (s_accDev == ACC_DEV_LCD) {
         char enRow[40], adRow[40], ivRow[40], brRow[40], coRow[40];
-        char pTemps[40], pMem[40], pDisk[40], pNet[40], pFtp[40], pClk[40];
-        const char* rows[11]; char num[8]; int k, pages;
+        char pTemps[40], pMem[40], pDisk[40], pNet[40], pFtp[40], pClk[40], pNow[40];
+        const char* rows[12]; char num[8]; int k, pages;
 
         strcpy(enRow, "Enabled   ");
         if (!Lcd_Enabled())          strcat(enRow, "No");
@@ -2200,26 +2263,61 @@ static void RenderAccessories(IDirect3DDevice8* d) {
         strcpy(pNet, "Network   "); strcat(pNet, (pages & LCD_PAGE_NET) ? "On" : "Off");
         strcpy(pFtp, "FTP       "); strcat(pFtp, (pages & LCD_PAGE_FTP) ? "On" : "Off");
         strcpy(pClk, "Clock     "); strcat(pClk, (pages & LCD_PAGE_CLOCK) ? "On" : "Off");
+        strcpy(pNow, "Now Play  "); strcat(pNow, (pages & LCD_PAGE_NOWPLAYING) ? "On" : "Off");
 
         rows[0] = enRow; rows[1] = adRow; rows[2] = ivRow; rows[3] = brRow; rows[4] = coRow;
         rows[5] = pTemps; rows[6] = pMem; rows[7] = pDisk; rows[8] = pNet; rows[9] = pFtp; rows[10] = pClk;
+        rows[11] = pNow;
 
         Chrome(d, "LCD", "A TOGGLE  L/R ADJUST  B BACK");
         DrawPedestal(d);
-        DrawConsole(d, rows, 11, s_accRow, 11, 0);
+        DrawConsole(d, rows, 12, s_accRow, 12, 0);
         return;
     }
 
     /* ----- Type-D screen ----- */
     if (s_accDev == ACC_DEV_TYPED) {
-        const char* rows[2];
+        const char* rows[5];
         char enRow[40];
-        strcpy(enRow, "Enabled   "); strcat(enRow, TypeD_Enabled() ? "Yes" : "No");
+        char xlRow[40];
+        char tdaRow[40];
+        char detRow[48];
+        int  idd, any;
+        int  xlPresent = Udp_TypeDPresent(5);
+        int  ctrlPresent = (Udp_TypeDPresent(1) || Udp_TypeDPresent(2) ||
+            Udp_TypeDPresent(3) || Udp_TypeDPresent(4));
+        int  anyPresent = (xlPresent || ctrlPresent);
+        DWORD dis = 0;                       /* greyed rows when device absent   */
+        if (!xlPresent)   dis |= (1u << 1);  /* XL Art                           */
+        if (!ctrlPresent) dis |= (1u << 2);  /* Type-D Art                       */
+        if (!anyPresent)  dis |= (1u << 3);  /* Resume                           */
+        strcpy(enRow, "Enabled    "); strcat(enRow, TypeD_Enabled() ? "Yes" : "No");
+        /* "XL Art" -> XL (id 5, 480x480); "Type-D Art" -> regular Type-D units
+           (ids 1-4, 240x240). When a device class isn't detected its row is
+           greyed (unselectable) and shown as "No" -- a display flag only; the
+           stored dc.dat preference is NOT written, so it returns intact when the
+           device comes back. */
+        strcpy(xlRow, "XL Art     "); strcat(xlRow, !xlPresent ? "No" : (Dc_TypeDArtEnabled() ? "Yes" : "No"));
+        strcpy(tdaRow, "Type-D Art "); strcat(tdaRow, !ctrlPresent ? "No" : (Dc_TypeDCtrlArtEnabled() ? "Yes" : "No"));
+        /* per-id roster of present units: XL + P1..P4 */
+        strcpy(detRow, "Units: ");
+        any = 0;
+        for (idd = 1; idd <= 5; idd++) {
+            if (!Udp_TypeDPresent(idd)) continue;
+            if (any) strcat(detRow, " ");
+            if (idd == 5) strcat(detRow, "XL");
+            else { char p[3]; p[0] = 'P'; p[1] = (char)('0' + idd); p[2] = 0; strcat(detRow, p); }
+            any = 1;
+        }
+        if (!any) strcat(detRow, "none");
         rows[0] = enRow;
-        rows[1] = "Sends app name over UDP";
-        Chrome(d, "TYPE-D", "A TOGGLE  B BACK");
+        rows[1] = xlRow;
+        rows[2] = tdaRow;
+        rows[3] = "Resume Slideshow";
+        rows[4] = detRow;
+        Chrome(d, "TYPE-D", "A SELECT  B BACK");
         DrawPedestal(d);
-        DrawConsole(d, rows, 2, s_accRow, 1, 0);
+        DrawConsole(d, rows, 5, s_accRow, 4, 0, dis);   /* 0-3 selectable; 4 = roster; dis = greyed */
         return;
     }
 

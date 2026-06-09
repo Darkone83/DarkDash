@@ -179,6 +179,8 @@ static LONG  s_segHigh[NSEG];                     /* per-buffer-segment treble l
 static int   s_lpState = 0;                       /* one-pole lowpass state (fill thread)         */
 static LONG  s_levelLow = 0;                      /* smoothed bass output  (main thread)          */
 static LONG  s_levelHigh = 0;                     /* smoothed treble output (main thread)         */
+static LONG  s_playCursor = 0;                    /* play cursor published by the fill thread so the
+                                                     main thread never calls into DirectSound       */
 static CRITICAL_SECTION    s_musicCS;
 static int                 s_csReady = 0;
 
@@ -305,6 +307,7 @@ static DWORD WINAPI MusicThreadProc(LPVOID pParam) {
            silence (no stale re-loop) until the shuffle pump starts the next track. */
 
         s_music->GetCurrentPosition(&dwPlay, &dwWrite);
+        InterlockedExchange(&s_playCursor, (LONG)dwPlay);  /* publish for Audio_MusicLevels */
         playHalf = (dwPlay < (DWORD)AUDIO_STREAM_HALF) ? 0 : 1;
         fillHalf = 1 - playHalf;     /* the half behind the cursor */
 
@@ -404,9 +407,15 @@ int Audio_MusicFinished(void) {
    cursor and looks up the per-segment level the fill thread precomputed, then
    applies fast-attack / slower-decay smoothing. lo/hi may be NULL. */
 void Audio_MusicLevels(int* lo, int* hi) {
-    DWORD play = 0, wr = 0; LONG tlo = 0, thi = 0, a, b;
-    if (s_music && SUCCEEDED(s_music->GetCurrentPosition(&play, &wr))) {
-        int seg = (int)(play / SEG_BYTES);
+    DWORD play; LONG tlo = 0, thi = 0, a, b;
+    /* Read the play cursor the fill thread published -- never call into the
+       DirectSound buffer from the main thread (that would race the fill
+       thread's Lock/Unlock on the same buffer). When no track is loaded the
+       published cursor simply stops advancing and the levels decay to calm. */
+    if (s_music) {
+        int seg;
+        play = (DWORD)InterlockedCompareExchange(&s_playCursor, 0, 0);
+        seg = (int)(play / SEG_BYTES);
         if (seg < 0) seg = 0; else if (seg >= NSEG) seg = NSEG - 1;
         tlo = s_segLow[seg]; thi = s_segHigh[seg];
     }
@@ -436,6 +445,18 @@ void Audio_StartMusic(int loop) {
 
     if (!s_ds) return;
     Audio_StopMusic();   /* tear down any prior stream */
+
+    /* If that stop hit its backstop (a wedged DSound Lock left a fill thread
+       lingering), drain it fully now -- by the time control returns here it has
+       long since unblocked -- and release the leaked buffer before we reuse any
+       shared globals, so a second fill thread can never race the first. */
+    if (s_musicThread) {
+        WaitForSingleObject(s_musicThread, INFINITE);
+        CloseHandle(s_musicThread); s_musicThread = NULL;
+        if (s_music) { s_music->Stop(); s_music->Release(); s_music = NULL; }
+        if (s_musicData) { free(s_musicData); s_musicData = NULL; }
+        InterlockedExchange(&s_musicStop, 0);
+    }
 
     if (s_musicFile[0]) {
         strncpy(path, s_musicFile, sizeof(path) - 1); path[sizeof(path) - 1] = 0;
@@ -504,17 +525,38 @@ void Audio_StartMusic(int loop) {
 }
 
 void Audio_StopMusic(void) {
+    int joined = 1;
     if (s_musicThread) {
+        int guard = 0;
         InterlockedExchange(&s_musicStop, 1);
-        WaitForSingleObject(s_musicThread, 2000);
-        CloseHandle(s_musicThread);
-        s_musicThread = NULL;
+        /* Wait for the fill thread to ACTUALLY exit before touching the buffer.
+           Releasing s_music while the thread is still inside Lock/Unlock is a
+           use-after-free (hard lock), so we never release on a stall -- we keep
+           waiting in slices instead of the old single 2s timeout that then
+           released anyway. With the main thread no longer calling into the
+           buffer (Audio_MusicLevels reads a published cursor), the fill thread
+           is uncontended and exits within a tick in practice; the cap below is
+           only a defensive backstop for a wedged-at-the-driver DSound Lock,
+           which would mean the audio device is already dead. */
+        while (WaitForSingleObject(s_musicThread, 250) == WAIT_TIMEOUT) {
+            if (++guard >= 60) { joined = 0; break; }   /* ~15s backstop */
+        }
+        if (joined) { CloseHandle(s_musicThread); s_musicThread = NULL; }
     }
-    InterlockedExchange(&s_musicStop, 0);
 
-    if (s_music) { s_music->Stop(); s_music->Release(); s_music = NULL; }
-    if (s_musicData) { free(s_musicData); s_musicData = NULL; }
-    s_musicSize = 0; s_musicPos = 0; s_carryBytes = 0; s_levelLow = 0; s_levelHigh = 0; s_lpState = 0;
+    if (joined) {
+        InterlockedExchange(&s_musicStop, 0);
+        if (s_music) { s_music->Stop(); s_music->Release(); s_music = NULL; }
+        if (s_musicData) { free(s_musicData); s_musicData = NULL; }
+    }
+    /* else: the thread never returned from a wedged Lock. Leak the buffer, data
+       and handle rather than free them under a live thread -- Audio_StartMusic
+       drains any such lingering thread before reusing the globals. s_musicStop
+       stays set so the zombie exits the instant its Lock unblocks. */
+
+    s_musicSize = 0; s_musicPos = 0; s_carryBytes = 0;
+    s_levelLow = 0; s_levelHigh = 0; s_lpState = 0;
+    InterlockedExchange(&s_playCursor, 0);
 }
 
 int Audio_DbgReady(void) { return s_ds ? 1 : 0; }

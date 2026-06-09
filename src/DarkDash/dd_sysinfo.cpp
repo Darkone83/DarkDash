@@ -16,6 +16,7 @@
 
 #define SMBADDR_PIC      0x20   /* PIC16/SMC          (software-shifted 8-bit) */
 #define SMBADDR_ADM1032  0x98   /* ADM1032 temp mon   (software-shifted 8-bit) */
+#define SMBUS_FAIL_RESET 4      /* consecutive temp-read failures -> W1C the bus */
 
 static int SMBusRead(BYTE addr, BYTE reg, BYTE* out) {
     DWORD v = 0;
@@ -66,11 +67,29 @@ void Sys_Init(void) {
     Sys_SmbusReset();
 }
 
+/* Runtime SMBus watchdog. The recurring temperature poll feeds its result here.
+   A present console always answers on the ADM1032 or the PIC, so a RUN of
+   consecutive temp-read failures means the nForce controller has latched a stuck
+   status (a collision with the SMC or a secondary master -- Type-D/OXFP). Left
+   alone, the kernel's SMBus retry loop can eventually spin forever. W1C the
+   controller once the run crosses the threshold so the bus self-heals at runtime
+   instead of only at Sys_Init -- and because the W1C clears the SHARED status
+   register, it can also free another thread (e.g. the LCD writer) spinning on it.
+   A single failure is normal (a transient collision or a settling sensor), so we
+   never reset on one. Limit: this only fires while the kernel calls still RETURN;
+   if a call spins inside the kernel on this thread, control never returns here --
+   a separate liveness watchdog thread would be needed for that case. */
+static int s_smbusFails = 0;
+static void SmbusWatchdog(int ok) {
+    if (ok) { s_smbusFails = 0; return; }
+    if (++s_smbusFails >= SMBUS_FAIL_RESET) { s_smbusFails = 0; Sys_SmbusReset(); }
+}
+
 int Sys_ReadTemps(int* cpuC, int* boardC) {
     BYTE c = 0, b = 0;
     /* ADM1032 (rev 1.0-1.5): regs read directly, no scaling. */
     if (SMBusRead(SMBADDR_ADM1032, 0x01, &c) && SMBusRead(SMBADDR_ADM1032, 0x00, &b)) {
-        if (cpuC) *cpuC = c; if (boardC) *boardC = b; return 1;
+        if (cpuC) *cpuC = c; if (boardC) *boardC = b; SmbusWatchdog(1); return 1;
     }
     /* PIC/SMC fallback (rev 1.6 / Xyclops): CPU_TEMP (0x09) / MB_TEMP (0x0A).
        On 1.6 the board reading runs high and needs the 0.8x ambient scaling
@@ -80,8 +99,9 @@ int Sys_ReadTemps(int* cpuC, int* boardC) {
        absent, i.e. a 1.6, so applying the scale here is correct. */
     if (SMBusRead(SMBADDR_PIC, CPU_TEMP, &c) && SMBusRead(SMBADDR_PIC, MB_TEMP, &b)) {
         b = (BYTE)((int)b * 4 / 5);          /* 1.6 board-temp correction */
-        if (cpuC) *cpuC = c; if (boardC) *boardC = b; return 1;
+        if (cpuC) *cpuC = c; if (boardC) *boardC = b; SmbusWatchdog(1); return 1;
     }
+    SmbusWatchdog(0);
     return 0;
 }
 

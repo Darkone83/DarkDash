@@ -149,6 +149,37 @@ void Iso_FillRect(float vx, float vy, float vw, float vh,
     d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(IsoVert));
 }
 
+#define ISO_STRIP_MAX 96
+
+void Iso_DrawStrip(const IsoStripPt* pts, int n, int additive) {
+    IDirect3DDevice8* d = Gfx_Device();
+    static IsoVert v[ISO_STRIP_MAX];
+    float cx = UI_VIRT_W * 0.5f, cy = UI_VIRT_H * 0.5f;
+    int i;
+
+    if (!d || !pts || n < 3) return;
+    if (n > ISO_STRIP_MAX) n = ISO_STRIP_MAX;
+
+    for (i = 0; i < n; i++) {
+        v[i].x = pts[i].vx - cx;
+        v[i].y = cy - pts[i].vy;       /* flip Y so up is +Y (matches panels) */
+        v[i].z = 0.0f;
+        v[i].colour = pts[i].colour;
+        v[i].u = 0.0f; v[i].v = 0.0f;
+    }
+
+    d->SetTexture(0, NULL);
+    d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    d->SetRenderState(D3DRS_DESTBLEND, additive ? D3DBLEND_ONE : D3DBLEND_INVSRCALPHA);
+    d->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+    d->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+    d->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+    d->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    d->SetVertexShader(ISO_FVF);
+    d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, n - 2, v, sizeof(IsoVert));
+}
+
 void Iso_Project(float vx, float vy, float* outVx, float* outVy) {
     float cx = UI_VIRT_W * 0.5f, cy = UI_VIRT_H * 0.5f;
     D3DXVECTOR3 in, out;

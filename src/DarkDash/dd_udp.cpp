@@ -29,7 +29,12 @@ static DiscoDev s_dev[UDP_DEV_COUNT] = {
     /* RGB:  port 7777, advertises "XBOX RGB", passive */
     { 7777,  "XBOX RGB", 0, INVALID_SOCKET, 0, 0 },
     /* OXFP: port 32123, replies "OXFP", active poll    */
-    { 32123, "OXFP",     1, INVALID_SOCKET, 0, 0 }
+    { 32123, "OXFP",     1, INVALID_SOCKET, 0, 0 },
+    /* Type-D XL: port 50502, advertises "TYPE_D_ID:5", passive.
+       The beacon is "TYPE_D_ID:<n>" -- 1-4 regular Type-D, 5 = XL, 6 = Exp --
+       so we match the full id-5 string to latch ONLY the XL's IP even when
+       other units are broadcasting on the same port. */
+    { 50502, "TYPE_D_ID:5", 0, INVALID_SOCKET, 0, 0 }
 };
 
 static DWORD s_oxfpPollTimer = 0;
@@ -37,6 +42,32 @@ static char  s_rx[1600];
 #define DISCO_STALE_MS   25000UL   /* present if seen within this window       */
 #define OXFP_POLL_MS      4000UL   /* how often to ping the (silent) OXFP      */
 #define DISCO_RXBUF       1600
+
+/* Per-id Type-D presence. The beacon is "TYPE_D_ID:<n>" (1-4 regular Type-D,
+   5 = XL, 6 = Expansion). All of them arrive on the one 50502 socket bound by
+   the UDP_DEV_TYPED entry, so we parse the id off each datagram as it's drained
+   and stamp this table -- giving every unit its own IP without a second socket
+   on the shared port. Index by id; slot 0 unused; 6 tracked but not addressed
+   for art. */
+#define TD_ID_MAX         6
+static DWORD s_tdAddr[TD_ID_MAX + 1];
+static DWORD s_tdSeen[TD_ID_MAX + 1];
+
+/* If 'buf' contains "TYPE_D_ID:<n>", return n (1..9); else 0. */
+static int ParseTypeDId(const char* buf, int len) {
+    static const char* pfx = "TYPE_D_ID:";
+    int pl = 10, i, j;
+    for (i = 0; i + pl < len; i++) {
+        int match = 1;
+        for (j = 0; j < pl; j++) { if (buf[i + j] != pfx[j]) { match = 0; break; } }
+        if (match) {
+            int p = i + pl;
+            if (p < len && buf[p] >= '0' && buf[p] <= '9') return buf[p] - '0';
+            return 0;
+        }
+    }
+    return 0;
+}
 
 /* Create (once) a non-blocking, broadcast-enabled UDP socket. Returns 1 if a
    usable socket exists afterward. */
@@ -186,6 +217,15 @@ static void DrainDevice(DiscoDev* dv) {
             dv->lastSeen = GetTickCount();
             dv->addr = from.sin_addr.s_addr;
         }
+        /* Type-D beacons ("TYPE_D_ID:<n>") only arrive on the 50502 socket;
+           parse the id and stamp the per-id table so each unit is addressable. */
+        {
+            int tdid = ParseTypeDId(s_rx, n);
+            if (tdid >= 1 && tdid <= TD_ID_MAX) {
+                s_tdAddr[tdid] = from.sin_addr.s_addr;
+                s_tdSeen[tdid] = GetTickCount();
+            }
+        }
     }
 }
 
@@ -220,6 +260,24 @@ int Udp_Present(int dev) {
     if (s_dev[dev].lastSeen == 0) return 0;
     now = GetTickCount();
     return ((now - s_dev[dev].lastSeen) <= DISCO_STALE_MS) ? 1 : 0;
+}
+
+unsigned long Udp_DeviceIp(int dev) {
+    if (dev < 0 || dev >= UDP_DEV_COUNT) return 0;
+    return (unsigned long)s_dev[dev].addr;   /* network order, 0 if never seen */
+}
+
+unsigned long Udp_TypeDIp(int id) {
+    DWORD now;
+    if (id < 1 || id > TD_ID_MAX) return 0;
+    if (s_tdSeen[id] == 0) return 0;
+    now = GetTickCount();
+    if ((now - s_tdSeen[id]) > DISCO_STALE_MS) return 0;   /* gone stale */
+    return (unsigned long)s_tdAddr[id];      /* network order */
+}
+
+int Udp_TypeDPresent(int id) {
+    return Udp_TypeDIp(id) != 0;
 }
 
 int Udp_LastReply(int dev, char* buf, int cap, unsigned long* whenMs) {

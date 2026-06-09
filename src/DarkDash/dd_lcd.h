@@ -35,13 +35,16 @@ extern "C" {
         LCD_PAGE_NET = 0x08,   /* IP address / link               */
         LCD_PAGE_FTP = 0x10,   /* live FTP status + transfer       */
         LCD_PAGE_CLOCK = 0x20,   /* date + time                      */
-        LCD_PAGE_DISK2 = 0x40    /* disk overflow page -- derived from LCD_PAGE_DISK,
+        LCD_PAGE_DISK2 = 0x40,   /* disk overflow page -- derived from LCD_PAGE_DISK,
                                     NOT user-toggleable and NOT in LCD_PAGE_ALL;
                                     added to the rotation automatically when more
                                     user partitions are present than fit on one
                                     screen (header + 3 rows). */
+        LCD_PAGE_NOWPLAYING = 0x80 /* shuffle track + elapsed time; user-toggleable
+                                    but only joins the rotation while Shuffle is
+                                    actually playing a real track. */
     };
-#define LCD_PAGE_ALL  (LCD_PAGE_TEMPS|LCD_PAGE_MEM|LCD_PAGE_DISK|LCD_PAGE_NET|LCD_PAGE_FTP|LCD_PAGE_CLOCK)
+#define LCD_PAGE_ALL  (LCD_PAGE_TEMPS|LCD_PAGE_MEM|LCD_PAGE_DISK|LCD_PAGE_NET|LCD_PAGE_FTP|LCD_PAGE_CLOCK|LCD_PAGE_NOWPLAYING)
 
     /* address choices */
     enum { LCD_ADDR_3C = 0, LCD_ADDR_3D = 1 };

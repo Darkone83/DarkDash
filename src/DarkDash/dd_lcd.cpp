@@ -53,7 +53,7 @@ static int     s_cfgLoaded = 0;
 /* ---- runtime state ------------------------------------------------------ */
 static int   s_present = 0;
 static BYTE  s_addr8 = LCD_ADDR8_3C;     /* active 8-bit address           */
-static int   s_pageOrder[8];               /* enabled page bits, in order    */
+static int   s_pageOrder[10];              /* enabled page bits, in order    */
 static int   s_pageN = 0;                  /* count of enabled pages         */
 static int   s_pageCur = 0;                /* index into s_pageOrder         */
 static DWORD s_pageTimer = 0;
@@ -100,6 +100,13 @@ static void IToA(int v, char* out) { char t[12]; int n = 0, i = 0, neg = 0; if (
       ~4Hz here keeps the seconds clock smooth while staying in PrometheOS/firmware
       territory (they run ~1Hz). Raise toward 1000 to match them exactly. */
 #define LCD_COMPAT_TICK_MS  250
+      /* Raw (baremetal) US2066 service cadence. The panel is shared with the Xbox
+         SMBus, where a secondary master -- the Type-D Expansion unit -- politely polls
+         ~every 4s after checking the lines are idle. The nForce controller (our writes)
+         does NOT check the bus first, so the only way to avoid colliding into the
+         Expansion's poll is to keep our own occupancy low. 1Hz matches Cerbios/
+         PrometheOS; a seconds clock needs nothing faster. */
+#define LCD_RAW_TICK_MS    1000
 static int SmbW(BYTE reg, BYTE val) {
     int ok = HalWriteSMBusValue(s_addr8, reg, FALSE, (DWORD)val) == 0;
     /* Non-yielding settle between LCD transactions (compat) -- mirrors the
@@ -146,8 +153,15 @@ static void LCDChar(BYTE data) {
 
 static void LCDGoto(int row, int col) {
     if (row < 0 || row >= LCD_ROWS || col < 0 || col >= LCD_COLS) return;
-    SmbW(0x80, HD44780_DDRAM(k_rowBase[row] + (BYTE)col));
-    s_hwRow = row; s_hwCol = col; s_lRow = row; s_lCol = col;
+    /* Only issue the DDRAM address-set if the panel cursor isn't already here.
+       Saves a bus transaction whenever a render re-seeks to where the hardware
+       cursor already sits (matches LCDChar's own cursor-aware addressing) --
+       another small trim to our shared-bus occupancy. */
+    if (s_hwRow != row || s_hwCol != col) {
+        SmbW(0x80, HD44780_DDRAM(k_rowBase[row] + (BYTE)col));
+        s_hwRow = row; s_hwCol = col;
+    }
+    s_lRow = row; s_lCol = col;
 }
 
 static void LCDPuts(const char* s, int width) {
@@ -472,23 +486,35 @@ static void CfgSave(void) {
 }
 
 /* ---- build the rotation order from the page bitmask --------------------- */
+
+/* live shuffle Now-Playing (owned by settings.cpp). Forward-declared so the LCD
+   driver doesn't pull in the whole settings header. */
+int Settings_ShuffleNowPlaying(const char** name, DWORD* elapsedMs);
+
+/* 1 while the Now-Playing page has something to show (Shuffle playing a real
+   track). The page is user-toggleable but only rotates in while this holds. */
+static int NowPlayingActive(void) {
+    return Settings_ShuffleNowPlaying(0, 0);
+}
+
 static void RebuildPageOrder(void) {
-    static const int k_bits[6] = {
+    static const int k_bits[7] = {
         LCD_PAGE_TEMPS, LCD_PAGE_MEM, LCD_PAGE_DISK,
-        LCD_PAGE_NET, LCD_PAGE_FTP, LCD_PAGE_CLOCK
+        LCD_PAGE_NET, LCD_PAGE_FTP, LCD_PAGE_CLOCK, LCD_PAGE_NOWPLAYING
     };
     int i;
     s_pageN = 0;
-    for (i = 0; i < 6; i++) {
-        if (s_cfg.pages & k_bits[i]) {
-            s_pageOrder[s_pageN++] = k_bits[i];
-            /* the disk view spans more than one rotating page when there are
-               more user partitions than fit on a single screen (header + 3
-               rows). Append the overflow page(s) right after the primary one so
-               e.g. G: gets its own line instead of falling off the bottom. */
-            if (k_bits[i] == LCD_PAGE_DISK && DiskPageCount() > 1)
-                s_pageOrder[s_pageN++] = LCD_PAGE_DISK2;
-        }
+    for (i = 0; i < 7; i++) {
+        if (!(s_cfg.pages & k_bits[i])) continue;
+        /* Now-Playing only joins while Shuffle is actually playing a track. */
+        if (k_bits[i] == LCD_PAGE_NOWPLAYING && !NowPlayingActive()) continue;
+        s_pageOrder[s_pageN++] = k_bits[i];
+        /* the disk view spans more than one rotating page when there are
+           more user partitions than fit on a single screen (header + 3
+           rows). Append the overflow page(s) right after the primary one so
+           e.g. G: gets its own line instead of falling off the bottom. */
+        if (k_bits[i] == LCD_PAGE_DISK && DiskPageCount() > 1)
+            s_pageOrder[s_pageN++] = LCD_PAGE_DISK2;
     }
     if (s_pageCur >= s_pageN) s_pageCur = 0;
 }
@@ -733,6 +759,43 @@ static void PageClock(void) {
     LCDGoto(3, 0); LCDPuts("", LCD_COLS);
 }
 
+static void PageNowPlaying(void) {
+    const char* name = "";
+    DWORD elapsed = 0;
+    char  buf[21], tm[12];
+    int   secs, mm, ss;
+
+    LCDHeader("Now Playing");
+
+    if (!Settings_ShuffleNowPlaying(&name, &elapsed)) {
+        /* RebuildPageOrder keeps this page out of rotation while Shuffle is idle,
+           so this is only a safety fallback. */
+        LCDGoto(1, 0); LCDPuts("", LCD_COLS);
+        LCDGoto(2, 0); LCDCenter(buf, "(stopped)"); LCDPuts(buf, LCD_COLS);
+        LCDGoto(3, 0); LCDPuts("", LCD_COLS);
+        return;
+    }
+
+    /* row 1: track name (truncated + padded to 20) */
+    LCDGoto(1, 0); LCDPuts(name, LCD_COLS);
+
+    /* row 2: spacer */
+    LCDGoto(2, 0); LCDPuts("", LCD_COLS);
+
+    /* row 3: elapsed MM:SS, centered. Clamp to 99:59 so a long track can't
+       overflow the field. */
+    secs = (int)(elapsed / 1000);
+    mm = secs / 60; ss = secs % 60;
+    if (mm > 99) { mm = 99; ss = 59; }
+    tm[0] = (char)('0' + (mm / 10) % 10);
+    tm[1] = (char)('0' + mm % 10);
+    tm[2] = ':';
+    tm[3] = (char)('0' + ss / 10);
+    tm[4] = (char)('0' + ss % 10);
+    tm[5] = 0;
+    LCDGoto(3, 0); LCDCenter(buf, tm); LCDPuts(buf, LCD_COLS);
+}
+
 static void DrawPage(int pageBit) {
     switch (pageBit) {
     case LCD_PAGE_TEMPS: PageTemps(); break;
@@ -742,6 +805,7 @@ static void DrawPage(int pageBit) {
     case LCD_PAGE_NET:   PageNet();   break;
     case LCD_PAGE_FTP:   PageFtp();   break;
     case LCD_PAGE_CLOCK: PageClock(); break;
+    case LCD_PAGE_NOWPLAYING: PageNowPlaying(); break;
     default: PageSplash(); break;
     }
 }
@@ -827,15 +891,19 @@ void Lcd_Tick(void) {
 
     now = GetTickCount();
 
-    /* Calm cadence for Theia (compat). PrometheOS's render loop and your firmware
-       telemetry both run ~1Hz; nothing drives this panel at frame rate. Gating
-       the whole service here turns DarkDash's 60Hz dribble into a few quiet
-       batches/sec, letting the ESP32 slave's receive path fully catch up between
-       updates. Tunable; 1000ms == PrometheOS. Baremetal is unthrottled. */
-    if (s_cfg.compat) {
-        static DWORD s_compatTick = 0;
-        if ((now - s_compatTick) < LCD_COMPAT_TICK_MS) return;
-        s_compatTick = now;
+    /* Calm cadence. Nothing drives this panel at frame rate -- a seconds clock
+       only needs 1Hz. Gating the whole service turns DarkDash's per-frame dribble
+       into a few quiet batches/sec. This matters on the shared SMBus: the less
+       time our writes occupy the bus, the less often they land on top of the
+       Type-D Expansion unit's ~4s poll (which the nForce controller can't see or
+       arbitrate against), and the rarer the collision/wedge. Compat (Theia) keeps
+       its ~4Hz; the raw US2066 path -- previously unthrottled at ~60Hz -- now runs
+       1Hz to match Cerbios/PrometheOS. */
+    {
+        static DWORD s_tickGate = 0;
+        DWORD period = s_cfg.compat ? LCD_COMPAT_TICK_MS : LCD_RAW_TICK_MS;
+        if ((now - s_tickGate) < period) return;
+        s_tickGate = now;
     }
 
     /* Sensors are NOT read here -- the pages draw from the cache filled by
@@ -845,6 +913,17 @@ void Lcd_Tick(void) {
        shared bus, which is the adjacency that wedges the ESP32 slave. */
 
        /* page rotation */
+
+       /* Now-Playing joins/leaves the rotation as Shuffle starts/stops a track.
+          Rebuild on that transition (before the empty-guard below) so it appears
+          and clears promptly -- and so it can show even when it's the only enabled
+          page. */
+    if (s_cfg.pages & LCD_PAGE_NOWPLAYING) {
+        static int s_npWas = -1;
+        int npa = NowPlayingActive();
+        if (npa != s_npWas) { s_npWas = npa; RebuildPageOrder(); }
+    }
+
     if (s_pageN == 0) { RebuildPageOrder(); if (s_pageN == 0) return; }
 
     /* FTP auto-focus: while a transfer is in progress, pin the FTP page (if it's

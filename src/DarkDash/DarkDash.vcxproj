@@ -12,6 +12,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="applications.cpp" />
+    <ClCompile Include="dd_arcs.cpp" />
     <ClCompile Include="dd_audio.cpp" />
     <ClCompile Include="dd_backdrop.cpp" />
     <ClCompile Include="dd_browse.cpp" />
@@ -29,6 +30,7 @@
     </ClCompile>
     <ClCompile Include="dd_ftp.cpp" />
     <ClCompile Include="dd_gfx.cpp" />
+    <ClCompile Include="dd_hidden.cpp" />
     <ClCompile Include="dd_iso.cpp" />
     <ClCompile Include="dd_launcher.cpp" />
     <ClCompile Include="dd_lcd.cpp" />
@@ -54,6 +56,7 @@
     <ClCompile Include="dd_theme.cpp" />
     <ClCompile Include="dd_time.cpp" />
     <ClCompile Include="dd_typed.cpp" />
+    <ClCompile Include="dd_typedart.cpp" />
     <ClCompile Include="dd_udp.cpp" />
     <ClCompile Include="dd_ui.cpp" />
     <ClCompile Include="dd_update.cpp" />
@@ -74,6 +77,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="applications.h" />
+    <ClInclude Include="dd_arcs.h" />
     <ClInclude Include="dd_audio.h" />
     <ClInclude Include="dd_backdrop.h" />
     <ClInclude Include="dd_browse.h" />
@@ -89,6 +93,7 @@
     <ClInclude Include="dd_ftp.h" />
     <ClInclude Include="dd_fx.h" />
     <ClInclude Include="dd_gfx.h" />
+    <ClInclude Include="dd_hidden.h" />
     <ClInclude Include="dd_iso.h" />
     <ClInclude Include="dd_launcher.h" />
     <ClInclude Include="dd_lcd.h" />
@@ -114,6 +119,7 @@
     <ClInclude Include="dd_theme.h" />
     <ClInclude Include="dd_time.h" />
     <ClInclude Include="dd_typed.h" />
+    <ClInclude Include="dd_typedart.h" />
     <ClInclude Include="dd_udp.h" />
     <ClInclude Include="dd_ui.h" />
     <ClInclude Include="dd_update.h" />

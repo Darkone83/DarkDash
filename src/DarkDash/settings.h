@@ -29,4 +29,9 @@ void Settings_MusicTick(void);
    0..1 *alpha (held, then faded). Only active just after a Shuffle track change. */
 int Settings_NowPlaying(const char** name, float* alpha);
 
+/* Live shuffle Now-Playing for the LCD page: 1 while Shuffle is playing a real
+   track, filling *name and *elapsedMs (ms since the track began). 0 otherwise.
+   name / elapsedMs may be NULL. */
+int Settings_ShuffleNowPlaying(const char** name, DWORD* elapsedMs);
+
 #endif /* SETTINGS_H */

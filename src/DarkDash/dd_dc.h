@@ -29,6 +29,12 @@ extern "C" {
     int  Dc_TypeDEnabled(void);
     void Dc_SetTypeDEnabled(int on);
 
+    /* Type-D "Now Playing" cover art pushed to the device on game launch. */
+    int  Dc_TypeDArtEnabled(void);          /* XL (id 5)        */
+    void Dc_SetTypeDArtEnabled(int on);
+    int  Dc_TypeDCtrlArtEnabled(void);      /* regular Type-D (1-4) */
+    void Dc_SetTypeDCtrlArtEnabled(int on);
+
     /* RGB last-used settings (persisted so they survive reboot) */
     int  Dc_RgbMode(void);       void Dc_SetRgbMode(int m);
     int  Dc_RgbBright(void);     void Dc_SetRgbBright(int b);
