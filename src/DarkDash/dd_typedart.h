@@ -1,24 +1,22 @@
 #ifndef DD_TYPEDART_H
 #define DD_TYPEDART_H
 /*---------------------------------------------------------------------------
-    dd_typedart.h -- push cover art to a Type-D / Type-D XL display.
+    dd_typedart.h -- push cover art to discovered Type-D / Type-D XL displays.
 
-    The dash resizes a title's art to the panel's native 480x480, packs it as
-    RGB565 (little-endian, host order), and streams it over a raw TCP socket to
-    the device's image port (50580). The device holds it as a "Now Playing"
-    background with a live telemetry strip until told to resume.
+    The dash letterbox-fits a title's art to each present panel's native size --
+    480x480 for the XL (id 5), 240x240 for the regular Type-D units (ids 1-4) --
+    packs it as RGB565 (little-endian, host order), and streams it over a raw TCP
+    socket to the device's image port (50580). The device holds it as a "Now
+    Playing" background with a live telemetry strip until told to resume.
 
-    Transport mirrors the Winsock idiom in dd_update.cpp. The device's IP comes
-    from the shared discovery layer (dd_udp), which latches it from the device's
-    UDP 50502 beacon -- so a push only works once the device has been seen.
+    Multi-unit: a launch pushes to every discovered, art-enabled unit, largest
+    payload first (480 then 240) so the heavy XL frame gets the earliest, freshest
+    send window before the launch tears down networking.
 
-    Step 1 (this cut): transport + a built-in test pattern, so the dash->device
-    push can be verified before the art-decode/resize and launch hooks land.
-
-    Usage:
-        TypeDArt_SendTestPattern()   build + send 480x480 colour bars (test)
-        TypeDArt_Resume()            tell the device to return to its slideshow
-        TypeDArt_Present()           1 if a Type-D has been discovered
+    Transport mirrors the Winsock idiom in dd_update.cpp. Device IPs come from the
+    shared discovery layer (dd_udp), latched from each unit's UDP 50502 beacon --
+    so a push only works once a device has been seen. See the function
+    declarations below for the full API.
 ---------------------------------------------------------------------------*/
 #ifdef __cplusplus
 extern "C" {
@@ -36,8 +34,9 @@ extern "C" {
     int TypeDArt_SendTestPattern(void);
 
     /* Load the title's resource-pack cover art (opencase.png -> poster.jpg),
-       letterbox-fit it to 480x480 RGB565, and push it. Returns 1 on success, 0
-       if the title has no pack art, no device is known, or the send failed.
+       letterbox-fit it to each present panel's native size (480 XL / 240 Type-D)
+       as RGB565, and push it. Returns 1 on success, 0 if the title has no pack
+       art, no device is known, or the send failed.
        (Pack-less titles -- XBE title image -- are a separate fallback.) */
     int TypeDArt_SendArtFor(const char* xbePath);
 

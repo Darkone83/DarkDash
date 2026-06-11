@@ -44,6 +44,16 @@ extern "C" {
     int  Audio_MusicLevel(void);   /* 0..255 combined loudness; 0 when stopped */
     void Audio_MusicLevels(int* lo, int* hi);   /* split bass / treble, each 0..255 */
 
+    /* Audio-reactivity gate (diagnostic). When OFF, Audio_MusicLevels reports
+       calm (0,0) so visual consumers (plasma) stop reacting WITHOUT stopping
+       playback -- lets you A/B on hardware: music + reactivity vs music-only vs
+       (set music mode to None) silent, to confirm where a fault lives. Music
+       still plays and the fill thread still runs when reactivity is off; only
+       the published level is forced to zero. Default follows
+       DD_AUDIO_REACTIVE_DEFAULT (1). */
+    void Audio_SetReactive(int on);
+    int  Audio_Reactive(void);
+
     /* Background-music volume, 0..100 percent. Set takes effect live if music is
        already playing, and is re-applied on the next StartMusic. */
     void Audio_SetMusicVolume(int pct);

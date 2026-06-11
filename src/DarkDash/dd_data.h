@@ -38,6 +38,10 @@ extern "C" {
 #define DD_FX_EDGE       0x08    /* edge-glow flash on select     */
 #define DD_FX_PLASMA     0x10    /* hero orb -> animated plasma ball (off by default) */
 #define DD_FX_ARCS       0x20    /* Jacob's-ladder arcs hugging the menu frame (off by default) */
+#define DD_FX_SET        0x40    /* sentinel: always set on save, so a stored value of 0 (which
+                                    can ONLY be a legacy/zeroed blob) is distinguishable from the
+                                    user deliberately turning every effect off (== DD_FX_SET alone) */
+#define DD_FX_ALL        (DD_FX_SCANLINES | DD_FX_SELECT | DD_FX_IDLE | DD_FX_EDGE | DD_FX_PLASMA | DD_FX_ARCS)
 #define DD_FX_DEFAULT    (DD_FX_SCANLINES | DD_FX_SELECT | DD_FX_IDLE | DD_FX_EDGE)
 
     typedef struct DD_Settings {

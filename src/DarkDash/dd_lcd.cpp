@@ -14,6 +14,8 @@
 #include "dd_net.h"
 #include "dd_ftp.h"
 #include "dd_version.h"
+#include "dd_watchdog.h"
+#include "dd_smbus.h"          /* single SMBus owner -- LCD writes go through it now */
 
 #define LCD_COLS   20
 #define LCD_ROWS   4
@@ -52,6 +54,7 @@ static int     s_cfgLoaded = 0;
 
 /* ---- runtime state ------------------------------------------------------ */
 static int   s_present = 0;
+static int   s_pendingProbe = 0;   /* boot: defer the SMBus probe/splash until Smb_Ready() */
 static BYTE  s_addr8 = LCD_ADDR8_3C;     /* active 8-bit address           */
 static int   s_pageOrder[10];              /* enabled page bits, in order    */
 static int   s_pageN = 0;                  /* count of enabled pages         */
@@ -108,21 +111,32 @@ static void IToA(int v, char* out) { char t[12]; int n = 0, i = 0, neg = 0; if (
          PrometheOS; a seconds clock needs nothing faster. */
 #define LCD_RAW_TICK_MS    1000
 static int SmbW(BYTE reg, BYTE val) {
-    int ok = HalWriteSMBusValue(s_addr8, reg, FALSE, (DWORD)val) == 0;
+    int ok;
+    /* Through the broker so this write is serialized against the sensor reader
+       and the watchdog, and starts on a preflighted controller. Wrapped as an
+       "LCD" turn for the watchdog breadcrumb; nests for free when the caller has
+       already opened an LCD turn around a whole page burst (the common path). */
+    Smb_BeginTurn("LCD");
+    ok = Smb_Write8(s_addr8, reg, val);
+    Smb_EndTurn();
     /* Non-yielding settle between LCD transactions (compat) -- mirrors the
-       receiver firmware's delayShort (delayMicroseconds(60)). KeStall, not Sleep:
-       Sleep yields the thread (pointless here); this tight busy-wait gives the
-       ESP32 slave's RX a clean ~60us gap between our 2-byte writes. */
+       receiver firmware's delayShort (delayMicroseconds(60)). This is ESP32-slave
+       RX pacing, distinct from the broker's inter-master guard, so it stays here
+       and applies inside a burst too. */
     if (s_cfg.compat) KeStallExecutionProcessor(LCD_COMPAT_TX_GAP_US);
     return ok;
 }
 static int SmbProbe(void) {
-    DWORD v = 0;
+    BYTE v = 0;
+    int  ok;
     /* Compat is write-only: never read the Theia slave (its onRequest/clock-
        stretch path is the lockup trigger). The user opted into compat for a
        forwarded panel, so assume present and just drive it, like PrometheOS. */
     if (s_cfg.compat) return 1;
-    return HalReadSMBusValue(s_addr8, 0x00, FALSE, &v) == 0;
+    Smb_BeginTurn("LCD");
+    ok = Smb_Read8(s_addr8, 0x00, &v);
+    Smb_EndTurn();
+    return ok;
 }
 
 /* ---- LCD primitives ----------------------------------------------------- */
@@ -810,11 +824,13 @@ static void DrawPage(int pageBit) {
     }
 }
 
-/* Compat (Theia): page/FTP changes are NOT cleared -- PrometheOS and XBMC never
-   clear during operation. Every page writes all four full-width rows, so the
-   per-cell diff overwrites only the cells that actually differ from the previous
-   page (no full-screen rewrite, no CLEAR command). Baremetal path is identical;
-   compat differs only by the calm cadence + ASCII glyphs + no panel reads. */
+/* Page/FTP changes are NOT cleared -- PrometheOS and XBMC never clear during
+   operation. Every page writes all four full-width rows, so the per-cell diff
+   overwrites only the cells that actually differ from the previous page (no
+   full-screen rewrite, no CLEAR command). The draw path is identical for both
+   panels; compat (Theia) differs only by ASCII glyphs and being write-only (no
+   panel reads). Both paths are cadence-gated in Lcd_Tick (compat ~4Hz,
+   baremetal ~1Hz) to keep SMBus occupancy low. */
 static void DrawPageFlip(int pageBit) {
     DrawPage(pageBit);
 }
@@ -826,14 +842,13 @@ static void ProbeAndInit(void) {
     s_present = 0;
     s_addr8 = (s_cfg.addrChoice == LCD_ADDR_3D) ? LCD_ADDR8_3D : LCD_ADDR8_3C;
     if (!s_cfg.enabled) return;
-    /* Detection robustness (overclocked / softmod boxes): clear any stuck nForce
-       SMBus state before probing -- a busy controller makes SmbProbe falsely
-       report "nothing here". Reset, then give it a couple of tries; OC timing
-       can need a beat for the panel to ACK. (pattern: XbDiag SMBusControllerReset) */
-    Sys_SmbusReset();
+    /* Detection robustness (overclocked / softmod boxes): the broker preflights
+       (clears a dirty controller) at the start of every turn, so SmbProbe already
+       starts on a clean controller -- no explicit lock-free reset here, which
+       could W1C the controller while another thread is mid-transaction. A couple
+       of tries still helps OC timing where the panel needs a beat to ACK. */
     for (tries = 0; tries < 3; tries++) {
         if (SmbProbe()) break;
-        Sys_SmbusReset();
         Sleep(20);
     }
     if (tries >= 3) return;              /* nothing at this address */
@@ -853,7 +868,10 @@ void Lcd_Init(void) {
     CfgLoad();
     RebuildPageOrder();
     s_pageCur = 0;
-    ProbeAndInit();
+    /* Defer the bus probe/splash: a too-early SMBus read right after boot (esp.
+       an abnormal reset) can wedge on a still-settling controller. Lcd_Tick runs
+       the real ProbeAndInit() on the first tick after Smb_Ready(). */
+    s_pendingProbe = 1;
 }
 
 /* Sensor poll -- DECOUPLED from the LCD write path, mirroring PrometheOS, whose
@@ -887,6 +905,15 @@ void Lcd_PollSensors(void) {
 
 void Lcd_Tick(void) {
     DWORD now;
+
+    /* Deferred boot probe: hold the panel's first SMBus access until the broker's
+       boot-settle window has passed, so we never probe a still-settling bus. */
+    if (s_pendingProbe) {
+        if (!Smb_Ready()) return;
+        s_pendingProbe = 0;
+        ProbeAndInit();
+    }
+
     if (!s_present || !s_cfg.enabled) return;
 
     now = GetTickCount();
@@ -939,7 +966,7 @@ void Lcd_Tick(void) {
 
         if (fst == 3) {
             s_ftpWasXfer = 1;
-            DrawPageFlip(LCD_PAGE_FTP);
+            Smb_BeginTurn("LCD"); DrawPageFlip(LCD_PAGE_FTP); Smb_EndTurn();
             s_pageTimer = now;          /* don't advance rotation while pinned   */
             return;
         }
@@ -962,8 +989,10 @@ void Lcd_Tick(void) {
 
     /* Redraw the current page; the shadow diff makes unchanged cells free, so
        only changed cells go on the bus. In compat the whole service is cadence-
-       gated above (~PrometheOS rate), so this is a few calm batches/sec. */
-    DrawPageFlip(s_pageOrder[s_pageCur]);
+       gated above (~PrometheOS rate), so this is a few calm batches/sec. One
+       turn for the whole page: a single preflight + one inter-master guard for
+       the burst, not per changed cell. */
+    Smb_BeginTurn("LCD"); DrawPageFlip(s_pageOrder[s_pageCur]); Smb_EndTurn();
 }
 
 void Lcd_Shutdown(void) {

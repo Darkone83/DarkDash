@@ -9,6 +9,7 @@ void Sys_Init(void);                              /* clear stuck SMBus once  */
 void Sys_SmbusReset(void);                         /* W1C-clear nForce SMBus (call before probing on OC/softmod) */
 int  Sys_ReadTemps(int* cpuC, int* boardC);       /* 1 if read, degrees C    */
 int  Sys_ReadFanPct(int* pct);                    /* 1 if read, 0..100       */
+void Sys_ServiceSensors(void);                    /* bus refill; SERVICE THREAD ONLY */
 void Sys_DiskFreeStr(const char* drive, char* out, int cap);  /* "12.3 GB"   */
 void Sys_DiskUsageStr(const char* drive, char* out, int cap); /* "4.2 / 8.0 GB" */
 

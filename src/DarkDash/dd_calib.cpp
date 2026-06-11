@@ -1,11 +1,17 @@
 /*---------------------------------------------------------------------------
     dd_calib.cpp -- screen calibration overlay (see dd_calib.h).
 
+    Two-stick corner drag: the LEFT stick drags the top-left safe-area corner,
+    the RIGHT stick drags the bottom-right corner. Push a stick toward where you
+    want that corner to sit -- out toward the screen edge to widen, back toward
+    center to pull in. Deflection sets the speed (gentle near center for fine
+    nudges, quicker at full push), so bringing a margin in and back out again is
+    one fluid motion. A saves, B cancels.
+
     During the run loop we zero the UI calibration so UI_Sx/Sy map the full
-    640x480 virtual canvas to the whole screen; the brackets are then drawn at
-    the chosen inset (calibL/T .. 640-calibR/480-calibB) against full-screen
-    reference lines. On save we push the insets into DD_Settings and apply them
-    live via UI_SetCalibration.
+    640x480 virtual canvas to the whole screen; the corners are drawn at the
+    chosen inset against full-screen reference lines. On save we push the insets
+    into DD_Settings and apply them live via UI_SetCalibration.
 
     Build: MSVC2003/C89 style; file-scope statics; no CRT str*.
 ---------------------------------------------------------------------------*/
@@ -20,9 +26,11 @@
 #include "dd_theme.h"
 #include "dd_texture.h"
 
-static int s_l, s_r, s_t, s_b;   /* working insets (virtual px) */
+#define CALIB_RATE_MAX 4.0f   /* px/frame at full stick deflection */
 
-static int ClampI(int v, int lo, int hi) {
+static float s_l, s_r, s_t, s_b;   /* working insets (virtual px, fractional) */
+
+static float ClampF(float v, float lo, float hi) {
     if (v < lo) return lo; if (v > hi) return hi; return v;
 }
 
@@ -34,6 +42,15 @@ static void ItoA(int v, char* out, int cap) {
     while (v > 0 && n < 11) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
     while (n > 0 && i < cap - 1) out[i++] = tmp[--n];
     out[i] = 0;
+}
+
+/* stick axis (-32767..32767, already deadzoned) -> px/frame. Quadratic, so it
+   creeps near center for fine alignment and moves quickly toward full push. */
+static float StickRate(int v) {
+    float n = (float)v / 32767.0f;        /* -1..1 */
+    float m = (n < 0.0f) ? -n : n;        /* magnitude */
+    float r = m * m * CALIB_RATE_MAX;
+    return (n < 0.0f) ? -r : r;
 }
 
 void Calib_Apply(void) {
@@ -54,25 +71,24 @@ void Calib_Run(void) {
     int running = 1, save = 0;
 
     /* seed working values from saved (or 0) */
-    s_l = ClampI(s->calibL, 0, CALIB_MAX);
-    s_r = ClampI(s->calibR, 0, CALIB_MAX);
-    s_t = ClampI(s->calibT, 0, CALIB_MAX);
-    s_b = ClampI(s->calibB, 0, CALIB_MAX);
+    s_l = ClampF((float)s->calibL, 0.0f, (float)CALIB_MAX);
+    s_r = ClampF((float)s->calibR, 0.0f, (float)CALIB_MAX);
+    s_t = ClampF((float)s->calibT, 0.0f, (float)CALIB_MAX);
+    s_b = ClampF((float)s->calibB, 0.0f, (float)CALIB_MAX);
 
     /* seed prev with whatever is held right now (e.g. the A press that opened
        this screen) so it isn't read as an immediate Save-and-exit on frame 1. */
     PumpInput();
     prev = GetButtons();
 
-    /* draw with NO inset so brackets map against the true screen */
+    /* draw with NO inset so the corners map against the true screen */
     UI_SetCalibration(0.0f, 0.0f, 0.0f, 0.0f);
     d = Gfx_Device();
 
     while (running) {
         WORD btn, pressed;
-        int step;
-        DWORD t; int pv; DWORD col;
-        float rx, bphase;
+        int  lx, ly, rx, ry;
+        DWORD t; int pv; DWORD col, coldim;
         DWORD accent, glow, text;
         int   gr, gg, gb;
 
@@ -81,14 +97,16 @@ void Calib_Run(void) {
         pressed = (WORD)(btn & ~prev);
         prev = btn;
 
-        /* step size: RT = coarse(4), default fine(1). BLACK reverses (subtract). */
-        step = (btn & BTN_RTRIG) ? 4 : 1;
-        if (btn & BTN_BLACK) step = -step;
-
-        if (pressed & BTN_DPAD_LEFT) { s_l = ClampI(s_l + step, 0, CALIB_MAX); Audio_PlaySfx(SFX_NAV_UP); }
-        if (pressed & BTN_DPAD_RIGHT) { s_r = ClampI(s_r + step, 0, CALIB_MAX); Audio_PlaySfx(SFX_NAV_UP); }
-        if (pressed & BTN_DPAD_UP) { s_t = ClampI(s_t + step, 0, CALIB_MAX); Audio_PlaySfx(SFX_NAV_UP); }
-        if (pressed & BTN_DPAD_DOWN) { s_b = ClampI(s_b + step, 0, CALIB_MAX); Audio_PlaySfx(SFX_NAV_UP); }
+        /* Left stick drags the top-left corner, right stick the bottom-right.
+           Push toward where you want the corner to go; the signs below map a
+           stick deflection to the matching edge inset (X right grows the left
+           inset / shrinks the right; Y up shrinks the top inset / grows the
+           bottom). */
+        GetSticks(lx, ly, rx, ry);
+        s_l = ClampF(s_l + StickRate(lx), 0.0f, (float)CALIB_MAX);
+        s_t = ClampF(s_t - StickRate(ly), 0.0f, (float)CALIB_MAX);
+        s_r = ClampF(s_r - StickRate(rx), 0.0f, (float)CALIB_MAX);
+        s_b = ClampF(s_b + StickRate(ry), 0.0f, (float)CALIB_MAX);
 
         if (pressed & BTN_A) { save = 1; running = 0; Audio_PlaySfx(SFX_SELECT); }
         if (pressed & BTN_B) { save = 0; running = 0; Audio_PlaySfx(SFX_BACK); }
@@ -102,53 +120,60 @@ void Calib_Run(void) {
         text = Theme_Color("text", 0xFFD8F8C0);
         gr = (int)((glow >> 16) & 0xFF); gg = (int)((glow >> 8) & 0xFF); gb = (int)(glow & 0xFF);
 
-        /* faint reference border at the absolute screen edges */
-        UI_FillRect(0.0f, 0.0f, 640.0f, 1.0f, UI_ARGB(120, gr, gg, gb));
-        UI_FillRect(0.0f, 479.0f, 640.0f, 1.0f, UI_ARGB(120, gr, gg, gb));
-        UI_FillRect(0.0f, 0.0f, 1.0f, 480.0f, UI_ARGB(120, gr, gg, gb));
-        UI_FillRect(639.0f, 0.0f, 1.0f, 480.0f, UI_ARGB(120, gr, gg, gb));
-
-        /* pulsing alpha for the corner triangles (glow color) */
+        /* pulsing alpha for the two stick-dragged corner handles */
         t = GetTickCount() % 1600;
-        bphase = (float)t / 1600.0f;
-        pv = (bphase < 0.5f) ? (int)(bphase * 2.0f * 130.0f)
-            : (int)((2.0f - bphase * 2.0f) * 130.0f);
-        col = UI_ARGB((DWORD)(125 + pv), gr, gg, gb);
-
-        /* themed corner triangles at the chosen safe-area insets.
-           Each is a right triangle with the RIGHT-ANGLE at the corner (the
-           alignment point) and the hypotenuse facing screen center. */
         {
-            float L = (float)s_l, R = 640.0f - (float)s_r;
-            float T = (float)s_t, B = 480.0f - (float)s_b;
-            float a = 34.0f;   /* leg length */
-            /* top-left  (corner at L,T) */
-            UI_FillTri(L, T, L + a, T, L, T + a, col);
-            /* top-right (corner at R,T) */
-            UI_FillTri(R, T, R - a, T, R, T + a, col);
-            /* bottom-left (corner at L,B) */
-            UI_FillTri(L, B, L + a, B, L, B - a, col);
-            /* bottom-right (corner at R,B) */
-            UI_FillTri(R, B, R - a, B, R, B - a, col);
-            rx = R; (void)rx;
+            float bphase = (float)t / 1600.0f;
+            pv = (bphase < 0.5f) ? (int)(bphase * 2.0f * 130.0f)
+                : (int)((2.0f - bphase * 2.0f) * 130.0f);
+        }
+        col = UI_ARGB((DWORD)(125 + pv), gr, gg, gb);   /* TL & BR: active handles  */
+        coldim = UI_ARGB(90, gr, gg, gb);                  /* TR & BL + frame: passive */
+
+        /* the safe-area rectangle: a dim frame whose edges meet the corner
+           handles, so the whole shape drags together with the sticks. Corner
+           triangles sit on top -- the two stick handles (top-left, bottom-right)
+           pulse bright; the other two stay dim. */
+        {
+            float L = s_l, R = 640.0f - s_r;
+            float T = s_t, B = 480.0f - s_b;
+            float w = R - L, h = B - T;
+            float a = 34.0f;   /* corner leg length */
+
+            /* frame edges, aligned to the inset corners */
+            UI_FillRect(L, T, w, 1.0f, coldim);          /* top    */
+            UI_FillRect(L, B, w, 1.0f, coldim);          /* bottom */
+            UI_FillRect(L, T, 1.0f, h, coldim);          /* left   */
+            UI_FillRect(R, T, 1.0f, h, coldim);          /* right  */
+
+            /* corner handles (right-angle at the inset corner, hypotenuse to center) */
+            UI_FillTri(L, T, L + a, T, L, T + a, col);      /* top-left  (left stick)     */
+            UI_FillTri(R, B, R - a, B, R, B - a, col);      /* bottom-right (right stick) */
+            UI_FillTri(R, T, R - a, T, R, T + a, coldim);   /* top-right  (passive)       */
+            UI_FillTri(L, B, L + a, B, L, B - a, coldim);   /* bottom-left (passive)      */
         }
 
         /* title + instructions, themed, centered */
         Font_DrawTextCentered(d, 0.0f, 150.0f, 640.0f, "SCREEN CALIBRATION",
             FONT_SIZE_MEDIUM, accent);
-        Font_DrawTextCentered(d, 0.0f, 200.0f, 640.0f,
-            "Line up each corner with your screen edges",
+        Font_DrawTextCentered(d, 0.0f, 198.0f, 640.0f,
+            "Left stick: drag the top-left corner",
+            FONT_SIZE_SMALL, text);
+        Font_DrawTextCentered(d, 0.0f, 220.0f, 640.0f,
+            "Right stick: drag the bottom-right corner",
             FONT_SIZE_SMALL, text);
 
         /* current values, themed */
         {
             char vals[64], n[8];
+            int li = (int)(s_l + 0.5f), ri = (int)(s_r + 0.5f);
+            int ti = (int)(s_t + 0.5f), bi = (int)(s_b + 0.5f);
             vals[0] = 0;
-            lstrcatA(vals, "L "); ItoA(s_l, n, sizeof(n)); lstrcatA(vals, n);
-            lstrcatA(vals, "   R "); ItoA(s_r, n, sizeof(n)); lstrcatA(vals, n);
-            lstrcatA(vals, "   T "); ItoA(s_t, n, sizeof(n)); lstrcatA(vals, n);
-            lstrcatA(vals, "   B "); ItoA(s_b, n, sizeof(n)); lstrcatA(vals, n);
-            Font_DrawTextCentered(d, 0.0f, 234.0f, 640.0f, vals,
+            lstrcatA(vals, "L "); ItoA(li, n, sizeof(n)); lstrcatA(vals, n);
+            lstrcatA(vals, "   R "); ItoA(ri, n, sizeof(n)); lstrcatA(vals, n);
+            lstrcatA(vals, "   T "); ItoA(ti, n, sizeof(n)); lstrcatA(vals, n);
+            lstrcatA(vals, "   B "); ItoA(bi, n, sizeof(n)); lstrcatA(vals, n);
+            Font_DrawTextCentered(d, 0.0f, 248.0f, 640.0f, vals,
                 FONT_SIZE_SMALL, glow);
         }
 
@@ -157,7 +182,7 @@ void Calib_Run(void) {
             const Texture* foot = Theme_Asset("bar_footer");
             if (foot) UI_DrawSprite(foot, 8.0f, 442.0f, 624.0f, 32.0f, 0xFFFFFFFF, 0);
             Font_DrawTextCentered(d, 8.0f, 449.0f, 624.0f,
-                "D-PAD ADJUST   RT COARSE   BLACK REVERSE   A SAVE   B CANCEL",
+                "STICKS  DRAG CORNERS      A  SAVE      B  CANCEL",
                 FONT_SIZE_SMALL, text);
         }
 
@@ -166,7 +191,8 @@ void Calib_Run(void) {
     }
 
     if (save) {
-        s->calibL = s_l; s->calibR = s_r; s->calibT = s_t; s->calibB = s_b;
+        s->calibL = (int)(s_l + 0.5f); s->calibR = (int)(s_r + 0.5f);
+        s->calibT = (int)(s_t + 0.5f); s->calibB = (int)(s_b + 0.5f);
         s->calibrated = 1;
         Data_Save();
     }

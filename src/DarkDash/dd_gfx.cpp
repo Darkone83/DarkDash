@@ -4,6 +4,7 @@
 #include <xtl.h>
 #include "dd_gfx.h"
 #include "dd_data.h"
+#include "dd_watchdog.h"
 
 static IDirect3D8* s_d3d = NULL;
 static IDirect3DDevice8* s_device = NULL;
@@ -153,4 +154,5 @@ void Gfx_EndFrame(void) {
     if (!s_device) return;
     s_device->EndScene();
     s_device->Present(NULL, NULL, NULL, NULL);
+    Watchdog_Beat();   /* main-thread liveness tick (see dd_watchdog) */
 }

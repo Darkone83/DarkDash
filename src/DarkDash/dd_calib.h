@@ -1,8 +1,9 @@
 /*---------------------------------------------------------------------------
     dd_calib.h -- screen calibration (overscan adjustment) for DarkDash.
 
-    Ported in spirit from XbDiag's ScreenCalib. The user drags four corner
-    brackets inward to the visible edges of their TV; the resulting insets are
+    Ported in spirit from XbDiag's ScreenCalib. The user drags the safe-area
+    corners to the visible edges of their TV with the two sticks (left stick =
+    top-left corner, right stick = bottom-right); the resulting insets are
     applied globally through UI_SetCalibration (squeezing the whole 640x480
     virtual canvas into the safe area) and saved into DD_Settings.
 

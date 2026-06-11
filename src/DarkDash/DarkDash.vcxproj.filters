@@ -192,6 +192,21 @@
     <ClCompile Include="dd_arcs.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="dd_watchdog.h">
+      <Filter>Header Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_watchdog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_smbus.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_smbsvc.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_trace.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Text Include="Media\Copy Assets Here.txt">
@@ -380,6 +395,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="dd_arcs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_smbus.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_smbsvc.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_trace.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

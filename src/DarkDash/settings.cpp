@@ -1300,8 +1300,7 @@ static void UpdateVideo(WORD pressed) {
         if (pressed & BTN_DPAD_DOWN) { if (s_fxRow < 5) { s_fxRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
         if (pressed & BTN_DPAD_UP) { if (s_fxRow > 0) { s_fxRow--; Audio_PlaySfx(SFX_NAV_UP); } }
         if (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT | BTN_A)) {
-            st->fxFlags ^= k_fxBits[s_fxRow];      /* flip the bit */
-            if (st->fxFlags == 0) st->fxFlags = 0; /* allow all-off in-session */
+            st->fxFlags ^= k_fxBits[s_fxRow];      /* flip the bit (all-off is valid + persists) */
             Data_Save();
             Audio_PlaySfx(SFX_ALT);
         }
@@ -1603,8 +1602,13 @@ static void RenderAudio(IDirect3DDevice8* d) {
     }
     else if (st->musicCustom && st->musicPath[0]) {
         const char* p = st->musicPath; const char* base = p;
+        int tl = 0;
         while (*p) { if (*p == '\\') base = p + 1; p++; }
-        strcat(trkRow, base);
+        /* bounded append: a long filename (musicPath can be far longer than this
+           row) must never run past trkRow -- that was a stack stomp into volRow. */
+        while (trkRow[tl]) tl++;
+        while (*base && tl < (int)sizeof(trkRow) - 1) trkRow[tl++] = *base++;
+        trkRow[tl] = 0;
     }
     else {
         strcat(trkRow, "Built-in");
@@ -1661,7 +1665,9 @@ static void RenderFan(IDirect3DDevice8* d) {
     DrawConsole(d, rows, nRows, s_row, selectable, 0);
 }
 
-/*---- render: placeholder (still launcher-style) ----------------------------*/
+/*---- render: defensive fallback. Every category has a real renderer (see the
+       dispatch in Settings_Render); this is only reached if s_view is ever out
+       of range, and simply shows "Coming soon" rather than a blank screen. ---*/
 
 static void RenderPlaceholder(IDirect3DDevice8* d, const char* name) {
     const char* rows[1];

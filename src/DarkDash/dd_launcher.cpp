@@ -17,6 +17,7 @@
 #include "dd_texture.h"
 #include "font.h"
 #include "input.h"
+#include "dd_watchdog.h"
 #include "dd_audio.h"
 #include "dd_xbe.h"
 #include "dd_stbi.h"
@@ -795,8 +796,10 @@ int Launcher_Update(WORD pressed, WORD held) {
                No-op if the LCD accessory is off/absent. */
             Lcd_NowPlaying(s_items[s_cursor].label);
             /* push the cover art to the Type-D (blocking; masked by the loading
-               screen already on the front buffer). No-op for pack-less titles. */
-            if (artOn) TypeDArt_SendArtFor(s_items[s_cursor].xbePath);
+               screen already on the front buffer). No-op for pack-less titles.
+               Suspend the liveness watchdog across this -- it legitimately stalls
+               the main loop for up to several seconds with no present. */
+            if (artOn) { Watchdog_Suspend(); TypeDArt_SendArtFor(s_items[s_cursor].xbePath); Watchdog_Resume(); }
             Mount_LaunchXbe(s_items[s_cursor].xbePath);
             /* fell through -> launch failed; carry on so the menu stays usable */
         }

@@ -1,11 +1,12 @@
 /*---------------------------------------------------------------------------
-    FileMan.cpp -- dual-pane FILE MANAGER (stage 1: navigation scaffold).
+    FileMan.cpp -- dual-pane FILE MANAGER.
 
     Two flat panes (source left, destination right), each a Pane holding a
     current path + entry list + cursor/scroll + marks. One pane is active.
     Directory listing is done here (pane-state-specific) via FindFirstFile;
     the virtual root "/" lists drives + present MUs. Operations (copy/move/
-    delete/rename/mkdir) layer on in stage 2 via dd_fileops.
+    delete/rename/mkdir) run via dd_fileops, with copy/move staged as an async
+    dd_copyjob so the UI stays responsive.
 
     Build: MSVC2003/C89 style -- declarations precede statements, file-scope
     statics, no sprintf/strlen.

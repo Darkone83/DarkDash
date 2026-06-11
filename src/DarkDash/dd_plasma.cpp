@@ -75,6 +75,18 @@ static float s_nx[SPH_GRID], s_ny[SPH_GRID], s_nz[SPH_GRID];
 static DWORD s_col[SPH_GRID];
 static NVert s_vtx[SPH_VERTS];
 
+/* Resident dynamic vertex buffer for the sphere, replacing the per-frame 2x
+   DrawPrimitiveUP. The UP path copied ~735KB/frame through D3D's shared scratch
+   ring; when that ring wrapped against an in-flight GPU read it corrupted the
+   pushbuffer and hard-wedged the NV2A (which holds the memory bus and freezes
+   the whole CPU). A dedicated VB removes that entirely: fill once per frame,
+   draw both hemispheres from it. Double-buffered (ping-pong) because Xbox Lock
+   does NOT stall on a buffer the GPU is still reading -- we write the one the
+   GPU finished two frames ago, never the one in flight. */
+static IDirect3DVertexBuffer8* s_vb[2] = { NULL, NULL };
+static int   s_vbState = 0;     /* 0 = not yet created, 1 = ready, -1 = create failed (UP fallback) */
+static int   s_vbFrame = 0;     /* ping-pong index */
+
 static unsigned char s_pal[256][3];
 static DWORD s_palBase = 0xFFFFFFFF;
 static int   s_palValid = 0;
@@ -385,11 +397,43 @@ void Plasma_Draw(float vx, float vy, float vw, float vh, DWORD accent, DWORD glo
     d->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
     d->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
     d->SetVertexShader(SPH_FVF);
-    d->SetRenderState(D3DRS_CULLMODE, D3DCULL_CW);   /* far hemisphere first */
-    d->DrawPrimitiveUP(D3DPT_TRIANGLELIST, SPH_TRIS, s_vtx, sizeof(NVert));
-    d->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);  /* near hemisphere over it */
-    d->DrawPrimitiveUP(D3DPT_TRIANGLELIST, SPH_TRIS, s_vtx, sizeof(NVert));
-    d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+
+    /* one-time: create the ping-pong dynamic VBs. Managed pool = always lockable
+       on Xbox with no host-copy sync (unified memory). */
+    if (s_vbState == 0) {
+        int i; s_vbState = 1;
+        for (i = 0; i < 2; i++) {
+            if (FAILED(d->CreateVertexBuffer(SPH_VERTS * sizeof(NVert),
+                D3DUSAGE_WRITEONLY, SPH_FVF, D3DPOOL_MANAGED, &s_vb[i])) || !s_vb[i]) {
+                s_vbState = -1; break;
+            }
+        }
+    }
+
+    if (s_vbState == 1) {
+        IDirect3DVertexBuffer8* vb = s_vb[s_vbFrame & 1];
+        BYTE* pv = NULL;
+        s_vbFrame++;
+        if (SUCCEEDED(vb->Lock(0, SPH_VERTS * sizeof(NVert), &pv, 0)) && pv) {
+            memcpy(pv, s_vtx, SPH_VERTS * sizeof(NVert));
+            vb->Unlock();
+        }
+        d->SetStreamSource(0, vb, sizeof(NVert));
+        d->SetRenderState(D3DRS_CULLMODE, D3DCULL_CW);   /* far hemisphere first */
+        d->DrawPrimitive(D3DPT_TRIANGLELIST, 0, SPH_TRIS);
+        d->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);  /* near hemisphere over it */
+        d->DrawPrimitive(D3DPT_TRIANGLELIST, 0, SPH_TRIS);
+        d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    }
+    else {
+        /* VB creation failed -- fall back to the original UP path so the orb
+           still renders (with the old hazard, but at least it draws). */
+        d->SetRenderState(D3DRS_CULLMODE, D3DCULL_CW);
+        d->DrawPrimitiveUP(D3DPT_TRIANGLELIST, SPH_TRIS, s_vtx, sizeof(NVert));
+        d->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
+        d->DrawPrimitiveUP(D3DPT_TRIANGLELIST, SPH_TRIS, s_vtx, sizeof(NVert));
+        d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    }
 
     /* ---- drifting arcs (additive, unlit, on top) ---- */
     d->SetRenderState(D3DRS_LIGHTING, FALSE);
@@ -445,4 +489,9 @@ void Plasma_Draw(float vx, float vy, float vw, float vh, DWORD accent, DWORD glo
     d->SetViewport(&vpOld);
 }
 
-void Plasma_Release(void) { s_ready = 0; s_palValid = 0; }
+void Plasma_Release(void) {
+    s_ready = 0; s_palValid = 0;
+    if (s_vb[0]) { s_vb[0]->Release(); s_vb[0] = NULL; }
+    if (s_vb[1]) { s_vb[1]->Release(); s_vb[1] = NULL; }
+    s_vbState = 0; s_vbFrame = 0;
+}

@@ -13,21 +13,32 @@
 #include <string.h>
 #include "xboxinternals.h"
 #include "dd_sysinfo.h"
+#include "dd_watchdog.h"
+#include "dd_smbus.h"          /* the single SMBus owner -- all access goes here now */
 
 #define SMBADDR_PIC      0x20   /* PIC16/SMC          (software-shifted 8-bit) */
 #define SMBADDR_ADM1032  0x98   /* ADM1032 temp mon   (software-shifted 8-bit) */
-#define SMBUS_FAIL_RESET 4      /* consecutive temp-read failures -> W1C the bus */
 
+/* SMBus access now goes through the broker (dd_smbus). These thin wrappers keep
+   the rest of this file unchanged and label the turn "SYS" for the watchdog
+   breadcrumb. The broker does the preflight, the inter-master guard, the
+   serialization against the LCD writer / watchdog thread, and the consecutive-
+   fail self-reset -- all the things these helpers used to do inline, now in one
+   place so every consoler takes its turn on the bus. */
 static int SMBusRead(BYTE addr, BYTE reg, BYTE* out) {
-    DWORD v = 0;
-    *out = 0;
-    if (HalReadSMBusValue(addr, reg, FALSE, &v) != 0) return 0;
-    *out = (BYTE)(v & 0xFF);
-    return 1;
+    int ok;
+    Smb_BeginTurn("SYS");
+    ok = Smb_Read8(addr, reg, out);
+    Smb_EndTurn();
+    return ok;
 }
 
 static int SMBusWrite(BYTE addr, BYTE reg, BYTE val) {
-    return HalWriteSMBusValue(addr, reg, FALSE, (DWORD)val) == 0;
+    int ok;
+    Smb_BeginTurn("SYS");
+    ok = Smb_Write8(addr, reg, val);
+    Smb_EndTurn();
+    return ok;
 }
 
 /* Kernel-arbitrated PCI config access (safer than raw 0xCF8/0xCFC port I/O,
@@ -49,60 +60,90 @@ static DWORD PciRead32(BYTE bus, BYTE dev, BYTE func, BYTE reg) {
 static const double XTAL_HZ = 16666666.6667;
 
 void Sys_SmbusReset(void) {
-    /* W1C-clear the nForce SMBus global status, releasing any stuck/in-progress
-       transaction (softmod payloads can leave one pending; an overclocked box
-       with secondary SMBus masters -- Type-D/OXFP -- can also leave the bus
-       mid-transaction). Without this the kernel's SMBus retry loop can spin
-       forever -> dashboard hang, or a probe falsely reads "absent". No-op when
-       the controller is already idle. Mirror of XbDiag's SMBusControllerReset. */
-    __asm {
-        mov dx, 0xC000
-        mov al, 0xFF
-        out dx, al
-    }
-    KeStallExecutionProcessor(2000);   /* let the bus settle (PIC/ADM <100us) */
+    /* Kept for the existing callers (e.g. RevisionDetect probes before reading).
+       The W1C lives in the broker now; this is the lock-free emergency form,
+       which is fine here because callers invoke it between turns, not mid-turn. */
+    Smb_EmergencyReset();
 }
 
 void Sys_Init(void) {
-    Sys_SmbusReset();
+    Smb_Init();                /* stand up the bus lock + clear the controller once */
 }
 
-/* Runtime SMBus watchdog. The recurring temperature poll feeds its result here.
-   A present console always answers on the ADM1032 or the PIC, so a RUN of
-   consecutive temp-read failures means the nForce controller has latched a stuck
-   status (a collision with the SMC or a secondary master -- Type-D/OXFP). Left
-   alone, the kernel's SMBus retry loop can eventually spin forever. W1C the
-   controller once the run crosses the threshold so the bus self-heals at runtime
-   instead of only at Sys_Init -- and because the W1C clears the SHARED status
-   register, it can also free another thread (e.g. the LCD writer) spinning on it.
-   A single failure is normal (a transient collision or a settling sensor), so we
-   never reset on one. Limit: this only fires while the kernel calls still RETURN;
-   if a call spins inside the kernel on this thread, control never returns here --
-   a separate liveness watchdog thread would be needed for that case. */
-static int s_smbusFails = 0;
+/* Runtime SMBus self-heal now lives in the broker (dd_smbus NoteResult): a RUN
+   of consecutive transaction failures W1Cs the controller from inside the lock.
+   This shim stays so the temp-read call sites below don't have to change; it is
+   a no-op because the broker already counted the result of every transaction. */
 static void SmbusWatchdog(int ok) {
-    if (ok) { s_smbusFails = 0; return; }
-    if (++s_smbusFails >= SMBUS_FAIL_RESET) { s_smbusFails = 0; Sys_SmbusReset(); }
+    (void)ok;
 }
 
-int Sys_ReadTemps(int* cpuC, int* boardC) {
+/* All callers share one cached reading so the three independent consumers (status
+   scroll, Type-D telemetry, LCD sensor page) don't each hit the shared SMBus --
+   that uncoordinated, unthrottled traffic was the main-thread bus load left over
+   after the LCD was paced to 1Hz.
+   Temps and fan move slowly, and every read hits the SMC (PIC 0x20) -- the same
+   slow microcontroller Cerbios polls for its own fan/thermal control. Unlike
+   XbDiag (a live diagnostic that wants to-the-second readings), a dashboard just
+   needs recent ambient context, so we read GENTLY: each sensor every 15s, and
+   staggered so temp and fan never read on the same cycle. Net: one small read
+   burst every ~7.5s instead of a cluster every second. */
+#define TEMP_CACHE_MS  15000   /* per-sensor refresh interval */
+#define SENSOR_STAGGER_MS (TEMP_CACHE_MS / 2)   /* offset fan from temp by half */
+static DWORD s_tempTick = 0;
+static int   s_tempOk = 0;
+static int   s_tempCpu = 0;
+static int   s_tempBoard = 0;
+
+/* Which temp source works on this box: 0 = unknown (try ADM1032 then SMC),
+   1 = ADM1032, 2 = SMC. Latched after the first success so we never again fire
+   doomed reads at an absent device (a 1.6/Xyclops has no ADM1032 -- probing it
+   every cycle is two failed transactions that just lean on the bus). */
+static int s_tempPath = 0;
+
+static int ReadAdm(int* cpuC, int* boardC) {
     BYTE c = 0, b = 0;
-    /* ADM1032 (rev 1.0-1.5): regs read directly, no scaling. */
     if (SMBusRead(SMBADDR_ADM1032, 0x01, &c) && SMBusRead(SMBADDR_ADM1032, 0x00, &b)) {
-        if (cpuC) *cpuC = c; if (boardC) *boardC = b; SmbusWatchdog(1); return 1;
+        if (cpuC) *cpuC = c; if (boardC) *boardC = b; return 1;
     }
-    /* PIC/SMC fallback (rev 1.6 / Xyclops): CPU_TEMP (0x09) / MB_TEMP (0x0A).
-       On 1.6 the board reading runs high and needs the 0.8x ambient scaling
-       that the ADM1032 path doesn't (ref: PrometheOS xboxConfig). The 1.0-1.5
-       PIC proxy returns the same value the ADM1032 would, so scaling it would
-       be wrong there -- but this branch is only reached when the ADM1032 is
-       absent, i.e. a 1.6, so applying the scale here is correct. */
+    return 0;
+}
+static int ReadPic(int* cpuC, int* boardC) {
+    BYTE c = 0, b = 0;
     if (SMBusRead(SMBADDR_PIC, CPU_TEMP, &c) && SMBusRead(SMBADDR_PIC, MB_TEMP, &b)) {
         b = (BYTE)((int)b * 4 / 5);          /* 1.6 board-temp correction */
-        if (cpuC) *cpuC = c; if (boardC) *boardC = b; SmbusWatchdog(1); return 1;
+        if (cpuC) *cpuC = c; if (boardC) *boardC = b; return 1;
+    }
+    return 0;
+}
+
+static int ReadTempsRaw(int* cpuC, int* boardC) {
+    /* Once we know the source, read ONLY it -- no fallback probing of the dead
+       device. ADM1032 (rev 1.0-1.5) regs read directly; PIC/SMC (1.6/Xyclops)
+       at CPU_TEMP (0x09)/MB_TEMP (0x0A) with the 0.8x board correction. */
+    if (s_tempPath == 1) {
+        if (ReadAdm(cpuC, boardC)) { SmbusWatchdog(1); return 1; }
+        s_tempPath = 0;                       /* lost it -- re-learn next time     */
+    }
+    else if (s_tempPath == 2) {
+        if (ReadPic(cpuC, boardC)) { SmbusWatchdog(1); return 1; }
+        s_tempPath = 0;
+    }
+    else {
+        if (ReadAdm(cpuC, boardC)) { s_tempPath = 1; SmbusWatchdog(1); return 1; }
+        if (ReadPic(cpuC, boardC)) { s_tempPath = 2; SmbusWatchdog(1); return 1; }
     }
     SmbusWatchdog(0);
     return 0;
+}
+
+int Sys_ReadTemps(int* cpuC, int* boardC) {
+    /* Cache-only: returns the values the SMBus service thread last published.
+       Never touches the bus (the main/render thread must not). The actual read
+       happens in Sys_ServiceSensors() on the service thread. */
+    if (cpuC)   *cpuC = s_tempCpu;
+    if (boardC) *boardC = s_tempBoard;
+    return s_tempOk;
 }
 
 /* Fan-read cache + cold-boot retry state (file scope, per project convention).
@@ -116,42 +157,55 @@ int Sys_ReadTemps(int* cpuC, int* boardC) {
 static int s_fanHaveGood = 0;   /* 1 once a valid 1..50 sample has been seen   */
 static int s_fanLastGood = 0;   /* last valid reading, already scaled to 0..100 */
 static int s_fanColdTries = 0;   /* cold-boot retry sequences spent (capped)     */
+static DWORD s_fanTick = 0;   /* GetTickCount of last good sample (freshness)  */
 
 int Sys_ReadFanPct(int* pct) {
+    /* Cache-only: last value published by the SMBus service thread. No bus. */
+    if (pct) *pct = s_fanLastGood;
+    return s_fanHaveGood;
+}
+
+/* Bus-side fan read (service thread only). Fast path: one read, valid speed is
+   1..50 (== 2..100%); 0x00 / out-of-range is a bad sample, not a real stop.
+   On a cold/soft boot with no good reading yet, gently re-poll (capped) so an
+   absent sensor can't retry forever. The Sleep()s here run on the service
+   thread, never the render thread. */
+static void ServiceFan(DWORD now) {
     BYTE f = 0;
-    int  i;
-
-    /* fast path: one read, no stalling. Valid speed is 1..50 (== 2..100%);
-       0x00 / out-of-range is a bad sample, not a real "fan stopped". */
+    /* Single gentle read. A valid speed is 1..50 (== 2..100%); anything else is
+       a bad sample, not a real stop. */
     if (SMBusRead(SMBADDR_PIC, FAN_READBACK, &f) && f >= 1 && f <= 50) {
-        s_fanLastGood = (int)f * 2;
-        s_fanHaveGood = 1;
-        if (pct) *pct = s_fanLastGood;
-        return 1;
+        s_fanLastGood = (int)f * 2; s_fanHaveGood = 1; s_fanTick = now;
+        s_fanColdTries = 0;
+        return;
     }
+    if (s_fanHaveGood) return;        /* keep last good rather than flash 0% */
+    /* No good reading yet (cold boot). Do NOT burst the SMC with Sleep-stalled
+       re-reads -- just count this cycle as one attempt and try again on the next
+       service cycle (~7.5s later). After a few cold cycles, give up quietly and
+       leave the fan unknown rather than keep probing the PIC forever. */
+    if (s_fanColdTries < 6) s_fanColdTries++;
+}
 
-    /* once we've had a good reading, a lone flaky sample isn't worth a hitch --
-       reuse the last good value instead of flashing 0%. */
-    if (s_fanHaveGood) {
-        if (pct) *pct = s_fanLastGood;
-        return 1;
+/* The ONLY place sensor reads touch the SMBus. Called only by the service
+   thread (dd_smbsvc). Rate-limited to ~1Hz so the service loop can spin faster
+   for the LCD without over-polling the sensors. */
+void Sys_ServiceSensors(void) {
+    DWORD now = GetTickCount();
+    /* Temp and fan are each refreshed every TEMP_CACHE_MS, but offset by half a
+       cycle: a given service tick services AT MOST one of them, so the SMC never
+       takes two read bursts back to back. */
+    if (s_tempTick == 0 || (now - s_tempTick) >= TEMP_CACHE_MS) {
+        s_tempOk = ReadTempsRaw(&s_tempCpu, &s_tempBoard);
+        s_tempTick = now;
+        return;                                  /* fan waits for a later tick */
     }
-
-    /* no good reading yet (cold/soft boot). Wait a beat for the SMC / SMBus to
-       settle and gently re-poll. Capped so an absent sensor can't stall forever. */
-    if (s_fanColdTries < 8) {
-        s_fanColdTries++;
-        for (i = 0; i < 3; i++) {       /* up to 3 gentle re-polls */
-            Sleep(200);                 /* ~150-250ms back-off between polls */
-            if (SMBusRead(SMBADDR_PIC, FAN_READBACK, &f) && f >= 1 && f <= 50) {
-                s_fanLastGood = (int)f * 2;
-                s_fanHaveGood = 1;
-                if (pct) *pct = s_fanLastGood;
-                return 1;
-            }
-        }
+    if (!(s_fanHaveGood && s_fanTick != 0 && (now - s_fanTick) < TEMP_CACHE_MS)) {
+        /* hold the fan read off until we're at least half a cycle past the temp
+           read, so the two never land together */
+        if (s_fanHaveGood && (now - s_tempTick) < SENSOR_STAGGER_MS) return;
+        ServiceFan(now);
     }
-    return 0;
 }
 
 static void UIntToStr(unsigned v, char* out, int cap) {
@@ -327,14 +381,15 @@ static const char* RevisionDetect(void) {
     BYTE c0 = 0, c1 = 0, c2 = 0, enc = 0;
     char ver[4];
 
-    /* Clear any stuck bus first so the PIC reads are reliable on overclocked /
-       softmod hardware (same reason XbDiag resets before probing). */
-    Sys_SmbusReset();
+    /* The broker preflights (clears a dirty controller) at the start of every
+       turn, so the PIC reads below already start clean -- no explicit lock-free
+       reset here (it could W1C the controller while the service thread is
+       mid-transaction). */
 
-    /* The SMC/PIC reports its build string one character per read of reg 0x01,
-       cycling its internal pointer -- so the three chars can arrive at any
-       rotation. Read three, then match every rotation of each known pattern.
-       (method: PrometheOS xboxConfig::getXboxVersion) */
+       /* The SMC/PIC reports its build string one character per read of reg 0x01,
+          cycling its internal pointer -- so the three chars can arrive at any
+          rotation. Read three, then match every rotation of each known pattern.
+          (method: PrometheOS xboxConfig::getXboxVersion) */
     SMBusRead(SMBADDR_PIC, 0x01, &c0);
     SMBusRead(SMBADDR_PIC, 0x01, &c1);
     SMBusRead(SMBADDR_PIC, 0x01, &c2);
@@ -371,7 +426,15 @@ static const char* RevisionDetect(void) {
    rebuilds its text every frame and must not re-probe (or stall) each time. */
 const char* Sys_XboxRevision(void) {
     static const char* s_rev = 0;
-    if (!s_rev) s_rev = RevisionDetect();
+    if (!s_rev) {
+        /* The console version is immutable -- read it EXACTLY ONCE and latch the
+           result for the life of the process, so no caller (service thread OR the
+           About screen) can ever re-probe the SMC for it. Don't latch before the
+           bus is live, or we'd cache a boot-settle "Unknown" forever; once it's
+           ready, whatever the single read returns is final. */
+        if (!Smb_Ready()) return "Unknown";
+        s_rev = RevisionDetect();
+    }
     return s_rev;
 }
 

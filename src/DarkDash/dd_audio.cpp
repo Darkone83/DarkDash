@@ -21,6 +21,7 @@
 #include "minimp3.h"
 
 #include "dd_audio.h"
+#include "dd_trace.h"
 #include "dd_fileops.h"  /* Fileops_LoadFile: generic file -> buffer */
 
 #define AUDIO_SND_ROOT   "D:\\audio\\snd"
@@ -168,20 +169,39 @@ static DWORD               s_musicPos = 0;     /* read cursor into mp3    */
 static mp3dec_t            s_musicDec;
 static HANDLE              s_musicThread = NULL;
 static LONG                s_musicStop = 0;
+static LONG                s_musicGen = 0;   /* bumped on each stop; a fill thread exits
+                                                 when its captured generation goes stale, so
+                                                 a detached zombie can never touch the new
+                                                 stream even if s_musicStop is reset */
 static LONG                s_musicEOF = 0;
 static int                 s_musicLoop = 1;
 static DWORD               s_musicEofTick = 0;   /* GetTickCount when a non-looping track hit decoder EOF */
 static DWORD               s_musicDrainMs = 1500;/* ms for the already-buffered tail to finish playing    */
 #define SEG_BYTES  2048                          /* ~512 stereo samples per level cell */
 #define NSEG       (AUDIO_STREAM_BUFSIZE / SEG_BYTES)
+#ifndef DD_AUDIO_REACTIVE_DEFAULT
+#define DD_AUDIO_REACTIVE_DEFAULT 1              /* set 0 to build a music-only (non-reactive) test image */
+#endif
 static LONG  s_segLow[NSEG];                      /* per-buffer-segment bass level  (fill writes) */
 static LONG  s_segHigh[NSEG];                     /* per-buffer-segment treble level (fill writes) */
 static int   s_lpState = 0;                       /* one-pole lowpass state (fill thread)         */
 static LONG  s_levelLow = 0;                      /* smoothed bass output  (main thread)          */
 static LONG  s_levelHigh = 0;                     /* smoothed treble output (main thread)         */
+static LONG  s_reactive = DD_AUDIO_REACTIVE_DEFAULT; /* diagnostic gate (see Audio_SetReactive)   */
 static LONG  s_playCursor = 0;                    /* play cursor published by the fill thread so the
                                                      main thread never calls into DirectSound       */
 static CRITICAL_SECTION    s_musicCS;
+static CRITICAL_SECTION    s_dsCS;    /* serializes EVERY DirectSound API call.
+                                         The XDK's DSound does deferred voice/buffer
+                                         work inside DirectSoundDoWork (main thread,
+                                         every frame) on the same structures that
+                                         Lock/Unlock/GetCurrentPosition (fill thread,
+                                         ~4ms) mutate; calling them concurrently is
+                                         unserialized cross-thread use of one device.
+                                         XBMC4G keeps all DSound calls on one thread;
+                                         we keep our split but make every call atomic.
+                                         Held ONLY for the call itself -- never across
+                                         a decode -- so contention is microseconds. */
 static int                 s_csReady = 0;
 
 /* carry-over for a frame that straddles a half boundary (avoids pops) */
@@ -196,8 +216,14 @@ static void FillHalf(int nHalf) {
     short  pcm[MINIMP3_MAX_SAMPLES_PER_FRAME * 2];
 
     if (!s_music) return;
-    if (FAILED(s_music->Lock((DWORD)nHalf * AUDIO_STREAM_HALF, AUDIO_STREAM_HALF,
-        &pData1, &dwLen1, NULL, NULL, 0))) return;
+    {
+        HRESULT hrLock;
+        EnterCriticalSection(&s_dsCS);
+        hrLock = s_music->Lock((DWORD)nHalf * AUDIO_STREAM_HALF, AUDIO_STREAM_HALF,
+            &pData1, &dwLen1, NULL, NULL, 0);
+        LeaveCriticalSection(&s_dsCS);
+        if (FAILED(hrLock)) return;
+    }
 
     pDst = (BYTE*)pData1;
     dwFilled = 0;
@@ -233,8 +259,33 @@ static void FillHalf(int nHalf) {
 
         nSamples = mp3dec_decode_frame(&s_musicDec, s_musicData + s_musicPos,
             (int)(s_musicSize - s_musicPos), pcm, &info);
-        if (info.frame_bytes > 0) s_musicPos += (DWORD)info.frame_bytes;
-        else                      s_musicPos = 0;
+
+        /* Advance the read position. minimp3 reports frame_bytes = bytes it
+           consumed (a real frame OR skipped junk/ID3); >0 always means forward
+           progress. frame_bytes == 0 means it found NOTHING usable from here --
+           a truncated or non-MP3 file. The old code reset s_musicPos to 0 and
+           retried, which spins this loop FOREVER when position 0 itself yields no
+           frame (a header-only / under-one-frame FTP partial that still passes
+           the hz/channels probe). A spinning fill thread then hangs the main
+           thread, which Stop/Start waits on -> the random dashboard lock.
+           So: a looping track wraps ONCE (only when that moves us off the bad
+           spot, never from pos 0), and anything else ends the stream cleanly
+           with silence. The read position therefore strictly advances toward
+           EOF (or breaks), so the fill loop -- and the fill thread -- always
+           terminate. */
+        if (info.frame_bytes > 0) {
+            s_musicPos += (DWORD)info.frame_bytes;
+        }
+        else if (s_musicLoop && s_musicPos != 0) {
+            s_musicPos = 0; s_carryBytes = 0;     /* wrap once; off the bad spot */
+        }
+        else {
+            InterlockedExchange(&s_musicEOF, 1);
+            if (s_musicEofTick == 0) s_musicEofTick = GetTickCount();
+            memset(pDst + dwFilled, 0, dwLen1 - dwFilled);
+            dwFilled = dwLen1;
+            break;                                /* unusable from here -> done */
+        }
         if (nSamples <= 0) continue;
 
         dwFrameBytes = (DWORD)(nSamples * info.channels * (int)sizeof(short));
@@ -278,15 +329,19 @@ static void FillHalf(int nHalf) {
         s_lpState = lp;
     }
 
+    EnterCriticalSection(&s_dsCS);
     s_music->Unlock(pData1, dwLen1, NULL, 0);
+    LeaveCriticalSection(&s_dsCS);
 }
 
 static DWORD WINAPI MusicThreadProc(LPVOID pParam) {
     /* StartMusic primes BOTH halves before Play() and the cursor starts in
        half 0, so the behind-cursor half (1) is already fresh -- start with it
        marked filled so we don't immediately overwrite unplayed primed audio. */
-    int lastFilled = 1;
-    (void)pParam;
+    int  lastFilled = 1;
+    LONG myGen = (LONG)(LONG_PTR)pParam;   /* our generation, captured at start */
+    TRACE_THREAD("FILL");
+    TRACE("fill", "start");
     /* DirectSoundDoWork() is owned by the main thread (Audio_Update), so the
        mixer is serviced even before music starts and SFX always play.
 
@@ -297,7 +352,8 @@ static DWORD WINAPI MusicThreadProc(LPVOID pParam) {
        Tracking the cursor directly -- rather than a separate toggle that can
        drift out of sync after a frame hitch -- removes the window where the
        cursor could lap into a half still holding stale audio (the random pop). */
-    while (!InterlockedCompareExchange(&s_musicStop, 0, 0)) {
+    while (!InterlockedCompareExchange(&s_musicStop, 0, 0) &&
+        myGen == InterlockedCompareExchange(&s_musicGen, 0, 0)) {
         DWORD dwPlay = 0, dwWrite = 0;
         int   playHalf, fillHalf;
 
@@ -306,7 +362,9 @@ static DWORD WINAPI MusicThreadProc(LPVOID pParam) {
            silence, so the genuine tail plays out once and everything after it is
            silence (no stale re-loop) until the shuffle pump starts the next track. */
 
-        s_music->GetCurrentPosition(&dwPlay, &dwWrite);
+        EnterCriticalSection(&s_dsCS);
+        if (s_music) s_music->GetCurrentPosition(&dwPlay, &dwWrite);
+        LeaveCriticalSection(&s_dsCS);
         InterlockedExchange(&s_playCursor, (LONG)dwPlay);  /* publish for Audio_MusicLevels */
         playHalf = (dwPlay < (DWORD)AUDIO_STREAM_HALF) ? 0 : 1;
         fillHalf = 1 - playHalf;     /* the half behind the cursor */
@@ -319,6 +377,7 @@ static DWORD WINAPI MusicThreadProc(LPVOID pParam) {
         }
         Sleep(4);
     }
+    TRACE("fill", "exit");
     return 0;
 }
 
@@ -335,6 +394,7 @@ int Audio_Init(void) {
     if (FAILED(hr) || !s_ds) return 0;
 
     InitializeCriticalSection(&s_musicCS);
+    InitializeCriticalSection(&s_dsCS);
     s_csReady = 1;
 
     s_dbgRead = 0; s_dbgDecoded = 0;
@@ -346,15 +406,21 @@ int Audio_Init(void) {
 
 void Audio_Update(void) {
     /* Required on Xbox: services the DS mixer / commits GP work each frame.
-       Without it the play cursor stalls and there is no audio at all. */
+       Without it the play cursor stalls and there is no audio at all.
+       Serialized: DoWork executes deferred voice/buffer operations on the same
+       internal state the fill thread's Lock/Unlock mutates. */
+    EnterCriticalSection(&s_dsCS);
     DirectSoundDoWork();
+    LeaveCriticalSection(&s_dsCS);
 }
 
 void Audio_PlaySfx(int id) {
     if (id < 0 || id >= SFX_COUNT) return;
     if (!s_sfx[id]) return;
+    EnterCriticalSection(&s_dsCS);
     s_sfx[id]->SetCurrentPosition(0);   /* rewind, then play (ScorchedXB pattern) */
     s_sfx[id]->Play(0, 0, 0);
+    LeaveCriticalSection(&s_dsCS);
 }
 
 static LONG s_musicVolPct = 70;        /* 0..100, last requested percent  */
@@ -387,7 +453,9 @@ void Audio_SetMusicVolume(int pct) {
     if (pct > 100) pct = 100;
     s_musicVolPct = pct;
     s_musicVolDb = VolPctToDb(pct);
+    EnterCriticalSection(&s_dsCS);
     if (s_music) s_music->SetVolume(s_musicVolDb);   /* live if playing */
+    LeaveCriticalSection(&s_dsCS);
 }
 
 int Audio_GetMusicVolume(void) { return (int)s_musicVolPct; }
@@ -412,13 +480,15 @@ void Audio_MusicLevels(int* lo, int* hi) {
        DirectSound buffer from the main thread (that would race the fill
        thread's Lock/Unlock on the same buffer). When no track is loaded the
        published cursor simply stops advancing and the levels decay to calm. */
-    if (s_music) {
+    if (s_music && InterlockedCompareExchange(&s_reactive, 0, 0)) {
         int seg;
         play = (DWORD)InterlockedCompareExchange(&s_playCursor, 0, 0);
         seg = (int)(play / SEG_BYTES);
         if (seg < 0) seg = 0; else if (seg >= NSEG) seg = NSEG - 1;
         tlo = s_segLow[seg]; thi = s_segHigh[seg];
     }
+    /* When music is stopped OR the reactivity gate is off, tlo/thi stay 0 and the
+       smoothing below eases the visuals back to calm instead of cutting abruptly. */
     { LONG c = s_levelLow;  s_levelLow = (tlo > c) ? (c + (tlo - c) * 3 / 4) : (c + (tlo - c) / 3); }
     { LONG c = s_levelHigh; s_levelHigh = (thi > c) ? (c + (thi - c) * 7 / 8) : (c + (thi - c) / 2); }
     a = s_levelLow >> 7;  if (a > 255) a = 255;
@@ -434,8 +504,14 @@ int Audio_MusicLevel(void) {
     return (lo > hi) ? lo : hi;
 }
 
+/* Audio-reactivity gate (diagnostic) -- see header. Interlocked so the main
+   thread can flip it while Audio_MusicLevels reads it. */
+void Audio_SetReactive(int on) { InterlockedExchange(&s_reactive, on ? 1 : 0); }
+int  Audio_Reactive(void) { return (int)InterlockedCompareExchange(&s_reactive, 0, 0); }
+
 void Audio_StartMusic(int loop) {
     char path[AUDIO_PATH_MAX];
+    TRACE("audio", "StartMusic>");
     unsigned char* data = NULL;
     size_t size = 0;
     mp3dec_frame_info_t info;
@@ -447,15 +523,31 @@ void Audio_StartMusic(int loop) {
     Audio_StopMusic();   /* tear down any prior stream */
 
     /* If that stop hit its backstop (a wedged DSound Lock left a fill thread
-       lingering), drain it fully now -- by the time control returns here it has
-       long since unblocked -- and release the leaked buffer before we reuse any
-       shared globals, so a second fill thread can never race the first. */
+       lingering), drain it before we reuse any shared globals so a second fill
+       thread can never race the first. With the fill loop now guaranteed to
+       terminate (see FillHalf), this returns at once in practice -- but we still
+       wait BOUNDED, never INFINITE: a thread truly stuck at the driver must not
+       be able to hang the main thread here. If it somehow hasn't exited, leave
+       it leaked (s_musicStop stays set so it dies the instant it unblocks) and
+       start fresh globals rather than freezing the dashboard. */
     if (s_musicThread) {
-        WaitForSingleObject(s_musicThread, INFINITE);
-        CloseHandle(s_musicThread); s_musicThread = NULL;
-        if (s_music) { s_music->Stop(); s_music->Release(); s_music = NULL; }
-        if (s_musicData) { free(s_musicData); s_musicData = NULL; }
-        InterlockedExchange(&s_musicStop, 0);
+        if (WaitForSingleObject(s_musicThread, 2000) == WAIT_OBJECT_0) {
+            CloseHandle(s_musicThread); s_musicThread = NULL;
+            EnterCriticalSection(&s_dsCS);
+            if (s_music) { s_music->Stop(); s_music->Release(); s_music = NULL; }
+            LeaveCriticalSection(&s_dsCS);
+            if (s_musicData) { free(s_musicData); s_musicData = NULL; }
+            InterlockedExchange(&s_musicStop, 0);
+        }
+        else {
+            /* still wedged: detach. Do NOT free s_music / s_musicData -- the
+               zombie may still touch them; leak them and hand the new stream a
+               clean slate so nothing is shared with the lingering thread. */
+            s_musicThread = NULL;
+            s_music = NULL;
+            s_musicData = NULL;
+            InterlockedExchange(&s_musicStop, 0);
+        }
     }
 
     if (s_musicFile[0]) {
@@ -478,11 +570,17 @@ void Audio_StartMusic(int loop) {
     InterlockedExchange(&s_musicEOF, 0);
     s_musicEofTick = 0;
 
-    /* probe the first frame for channels/hz */
+    /* probe the first frame for channels/hz. Require an actually DECODED frame
+       (nSamples > 0), not just a parsed header: a truncated file (valid header,
+       body shorter than one frame -- the classic interrupted FTP upload) sets
+       info.hz/channels but decodes zero samples. Letting it through used to make
+       the streaming fill thread spin on it; reject it here instead. */
     mp3dec_init(&s_musicDec);
-    mp3dec_decode_frame(&s_musicDec, s_musicData, (int)s_musicSize, probe, &info);
-    if (!info.hz || !info.channels) {
-        free(s_musicData); s_musicData = NULL; return;
+    {
+        int probeN = mp3dec_decode_frame(&s_musicDec, s_musicData, (int)s_musicSize, probe, &info);
+        if (probeN <= 0 || !info.hz || !info.channels) {
+            free(s_musicData); s_musicData = NULL; return;   /* unplayable -> no music, no crash */
+        }
     }
 
     /* re-init the decoder so streaming starts cleanly from frame 0 */
@@ -509,25 +607,44 @@ void Audio_StartMusic(int loop) {
     dsbd.dwBufferBytes = AUDIO_STREAM_BUFSIZE;   /* 256KB, not 40MB */
     dsbd.lpwfxFormat = &wfx;
 
-    if (FAILED(s_ds->CreateSoundBuffer(&dsbd, &s_music, NULL)) || !s_music) {
-        s_music = NULL;
-        free(s_musicData); s_musicData = NULL;
-        return;
+    {
+        HRESULT hrCreate;
+        EnterCriticalSection(&s_dsCS);
+        hrCreate = s_ds->CreateSoundBuffer(&dsbd, &s_music, NULL);
+        LeaveCriticalSection(&s_dsCS);
+        if (FAILED(hrCreate) || !s_music) {
+            s_music = NULL;
+            free(s_musicData); s_musicData = NULL;
+            return;
+        }
     }
 
     FillHalf(0);
     FillHalf(1);
-    if (s_music) s_music->SetVolume(s_musicVolDb);   /* apply persisted level */
-    s_music->Play(0, 0, DSBPLAY_LOOPING);   /* ring always loops; EOF handled in fill */
+    EnterCriticalSection(&s_dsCS);
+    if (s_music) {
+        s_music->SetVolume(s_musicVolDb);       /* apply persisted level */
+        s_music->Play(0, 0, DSBPLAY_LOOPING);   /* ring always loops; EOF handled in fill */
+    }
+    LeaveCriticalSection(&s_dsCS);
 
     InterlockedExchange(&s_musicStop, 0);
-    s_musicThread = CreateThread(NULL, 0, MusicThreadProc, NULL, 0, NULL);
+    {
+        /* Tag the new thread with the current generation (already bumped by the
+           StopMusic above). Any lingering zombie holds an older generation and
+           will exit on its next check rather than touch this new stream. */
+        LONG gen = InterlockedCompareExchange(&s_musicGen, 0, 0);
+        s_musicThread = CreateThread(NULL, 0, MusicThreadProc, (LPVOID)(LONG_PTR)gen, 0, NULL);
+    }
 }
 
 void Audio_StopMusic(void) {
     int joined = 1;
+    TRACE("audio", "StopMusic>");
     if (s_musicThread) {
         int guard = 0;
+        InterlockedIncrement(&s_musicGen);   /* invalidate this thread's generation so a
+                                                detached zombie can't resume on new state */
         InterlockedExchange(&s_musicStop, 1);
         /* Wait for the fill thread to ACTUALLY exit before touching the buffer.
            Releasing s_music while the thread is still inside Lock/Unlock is a
@@ -546,7 +663,9 @@ void Audio_StopMusic(void) {
 
     if (joined) {
         InterlockedExchange(&s_musicStop, 0);
+        EnterCriticalSection(&s_dsCS);
         if (s_music) { s_music->Stop(); s_music->Release(); s_music = NULL; }
+        LeaveCriticalSection(&s_dsCS);
         if (s_musicData) { free(s_musicData); s_musicData = NULL; }
     }
     /* else: the thread never returned from a wedged Lock. Leak the buffer, data
@@ -575,9 +694,15 @@ int Audio_DbgFilesDecoded(void) { return s_dbgDecoded; }
 void Audio_Shutdown(void) {
     int i;
     Audio_StopMusic();
+    EnterCriticalSection(&s_dsCS);
     for (i = 0; i < SFX_COUNT; i++) {
         if (s_sfx[i]) { s_sfx[i]->Stop(); s_sfx[i]->Release(); s_sfx[i] = NULL; }
     }
-    if (s_csReady) { DeleteCriticalSection(&s_musicCS); s_csReady = 0; }
+    LeaveCriticalSection(&s_dsCS);
+    if (s_csReady) {
+        DeleteCriticalSection(&s_musicCS);
+        DeleteCriticalSection(&s_dsCS);
+        s_csReady = 0;
+    }
     if (s_ds) { s_ds->Release(); s_ds = NULL; }
 }

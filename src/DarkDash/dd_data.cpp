@@ -91,18 +91,32 @@ int Data_Load(void) {
     s_set.musicPath[DD_MUSIC_PATH_MAX - 1] = '\0';
     if (s_set.musicMode < DD_MUSIC_NORMAL || s_set.musicMode > DD_MUSIC_SHUFFLE)
         s_set.musicMode = DD_MUSIC_NORMAL;
-    /* fxFlags lived in the old reserved (zero) region; a stored 0 means "never
-       set" -> default to all effects on rather than silently-all-off. */
-    if (s_set.fxFlags == 0) s_set.fxFlags = DD_FX_DEFAULT;
+    /* fxFlags carries a DD_FX_SET sentinel that Data_Save always sets. If it's
+       absent, the value is a legacy/zeroed blob that predates fxFlags -> default
+       to all-on. If it's present, honour the stored bits EXACTLY -- including the
+       user turning every effect off (stored as DD_FX_SET alone). */
+    if (!(s_set.fxFlags & DD_FX_SET)) {
+        s_set.fxFlags = DD_FX_DEFAULT;
+    }
+    else {
+        s_set.fxFlags &= DD_FX_ALL;   /* strip the sentinel for in-memory use */
+    }
     return 1;
 }
 
 int Data_Save(void) {
     HANDLE h;
     DD_DataHeader hdr;
+    DD_Settings   blob;
     DWORD wrote = 0;
 
     if (!s_loaded) { SetDefaults(); s_loaded = 1; }
+
+    /* On-disk copy carries the DD_FX_SET sentinel so a stored value of 0 is
+       always identifiable as legacy (never a deliberate all-off). The live
+       s_set stays sentinel-free. */
+    blob = s_set;
+    blob.fxFlags = (s_set.fxFlags & DD_FX_ALL) | DD_FX_SET;
 
     /* create D:\data if it isn't there yet (ignore "already exists") */
     CreateDirectoryA(DD_DATA_DIR, NULL);
@@ -117,7 +131,7 @@ int Data_Save(void) {
     hdr.size = (DWORD)sizeof(DD_Settings);
 
     if (!WriteFile(h, &hdr, sizeof(hdr), &wrote, NULL) || wrote != sizeof(hdr) ||
-        !WriteFile(h, &s_set, sizeof(s_set), &wrote, NULL) || wrote != sizeof(s_set)) {
+        !WriteFile(h, &blob, sizeof(blob), &wrote, NULL) || wrote != sizeof(blob)) {
         CloseHandle(h);
         return 0;
     }

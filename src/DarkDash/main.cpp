@@ -32,6 +32,9 @@
 #include "dd_disc.h"
 #include "dd_egg.h"
 #include "dd_calib.h"
+#include "dd_watchdog.h"
+#include "dd_smbsvc.h"
+#include "dd_trace.h"
 #include "dd_select.h"
 #include "dd_fx.h"
 #include "dd_savemgr.h"
@@ -315,7 +318,9 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
         /* Plasma orb: procedural energy ball replaces the static hero orb,
            tinted from the theme. Occupies the same flat orb rect. (Skips the
            transition glitch -- the plasma is always in motion anyway.) */
+        TRACED("ds.plasma", ">");
         Plasma_Draw(44.0f, 168.0f, 272.0f, 234.0f, accent, glow);
+        TRACED("ds.plasma", "<");
     }
     else if (orb) {
         if (glitch > 0) {
@@ -422,7 +427,9 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
            mid-swing, where the capture would clip them) and only when enabled. */
         if (!turning && Data_FxOn(DD_FX_ARCS)) {
             Arcs_Tick(GetTickCount());
+            TRACED("ds.arcs", ">");
             Arcs_Draw(menuX, menuY, 272.0f, 384.0f);
+            TRACED("ds.arcs", "<");
         }
         if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
         for (i = 0; i < MENU_COUNT; i++) {
@@ -447,9 +454,12 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
             ha = ha * glowI / 100;
             Iso_Begin();
             Select_Begin(0x1000, gy);
-            if (ha > 0)
+            if (ha > 0) {
+                TRACED("ds.glow", ">");
                 Select_DrawGlow(menuX + 18.0f, gy, 210.0f, 36.0f,
                     UI_ARGB(ha, gr, gg, gb));
+                TRACED("ds.glow", "<");
+            }
             Iso_End();
         }
     }
@@ -493,6 +503,7 @@ void __cdecl main(void) {
        booted as the dashboard (Cerbios) the kernel's D: may be absent/wrong, so
        without this every asset/theme/data path fails to resolve. */
     Mount_SelfToD();
+    Trace_Init();            /* brute-force disk tracer: flush every line to D:\data\ddtrace.log */
     Data_Load();             /* load prefs first: Gfx_Init reads videoRes from it */
     Recents_Init();          /* most-recently-launched titles (Y overlay) */
     Paths_Load();            /* user-added custom scan paths per category */
@@ -545,6 +556,9 @@ void __cdecl main(void) {
     Lcd_Init();              /* physical LCD accessory: load lcd.dat, probe, splash */
     Udp_Init();              /* shared UDP layer for DarkoneCustoms accessories */
     TypeD_Init();            /* Type-D status broadcaster (UDP 50504)           */
+    Watchdog_Init();         /* arm main-thread liveness watchdog (SMBus wedge recovery) */
+    Smbsvc_Init();           /* start the SMBus service thread: it now owns ALL bus I/O
+                                (sensor reads + LCD writes), keeping the render loop bus-free */
     Oxfp_Init();             /* OXFP front-panel control (UDP 32123)            */
     Rgb_Init();              /* XBOX-RGB control (UDP 7777)                     */
 
@@ -584,7 +598,6 @@ void __cdecl main(void) {
         btn = GetButtons();
 
         Ftp_Tick();   /* service the FTP server every frame (single-threaded) */
-        Lcd_Tick();   /* refresh the physical LCD accessory (background service) */
         TypeD_Tick(); /* broadcast Type-D status (background, rate-limited)       */
         Udp_DiscoTick(); /* discover XBOX-RGB / OXFP for accessory menu gating    */
         TypeDArt_BootResumeTick(); /* once discovered, drop last session's held art */
@@ -865,9 +878,13 @@ void __cdecl main(void) {
         }
         if (saverOn) Saver_Update();
 
+        TRACE("frame", "audio>");
         Audio_Update();   /* service Xbox DS mixer every frame */
+        TRACE("frame", "music>");
         Settings_MusicTick();   /* advance Shuffle to the next track when one ends */
+        TRACED("frame", "render>");
         Gfx_BeginFrame(Theme_BG());
+        TRACEDU("r.begin<", saverOn ? "saver" : "screen", (unsigned long)screen);
         if (saverOn) {
             Saver_Render();
         }
@@ -880,18 +897,19 @@ void __cdecl main(void) {
             if (screen == SCR_MAIN && recOpen) DrawRecents(recSel);
             if (screen == SCR_MAIN && powOpen) DrawPowerMenu(powSel);
         }
+        TRACED("r.draw<", "");
         /* ambient overlays, over all content: CRT scanlines + roll, then the
            SFX-synced edge flash. The boot intro (if active) tops everything.
            Each gated by its DD_FX_* toggle. */
-        if (Data_FxOn(DD_FX_SCANLINES)) Fx_DrawScanlines();
-        if (Data_FxOn(DD_FX_EDGE))      Fx_DrawEdgeGlow();
-        if (Fx_BootActive()) Fx_DrawBoot();
+        if (Data_FxOn(DD_FX_SCANLINES)) { TRACE("r.fx", "scan>");  Fx_DrawScanlines(); }
+        if (Data_FxOn(DD_FX_EDGE)) { TRACE("r.fx", "edge>");  Fx_DrawEdgeGlow(); }
+        if (Fx_BootActive()) { TRACE("r.fx", "boot>");  Fx_DrawBoot(); }
+        TRACED("r.present", ">");
         Gfx_EndFrame();
-        Lcd_PollSensors();  /* read temps/fan into cache AFTER the present, a full
-                               frame away from Lcd_Tick's panel writes -- keeps the
-                               sensor reads off the bus right before a Theia write */
+        TRACED("frame", "end");
     }
 
+    Smbsvc_Stop();           /* stop the SMBus service thread before tearing down */
     Ftp_Stop();
     Fx_Shutdown();
     Egg_Shutdown();
