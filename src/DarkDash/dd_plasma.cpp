@@ -29,8 +29,8 @@
 #include <string.h>
 
 /* ---- tuning ------------------------------------------------------------- */
-#define SPH_STACKS   40
-#define SPH_SLICES   56
+#define SPH_STACKS   28          /* half tessellation: paired with the resident VB for extra */
+#define SPH_SLICES   40          /* load margin. ~200px orb looks identical; halves GPU + CPU + copy. */
 #define SPH_ROWS     (SPH_STACKS + 1)
 #define SPH_GRID     (SPH_ROWS * SPH_SLICES)
 #define SPH_TRIS     (SPH_STACKS * SPH_SLICES * 2)

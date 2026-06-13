@@ -22,6 +22,7 @@
 #include "dd_xbe.h"
 #include "dd_stbi.h"
 #include "dd_mount.h"
+#include "dd_smbsvc.h"
 #include "dd_lcd.h"
 #include "dd_recents.h"
 #include "dd_paths.h"
@@ -791,17 +792,28 @@ int Launcher_Update(WORD pressed, WORD held) {
             s_ped.tex = NULL; s_pedIdx = -1; s_pedFlat = 0;
             Audio_StopMusic();
             Recents_Add(s_items[s_cursor].label, s_items[s_cursor].xbePath);
-            /* paint the LCD's Now Playing screen before we hand off -- once the
-               game takes over we lose the panel, so this stays up while it runs.
-               No-op if the LCD accessory is off/absent. */
-            Lcd_NowPlaying(s_items[s_cursor].label);
+            /* Stop the SMBus service thread BEFORE touching the panel. It pages
+               the LCD every ~180ms; if it keeps running, its next tick repaints
+               the rotating page right over our Now Playing title (and the title
+               write invalidates the shadow, guaranteeing that repaint). Stopping
+               it (Smbsvc_Stop joins the thread, so no tick is mid-flight) means
+               the title we paint below is the last thing on the panel and stays
+               up once the game takes over. It also frees the bus so the art send
+               runs uncontended. Restarted only if the launch fails (below). */
+            Smbsvc_Stop();
             /* push the cover art to the Type-D (blocking; masked by the loading
                screen already on the front buffer). No-op for pack-less titles.
                Suspend the liveness watchdog across this -- it legitimately stalls
                the main loop for up to several seconds with no present. */
             if (artOn) { Watchdog_Suspend(); TypeDArt_SendArtFor(s_items[s_cursor].xbePath); Watchdog_Resume(); }
+            /* paint the LCD Now Playing screen LAST, right before handoff, so it
+               is the final thing written to the panel and persists while the game
+               runs. No-op if the LCD accessory is off/absent. */
+            Lcd_NowPlaying(s_items[s_cursor].label);
             Mount_LaunchXbe(s_items[s_cursor].xbePath);
-            /* fell through -> launch failed; carry on so the menu stays usable */
+            /* fell through -> launch failed. Restart the service thread so sensor
+               polling + LCD paging resume, and carry on so the menu stays usable. */
+            Smbsvc_Init();
         }
     }
     return 0;
