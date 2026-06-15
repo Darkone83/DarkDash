@@ -132,10 +132,12 @@ static LONG   s_stop = 0;
 static LONG   s_npMode = 0;        /* 1 = freeze a Now Playing art frame on stop */
 static LONG   s_brightDirty = 0;   /* 1 = push brightness to the live panel      */
 static LONG   s_panelDirty = 0;   /* 1 = re-send panel preset + re-read geometry */
+static LONG   s_saverCd = -1;  /* ms until screensaver fires (0=now, <0=n/a)    */
 static char   s_npTitle[64];
 static char   s_npXbe[260];
 
 #define XV_WARMUP_MS    2000
+#define XV_DIM_LEAD_MS  1500   /* pre-dim the backlight this long before the saver fires */
 #define XV_RESCAN_MS    4000        /* hotplug: poll for the panel this often */
 #define XV_STOP_WAIT_MS 5000        /* outro/shutdown + possible unplug teardown */
 #define XV_NP_WAIT_MS   5000        /* art load + blit can take ~1-2s     */
@@ -699,8 +701,21 @@ static void DrawNowPlayingFrame(const char* title, const char* xbePath) {
 
 /* rotate the data pages; plasma animates every frame, content refreshes ~1/sec */
 /* returns 0 if a stop was requested, 1 if the panel was unplugged */
+/* ramp the X-View backlight from->to over ~250ms (panel thread only -- owns
+   USB). honours Stopping(). used for the screensaver dim-out / fade-in. */
+static void XvBrightFade(int from, int to) {
+    int i; const int STEPS = 12;
+    if (from < 0) from = 0; if (from > 255) from = 255;
+    if (to < 0) to = 0; if (to > 255) to = 255;
+    for (i = 1; i <= STEPS; i++) {
+        XvCli_SetBrightness(from + (to - from) * i / STEPS);
+        if (SleepChecked(20)) return;
+    }
+    XvCli_SetBrightness(to);
+}
+
 static int RunPages(void) {
-    int order[8]; int n, cur = 0, t = 0, fails = 0; DWORD pageStart, lastBuild, lastLink;
+    int order[8]; int n, cur = 0, t = 0, fails = 0, dimmed = 0, lastBright = -1; DWORD pageStart, lastBuild, lastLink;
     if (s_palDirty) BuildPalette();
     n = BuildOrder(order);
     BuildContent(order[0]);
@@ -717,14 +732,49 @@ static int RunPages(void) {
             lastLink = now;
             if (!XvXbox_StillConnected()) return 1;
         }
+        /* screensaver: kill the backlight and stop blitting while it runs --
+           the panel would only stall behind the saver's main-thread art decode
+           anyway. Fade back in with a fresh frame when it exits. */
+        {
+            int cd = (int)InterlockedCompareExchange(&s_saverCd, 0, 0);
+            int full = s_cfg.brightness;
+            if (cd == 0) {
+                if (!dimmed) {                       /* engage: force black + park */
+                    XvCli_SetBrightness(0);
+                    XvCli_Clear(XvCli_Rgb565(0, 0, 0));
+                    XvCli_Present();
+                    lastBright = 0;
+                    dimmed = 1;
+                }
+            }
+            else if (dimmed) {                     /* wake: fresh frame, then fade in */
+                BuildContent(order[cur]);
+                ComposeFrame(t);
+                XvCli_BlitScaled(0, 0, s_rw, s_rh, s_scale, s_fb);
+                XvCli_Present();
+                XvBrightFade(0, full);
+                lastBright = full;
+                InterlockedExchange(&s_brightDirty, 0);
+                pageStart = lastBuild = GetTickCount();
+                dimmed = 0;
+            }
+            else {                                 /* normal: pre-dim in the lead, else full */
+                int target = (cd > 0 && cd <= XV_DIM_LEAD_MS)
+                    ? (full * cd / XV_DIM_LEAD_MS) : full;
+                if (target != lastBright) {
+                    XvCli_SetBrightness(target);
+                    lastBright = target;
+                    InterlockedExchange(&s_brightDirty, 0);
+                }
+            }
+        }
+        if (dimmed) { if (SleepChecked(120)) break; continue; }
         if (InterlockedExchange(&s_panelDirty, 0)) {  /* live panel switch */
             XvCli_SetPanel(s_cfg.panel);
             s_haveInfo = (XvCli_QueryInfo(&s_info) == 0);
             XvSetGeom(s_haveInfo ? s_info.width : 320, s_haveInfo ? s_info.height : 240);
             XvCli_Clear(XvCli_Rgb565(s_bg.r, s_bg.g, s_bg.b));
         }
-        if (InterlockedExchange(&s_brightDirty, 0))  /* apply brightness live */
-            XvCli_SetBrightness(s_cfg.brightness);
         if (s_palDirty) BuildPalette();
         if (now - pageStart >= interval) {
             n = BuildOrder(order);
@@ -737,7 +787,18 @@ static int RunPages(void) {
         ComposeFrame(t);
         rc = XvCli_BlitScaled(0, 0, s_rw, s_rh, s_scale, s_fb);
         XvCli_Present();
-        if (rc != 0) { if (++fails >= 4) return 1; }   /* transfers failing -> unplugged (fallback if USBD RemoveDevice never fires) */
+        if (rc != 0) {
+            /* Failing blits are NOT proof of an unplug. Under main-thread load
+               (e.g. the screensaver decoding box art every few seconds) this
+               BELOW_NORMAL thread can be starved long enough for a transfer to
+               time out. Only bail if the authoritative link check agrees the
+               panel is really gone; otherwise it's a transient stall -- reset
+               and keep pushing frames. */
+            if (++fails >= 4) {
+                if (!XvXbox_StillConnected()) return 1;
+                fails = 0;
+            }
+        }
         else fails = 0;
         t += 5;
         if (SleepChecked(15)) break;
@@ -804,6 +865,8 @@ static DWORD WINAPI XvProc(LPVOID arg) {
 int  XView_IsEnabled(void) { if (!s_cfgLoaded) CfgLoad(); return s_cfg.enable; }
 int  XView_Brightness(void) { if (!s_cfgLoaded) CfgLoad(); return s_cfg.brightness; }
 int  XView_IsReady(void) { return InterlockedCompareExchange(&s_ready, 0, 0) != 0; }
+
+void XView_SetSaverCountdown(int ms) { InterlockedExchange(&s_saverCd, (LONG)ms); }
 
 void XView_Start(void) {
     if (!s_cfgLoaded) CfgLoad();

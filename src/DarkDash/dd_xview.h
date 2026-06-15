@@ -38,6 +38,7 @@ extern "C" {
     void XView_SetPanel(int panel);
 
     /* --- lifecycle (panel thread owns warm-up, connect, render, shutdown) --- */
+    void XView_SetSaverCountdown(int ms); /* ms until saver fires (0=active, <0=n/a) */
     void XView_Start(void);          /* spawn the thread (no-op if disabled/running) */
     void XView_Stop(void);           /* outro + USB shutdown + join */
     void XView_NowPlayingLaunch(const char* title, const char* xbePath);

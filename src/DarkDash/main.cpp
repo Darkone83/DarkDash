@@ -929,6 +929,20 @@ void __cdecl main(void) {
         }
         if (saverOn) Saver_Update();
 
+        /* publish the screensaver countdown to X-View so it can pre-dim its
+           backlight before the saver's art decode starves the panel thread.
+           0 = active now, <0 = cannot fire from the current screen (stay lit). */
+        {
+            int ssCd = -1, ssMin2 = Data_Get()->screensaverMin;
+            if (saverOn) ssCd = 0;
+            else if (ssMin2 > 0 && screen == SCR_MAIN && trans == 0 &&
+                !recOpen && !powOpen && !CustomAdd_IsOpen()) {
+                DWORD thr = (DWORD)ssMin2 * 60000u, idle = t - lastInputMs;
+                ssCd = (idle >= thr) ? 0 : (int)(thr - idle);
+            }
+            XView_SetSaverCountdown(ssCd);
+        }
+
         TRACE("frame", "audio>");
         Audio_Update();   /* service Xbox DS mixer every frame */
         TRACE("frame", "music>");
