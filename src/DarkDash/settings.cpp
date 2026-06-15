@@ -31,6 +31,8 @@
 #include "dd_ftp.h"
 #include "dd_lcd.h"
 #include "dd_typed.h"
+#include "dd_xview.h"
+#include "xv_protocol.h"   /* XV_PANEL_A / XV_PANEL_B */
 #include "dd_typedart.h"
 #include "dd_launcher.h"
 #include "dd_udp.h"
@@ -38,6 +40,7 @@
 #include "dd_oxfp.h"
 #include "dd_dc.h"
 #include "dd_update.h"
+#include "dd_rtc.h"
 #include "dd_calib.h"
 #include "dd_select.h"
 #include "Settings.h"
@@ -113,7 +116,7 @@ static int s_fxSub = 0;    /* 0 = Video rows, 1 = Effects sub-menu */
 /* Accessories: two-level. s_accDev = -1 -> device list; else a device screen.
    s_accRow = cursor within the active level. OXFP/RGB rows grey out and do
    nothing when their device isn't currently detected (Udp_Present). */
-enum { ACC_DEV_LCD = 0, ACC_DEV_TYPED, ACC_DEV_RGB, ACC_DEV_OXFP, ACC_DEV_COUNT };
+enum { ACC_DEV_LCD = 0, ACC_DEV_TYPED, ACC_DEV_RGB, ACC_DEV_OXFP, ACC_DEV_XVIEW, ACC_DEV_COUNT };
 static int s_accDev = -1;
 static int s_accRow = 0;
 
@@ -746,6 +749,7 @@ static void UpdateTheme(WORD pressed) {
         if (!name) return;
         Theme_RootFor(THEMES_DIR, name, root, sizeof(root));
         if (Theme_Load(root)) {
+            XView_RefreshTheme();
             /* "default" stores empty so a missing custom theme always falls back */
             if (lstrcmpiA(name, "default") == 0) st->themeName[0] = '\0';
             else lstrcpynA(st->themeName, name, (int)sizeof(st->themeName));
@@ -756,6 +760,7 @@ static void UpdateTheme(WORD pressed) {
         else {
             /* failed -> revert to default theme */
             Theme_Load("D:\\themes\\default");
+            XView_RefreshTheme();
             st->themeName[0] = '\0';
             s_themeMsg = 2;
             Data_Save();
@@ -1068,6 +1073,39 @@ static void UpdateAccessories(WORD pressed) {
             else if (s_accDev == ACC_DEV_RGB && Rgb_Present()) {
                 s_accSync = 1; Rgb_RequestConfig(); s_accSyncSent = GetTickCount();
             }
+        }
+        return;
+    }
+
+    if (s_accDev == ACC_DEV_XVIEW) {
+        int nRows = 11;  /* Enabled, Interval, Brightness, Panel, + 7 page toggles */
+        if (pressed & BTN_DPAD_DOWN) { if (s_accRow < nRows - 1) { s_accRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+        if (pressed & BTN_DPAD_UP) { if (s_accRow > 0) { s_accRow--; Audio_PlaySfx(SFX_NAV_UP); } }
+        if (s_accRow == 0 && (pressed & (BTN_A | BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
+            XView_SetEnabled(!XView_IsEnabled()); Audio_PlaySfx(SFX_ALT);
+        }
+        else if (s_accRow == 1 && (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
+            int iv = XView_IntervalMs();
+            if (pressed & BTN_DPAD_RIGHT) iv += 1000;
+            if (pressed & BTN_DPAD_LEFT)  iv -= 1000;
+            XView_SetIntervalMs(iv); Audio_PlaySfx(SFX_ALT);
+        }
+        else if (s_accRow == 2 && (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
+            int br = XView_Brightness();
+            if (pressed & BTN_DPAD_RIGHT) br += 24;
+            if (pressed & BTN_DPAD_LEFT)  br -= 24;
+            XView_SetBrightness(br); Audio_PlaySfx(SFX_ALT);
+        }
+        else if (s_accRow == 3 && (pressed & (BTN_A | BTN_DPAD_LEFT | BTN_DPAD_RIGHT))) {
+            XView_SetPanel(XView_Panel() == XV_PANEL_B ? XV_PANEL_A : XV_PANEL_B);
+            Audio_PlaySfx(SFX_ALT);
+        }
+        else if (s_accRow >= 4 && (pressed & BTN_A)) {
+            static const int k_xvPageBit[7] = {
+                LCD_PAGE_TEMPS, LCD_PAGE_MEM, LCD_PAGE_DISK,
+                LCD_PAGE_NET, LCD_PAGE_FTP, LCD_PAGE_CLOCK, LCD_PAGE_NOWPLAYING
+            };
+            XView_TogglePage(k_xvPageBit[s_accRow - 4]); Audio_PlaySfx(SFX_ALT);
         }
         return;
     }
@@ -1907,6 +1945,11 @@ static void RenderClock(IDirect3DDevice8* d) {
     DrawPedestal(d);
     DrawConsole(d, rows, 8, s_row, 8, 1);   /* Apply pinned to frame bottom */
 
+    if (Rtc_Present()) {
+        DWORD acc = Theme_Color("accent", 0xFF7FE000);
+        Font_DrawText(d, 360.0f, 18.0f, "X-RTC Detected", FONT_SIZE_SMALL, acc, 0);
+    }
+
     if (s_clkMsg) {
         DWORD ok = Theme_Color("accent", 0xFF7FE000);
         DWORD bad = Theme_Color("text_dim", 0xFF7FA060);
@@ -2226,7 +2269,7 @@ static void RenderAccessories(IDirect3DDevice8* d) {
     /* ----- device list ----- */
     if (s_accDev < 0) {
         const char* rows[ACC_DEV_COUNT];
-        char lcdRow[40], tdRow[40], rgbRow[40], oxRow[40];
+        char lcdRow[40], tdRow[40], rgbRow[40], oxRow[40], xvRow[40];
         /* uniform detection status across the detectable devices. LCD only
            probes the SMBus when enabled, so when it's off we say "Off" rather
            than claiming nothing's there. */
@@ -2235,13 +2278,47 @@ static void RenderAccessories(IDirect3DDevice8* d) {
         strcpy(tdRow, "Type-D    ");  strcat(tdRow, TypeD_Enabled() ? "On" : "Off");
         strcpy(rgbRow, "XBOX-RGB  ");  strcat(rgbRow, Udp_Present(UDP_DEV_RGB) ? "Detected" : "Not found");
         strcpy(oxRow, "OXFP      ");  strcat(oxRow, Udp_Present(UDP_DEV_OXFP) ? "Detected" : "Not found");
+        strcpy(xvRow, "X-View    ");  strcat(xvRow, !XView_IsEnabled() ? "Off" : (XView_IsReady() ? "Connected" : "On"));
         rows[ACC_DEV_LCD] = lcdRow;
         rows[ACC_DEV_TYPED] = tdRow;
         rows[ACC_DEV_RGB] = rgbRow;
         rows[ACC_DEV_OXFP] = oxRow;
+        rows[ACC_DEV_XVIEW] = xvRow;
         Chrome(d, "ACCESSORIES", "A OPEN   B BACK");
         DrawPedestal(d);
         DrawConsole(d, rows, ACC_DEV_COUNT, s_accRow, ACC_DEV_COUNT, 0);
+        return;
+    }
+
+    /* ----- X-View screen ----- */
+    if (s_accDev == ACC_DEV_XVIEW) {
+        char enRow[40], ivRow[40], brRow[40], pnRow[40], num[8];
+        char pTemps[40], pMem[40], pDisk[40], pNet[40], pFtp[40], pClk[40], pNow[40];
+        const char* rows[11];
+        int k, pages;
+        strcpy(enRow, "Enabled   ");
+        if (!XView_IsEnabled())   strcat(enRow, "No");
+        else if (XView_IsReady()) strcat(enRow, "Yes (connected)");
+        else                      strcat(enRow, "Yes (no panel)");
+        k = IntToText(XView_IntervalMs() / 1000, num); num[k] = 's'; num[k + 1] = 0;
+        strcpy(ivRow, "Interval  "); strcat(ivRow, num);
+        k = IntToText(XView_Brightness() * 100 / 255, num); num[k] = '%'; num[k + 1] = 0;
+        strcpy(brRow, "Bright    "); strcat(brRow, num);
+        strcpy(pnRow, "Panel     "); strcat(pnRow, XView_Panel() == XV_PANEL_A ? "Bar 284x76" : "320x240");
+        pages = XView_Pages();
+        strcpy(pTemps, "Temps     "); strcat(pTemps, (pages & LCD_PAGE_TEMPS) ? "On" : "Off");
+        strcpy(pMem, "Memory    "); strcat(pMem, (pages & LCD_PAGE_MEM) ? "On" : "Off");
+        strcpy(pDisk, "Disk      "); strcat(pDisk, (pages & LCD_PAGE_DISK) ? "On" : "Off");
+        strcpy(pNet, "Network   "); strcat(pNet, (pages & LCD_PAGE_NET) ? "On" : "Off");
+        strcpy(pFtp, "FTP       "); strcat(pFtp, (pages & LCD_PAGE_FTP) ? "On" : "Off");
+        strcpy(pClk, "Clock     "); strcat(pClk, (pages & LCD_PAGE_CLOCK) ? "On" : "Off");
+        strcpy(pNow, "Now Play  "); strcat(pNow, (pages & LCD_PAGE_NOWPLAYING) ? "On" : "Off");
+        rows[0] = enRow; rows[1] = ivRow; rows[2] = brRow; rows[3] = pnRow;
+        rows[4] = pTemps; rows[5] = pMem; rows[6] = pDisk; rows[7] = pNet;
+        rows[8] = pFtp; rows[9] = pClk; rows[10] = pNow;
+        Chrome(d, "X-VIEW", "A TOGGLE  L/R ADJUST  B BACK");
+        DrawPedestal(d);
+        DrawConsole(d, rows, 11, s_accRow, 11, 0);
         return;
     }
 

@@ -13,11 +13,14 @@
   <ItemGroup>
     <ClCompile Include="applications.cpp" />
     <ClCompile Include="dd_arcs.cpp" />
+    <ClCompile Include="dd_attach.cpp" />
     <ClCompile Include="dd_audio.cpp" />
     <ClCompile Include="dd_backdrop.cpp" />
     <ClCompile Include="dd_browse.cpp" />
     <ClCompile Include="dd_calib.cpp" />
     <ClCompile Include="dd_copyjob.cpp" />
+    <ClCompile Include="dd_custom.cpp" />
+    <ClCompile Include="dd_customadd.cpp" />
     <ClCompile Include="dd_data.cpp" />
     <ClCompile Include="dd_dc.cpp" />
     <ClCompile Include="dd_disc.cpp" />
@@ -32,6 +35,8 @@
     <ClCompile Include="dd_gfx.cpp" />
     <ClCompile Include="dd_hidden.cpp" />
     <ClCompile Include="dd_iso.cpp" />
+    <ClCompile Include="dd_isoinstall.cpp" />
+    <ClCompile Include="dd_isoui.cpp" />
     <ClCompile Include="dd_launcher.cpp" />
     <ClCompile Include="dd_lcd.cpp" />
     <ClCompile Include="dd_mount.cpp" />
@@ -45,6 +50,7 @@
     <ClCompile Include="dd_preview.cpp" />
     <ClCompile Include="dd_recents.cpp" />
     <ClCompile Include="dd_rgb.cpp" />
+    <ClCompile Include="dd_rtc.cpp" />
     <ClCompile Include="dd_savemgr.cpp" />
     <ClCompile Include="dd_screensaver.cpp" />
     <ClCompile Include="dd_select.cpp" />
@@ -66,6 +72,8 @@
     <ClCompile Include="dd_watchdog.cpp" />
     <ClCompile Include="dd_watchdog.h" />
     <ClCompile Include="dd_xbe.cpp" />
+    <ClCompile Include="dd_xiso.cpp" />
+    <ClCompile Include="dd_xview.cpp" />
     <ClCompile Include="emulators.cpp" />
     <ClCompile Include="dd_fx.cpp" />
     <ClCompile Include="fileman.cpp" />
@@ -76,6 +84,8 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="settings.cpp" />
     <ClCompile Include="xba.cpp" />
+    <ClCompile Include="xv_client.cpp" />
+    <ClCompile Include="xv_xbox.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="Media\Copy Assets Here.txt" />
@@ -83,11 +93,14 @@
   <ItemGroup>
     <ClInclude Include="applications.h" />
     <ClInclude Include="dd_arcs.h" />
+    <ClInclude Include="dd_attach.h" />
     <ClInclude Include="dd_audio.h" />
     <ClInclude Include="dd_backdrop.h" />
     <ClInclude Include="dd_browse.h" />
     <ClInclude Include="dd_calib.h" />
     <ClInclude Include="dd_copyjob.h" />
+    <ClInclude Include="dd_custom.h" />
+    <ClInclude Include="dd_customadd.h" />
     <ClInclude Include="dd_data.h" />
     <ClInclude Include="dd_dc.h" />
     <ClInclude Include="dd_disc.h" />
@@ -100,6 +113,8 @@
     <ClInclude Include="dd_gfx.h" />
     <ClInclude Include="dd_hidden.h" />
     <ClInclude Include="dd_iso.h" />
+    <ClInclude Include="dd_isoinstall.h" />
+    <ClInclude Include="dd_isoui.h" />
     <ClInclude Include="dd_launcher.h" />
     <ClInclude Include="dd_lcd.h" />
     <ClInclude Include="dd_mount.h" />
@@ -113,6 +128,7 @@
     <ClInclude Include="dd_preview.h" />
     <ClInclude Include="dd_recents.h" />
     <ClInclude Include="dd_rgb.h" />
+    <ClInclude Include="dd_rtc.h" />
     <ClInclude Include="dd_savemgr.h" />
     <ClInclude Include="dd_screensaver.h" />
     <ClInclude Include="dd_select.h" />
@@ -133,6 +149,9 @@
     <ClInclude Include="dd_update.h" />
     <ClInclude Include="dd_version.h" />
     <ClInclude Include="dd_xbe.h" />
+    <ClInclude Include="dd_xiso.h" />
+    <ClInclude Include="dd_xview.h" />
+    <ClInclude Include="dd_xv_font.h" />
     <ClInclude Include="emulators.h" />
     <ClInclude Include="fileman.h" />
     <ClInclude Include="font.h" />
@@ -145,6 +164,10 @@
     <ClInclude Include="stb_image.h" />
     <ClInclude Include="xba.h" />
     <ClInclude Include="xboxinternals.h" />
+    <ClInclude Include="xbox_usb.h" />
+    <ClInclude Include="xv_client.h" />
+    <ClInclude Include="xv_protocol.h" />
+    <ClInclude Include="xv_xbox.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>

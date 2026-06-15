@@ -23,11 +23,13 @@
 #include "dd_stbi.h"
 #include "dd_mount.h"
 #include "dd_smbsvc.h"
+#include "dd_xview.h"
 #include "dd_lcd.h"
 #include "dd_recents.h"
 #include "dd_paths.h"
 #include "dd_browse.h"
 #include "dd_synopsis.h"
+#include "dd_isoui.h"
 #include "dd_backdrop.h"
 #include "dd_pedestal.h"
 #include "dd_dc.h"
@@ -577,6 +579,19 @@ static void DrawLoadingScreen(void) {
 int Launcher_Update(WORD pressed, WORD held) {
     (void)held;   /* analog hold-to-scroll (below) reads the stick directly via GetSticks */
 
+    /* The ISO install wizard owns input while open. It drives dd_browse for
+       its folder step, so it MUST be checked before the add-path Browse
+       handler below (otherwise the folder confirm is read as an add-path). */
+    if (IsoUi_IsOpen()) {
+        int r = IsoUi_Update(pressed);
+        if (r == 1) {                /* a game was installed -> show it now */
+            RescanCurrent();
+            s_pedIdx = -1;
+            LoadPedestal(s_cursor);
+        }
+        return 0;
+    }
+
     /* If the folder picker is open it owns all input. On confirm, add the
        chosen folder as a custom path for this category, persist, and re-scan
        so the new titles appear immediately (no exit/re-enter needed). */
@@ -636,6 +651,16 @@ int Launcher_Update(WORD pressed, WORD held) {
         ClampScroll();
         s_pedIdx = -1;
         LoadPedestal(s_cursor);
+    }
+
+    /* RIGHT-STICK CLICK = install an ISO to the HDD. GAMES category only.
+       (Remap target: change BTN_RTHUMB below to taste.) */
+    if ((pressed & BTN_RTHUMB) && s_cfg && s_cfg->cacheId &&
+        s_cfg->cacheId[0] == 'g' && s_cfg->cacheId[1] == 'a' && s_cfg->cacheId[2] == 'm' &&
+        s_cfg->cacheId[3] == 'e' && s_cfg->cacheId[4] == 's' && s_cfg->cacheId[5] == 0) {
+        Audio_PlaySfx(SFX_SELECT);
+        IsoUi_Open();
+        return 0;
     }
 
     /* Y = add a scan path: open the folder picker. The category title gives
@@ -801,11 +826,17 @@ int Launcher_Update(WORD pressed, WORD held) {
                up once the game takes over. It also frees the bus so the art send
                runs uncontended. Restarted only if the launch fails (below). */
             Smbsvc_Stop();
+            Watchdog_Suspend();
+            /* freeze the X-View on a Now Playing frame with this title's
+               cover art, then shut the panel USB down leaving that frame up
+               while the game runs (mirrors LCD Now Playing persistence). */
+            XView_NowPlayingLaunch(s_items[s_cursor].label, s_items[s_cursor].xbePath);
             /* push the cover art to the Type-D (blocking; masked by the loading
                screen already on the front buffer). No-op for pack-less titles.
                Suspend the liveness watchdog across this -- it legitimately stalls
                the main loop for up to several seconds with no present. */
-            if (artOn) { Watchdog_Suspend(); TypeDArt_SendArtFor(s_items[s_cursor].xbePath); Watchdog_Resume(); }
+            if (artOn) { TypeDArt_SendArtFor(s_items[s_cursor].xbePath); }
+            Watchdog_Resume();
             /* paint the LCD Now Playing screen LAST, right before handoff, so it
                is the final thing written to the panel and persists while the game
                runs. No-op if the LCD accessory is off/absent. */
@@ -814,6 +845,7 @@ int Launcher_Update(WORD pressed, WORD held) {
             /* fell through -> launch failed. Restart the service thread so sensor
                polling + LCD paging resume, and carry on so the menu stays usable. */
             Smbsvc_Init();
+            XView_Start();   /* launch failed -> bring the panel back */
         }
     }
     return 0;
@@ -919,4 +951,5 @@ void Launcher_Render(void) {
     /* overlays on top of everything */
     Browse_Draw(d);
     Synopsis_Draw(d);
+    IsoUi_Draw(d);
 }

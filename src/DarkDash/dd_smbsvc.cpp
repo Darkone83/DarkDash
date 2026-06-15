@@ -10,6 +10,7 @@
 #include "dd_lcd.h"        /* Lcd_PollSensors, Lcd_Tick                       */
 #include "dd_watchdog.h"   /* Watchdog_SvcBeat -- bus-owner liveness          */
 #include "dd_trace.h"
+#include "dd_rtc.h"
 
 #define SVC_CADENCE_MS   180   /* loop period; the sensor (1s) and LCD (1Hz/4Hz)
                                   cadences are enforced inside their own calls,
@@ -38,6 +39,8 @@ static DWORD WINAPI SvcProc(LPVOID p) {
         if (!s_revDone && Smb_Ready()) {
             TRACE("svc.rev", ">");
             Sys_XboxRevision();
+            Rtc_Probe();           /* one-shot: detect X-RTC presence (brokered) */
+            Sys_SeedFromRtc();     /* if present, restore the kernel clock from it (no-op otherwise) */
             TRACE("svc.rev", "<");
             s_revDone = 1;
         }

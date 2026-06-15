@@ -39,6 +39,7 @@ typedef struct {
 void        Sys_GetClock(SysClock* c);
 int         Sys_SetClock(const SysClock* c);
 int         Sys_SetClockDirect(const SysClock* c);   /* set fields as-is (NTP; no EEPROM-TZ reconvert) */
+int         Sys_SeedFromRtc(void);                   /* boot: seed kernel clock from X-RTC if present (1 = seeded) */
 
 const char* Sys_XboxRevision(void);   /* "1.2 - 1.5 (Focus)" etc.        */
 DWORD       Sys_CpuMHz(void);         /* measured CPU clock (OC-aware)    */

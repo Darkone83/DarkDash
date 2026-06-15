@@ -34,6 +34,7 @@
 #include "dd_calib.h"
 #include "dd_watchdog.h"
 #include "dd_smbsvc.h"
+#include "dd_xview.h"
 #include "dd_trace.h"
 #include "dd_select.h"
 #include "dd_fx.h"
@@ -84,6 +85,9 @@
 #define IDLE_GAP_MIN   4000
 #define IDLE_GAP_RAND  7000
 
+#include "dd_custom.h"
+#include "dd_customadd.h"
+
 #define MENU_COUNT 7
 static const char* k_menu[MENU_COUNT] = {
     "APPLICATIONS", "GAMES", "HOMEBREW", "EMULATORS", "FILE MANAGER", "SAVE MANAGER", "SETTINGS"
@@ -99,6 +103,38 @@ static const LauncherConfig* MenuConfig(int sel) {
     default: return 0;   /* FILE MANAGER / SETTINGS handled separately */
     }
 }
+
+/* ---- dynamic main menu rows: 4 builtin categories + custom + 3 system ---- */
+#define MENU_VIS       7
+#define MENU_MAX_ROWS  (4 + CUSTOM_MAX + 3)
+enum { MROW_CAT_BUILTIN = 0, MROW_CAT_CUSTOM, MROW_FILEMAN, MROW_SAVEMGR, MROW_SETTINGS };
+typedef struct { const char* label; int kind; int idx; } MenuRow;
+
+static MenuRow s_mrows[MENU_MAX_ROWS];
+static int     s_mrowCount = 0;
+static int     s_menuScroll = 0;
+
+static int BuildMenuRows(MenuRow* r) {
+    int n = 0, i, cc;
+    for (i = 0; i < 4; i++) { r[n].label = k_menu[i]; r[n].kind = MROW_CAT_BUILTIN; r[n].idx = i; n++; }
+    cc = Custom_Count();
+    for (i = 0; i < cc && n < MENU_MAX_ROWS - 3; i++) {
+        const LauncherConfig* c = Custom_Get(i);
+        r[n].label = c ? c->title : "?"; r[n].kind = MROW_CAT_CUSTOM; r[n].idx = i; n++;
+    }
+    r[n].label = k_menu[4]; r[n].kind = MROW_FILEMAN;  r[n].idx = 0; n++;
+    r[n].label = k_menu[5]; r[n].kind = MROW_SAVEMGR;  r[n].idx = 0; n++;
+    r[n].label = k_menu[6]; r[n].kind = MROW_SETTINGS; r[n].idx = 0; n++;
+    return n;
+}
+
+static const LauncherConfig* RowConfig(const MenuRow* row) {
+    if (row->kind == MROW_CAT_BUILTIN) return MenuConfig(row->idx);
+    if (row->kind == MROW_CAT_CUSTOM)  return Custom_Get(row->idx);
+    return 0;
+}
+
+static void MenuRebuild(void) { s_mrowCount = BuildMenuRows(s_mrows); }
 
 /* ambient bloom now lives in dd_backdrop (shared across all screens) */
 
@@ -432,10 +468,11 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
             TRACED("ds.arcs", "<");
         }
         if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
-        for (i = 0; i < MENU_COUNT; i++) {
-            DWORD c = (i == sel) ? glow : text;
+        for (i = 0; i < MENU_VIS && (s_menuScroll + i) < s_mrowCount; i++) {
+            int ri = s_menuScroll + i;
+            DWORD c = (ri == sel) ? glow : text;
             Font_DrawTextIso(d, menuX + 30.0f, rowY0 + rowDY * (float)i + 4.0f,
-                k_menu[i], FONT_SIZE_MEDIUM, c);
+                s_mrows[ri].label, FONT_SIZE_MEDIUM, c);
         }
         Iso_End();
 
@@ -449,7 +486,7 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
                flat over the console at its current fade level. Honors the
                theme [glow] block (enable + intensity + dedicated color).
                The Y eases toward the selected row with a pop + chromatic tick. */
-            float gy = rowY0 + rowDY * (float)sel - 6.0f;
+            float gy = rowY0 + rowDY * (float)(sel - s_menuScroll) - 6.0f;
             int   ha = (70 + glowAlpha) * rectA / 255;
             ha = ha * glowI / 100;
             Iso_Begin();
@@ -474,7 +511,7 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
         float ty = barTop + (barH - gh) * 0.5f;
         if (ty < barTop + 2.0f) ty = barTop + 2.0f;
         Font_DrawText(d, 24.0f, ty,
-            "A SELECT   B BACK   START MENU", FONT_SIZE_SMALL, text, 0);
+            "A SELECT   B BACK   START MENU   X ADD CATEGORY", FONT_SIZE_SMALL, text, 0);
     }
 }
 
@@ -507,6 +544,8 @@ void __cdecl main(void) {
     Data_Load();             /* load prefs first: Gfx_Init reads videoRes from it */
     Recents_Init();          /* most-recently-launched titles (Y overlay) */
     Paths_Load();            /* user-added custom scan paths per category */
+    Custom_Load();           /* user-defined launcher categories (custom.dat) */
+    MenuRebuild();           /* assemble the menu rows (builtins + custom)    */
     Time_Load();             /* NTP enable + timezone prefs (time.dat)        */
     if (!Gfx_Init()) return;
     UI_Init(Gfx_Width(), Gfx_Height());
@@ -561,6 +600,8 @@ void __cdecl main(void) {
                                 (sensor reads + LCD writes), keeping the render loop bus-free */
     Oxfp_Init();             /* OXFP front-panel control (UDP 32123)            */
     Rgb_Init();              /* XBOX-RGB control (UDP 7777)                     */
+    XView_RefreshTheme();    /* snapshot theme colors for the X-View panel      */
+    XView_Start();           /* start the X-View panel thread (if enabled)      */
 
     /* first boot: run screen calibration so the user can fix overscan up front.
        Everything it needs (font, audio, backdrop) is initialised by now. */
@@ -627,7 +668,7 @@ void __cdecl main(void) {
         if (whiteReleased) {   /* WHITE released this frame */
             DWORD held = GetTickCount() - whiteDownMs;
             if (whiteDownMs && held < 400 && !whiteMoved &&
-                screen == SCR_MAIN && trans == 0 && !recOpen && !powOpen) {
+                screen == SCR_MAIN && trans == 0 && !recOpen && !powOpen && !CustomAdd_IsOpen()) {
                 powSel = 0; powOpen = 1; Audio_PlaySfx(SFX_SELECT);
             }
             whiteDownMs = 0;
@@ -670,7 +711,11 @@ void __cdecl main(void) {
             if (btn & BTN_DPAD_RIGHT) Iso_NudgeAngles(0.0f, 0.6f);
         }
         else {
-            if (powOpen) {
+            if (CustomAdd_IsOpen()) {
+                int car = CustomAdd_Update(pressed);
+                if (car == 1) MenuRebuild();   /* category added -> show it now */
+            }
+            else if (powOpen) {
                 /* power menu owns input while open */
                 if (pressed & BTN_DPAD_DOWN) { if (powSel < 2) { powSel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
                 if (pressed & BTN_DPAD_UP) { if (powSel > 0) { powSel--; Audio_PlaySfx(SFX_NAV_UP); } }
@@ -712,10 +757,13 @@ void __cdecl main(void) {
                 if (pressed & (BTN_B | BTN_Y)) { recOpen = 0; Audio_PlaySfx(SFX_BACK); }
             }
             else {
-                if (pressed & BTN_DPAD_DOWN) { if (sel < MENU_COUNT - 1) { sel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+                if (pressed & BTN_DPAD_DOWN) { if (sel < s_mrowCount - 1) { sel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
                 if (pressed & BTN_DPAD_UP) { if (sel > 0) { sel--; Audio_PlaySfx(SFX_NAV_UP); } }
+                if (sel < s_menuScroll) s_menuScroll = sel;
+                if (sel >= s_menuScroll + MENU_VIS) s_menuScroll = sel - MENU_VIS + 1;
                 if (pressed & BTN_A) {
-                    const LauncherConfig* cfg = MenuConfig(sel);
+                    const MenuRow* row = &s_mrows[sel];
+                    const LauncherConfig* cfg = RowConfig(row);
                     Audio_PlaySfx(SFX_SELECT);
                     Fx_FlashEdge();                      /* edge-glow pulse on select */
                     if (cfg) {                           /* a browser row: glitch out, then open */
@@ -723,21 +771,24 @@ void __cdecl main(void) {
                         trans = 1; transStart = GetTickCount(); transTarget = SCR_LAUNCH;
                         Swing_Start();                       /* door-swing the menu out */
                     }
-                    else if (sel == 4) {               /* FILE MANAGER */
+                    else if (row->kind == MROW_FILEMAN) {       /* FILE MANAGER */
                         trans = 1; transStart = GetTickCount(); transTarget = SCR_FILEMAN;
                         Swing_Start();
                     }
-                    else if (sel == 5) {               /* SAVE MANAGER */
+                    else if (row->kind == MROW_SAVEMGR) {       /* SAVE MANAGER */
                         trans = 1; transStart = GetTickCount(); transTarget = SCR_SAVEMGR;
                         Swing_Start();
                     }
-                    else if (sel == 6) {               /* SETTINGS */
+                    else if (row->kind == MROW_SETTINGS) {      /* SETTINGS */
                         trans = 1; transStart = GetTickCount(); transTarget = SCR_SETTINGS;
                         Swing_Start();
                     }
                     /* (no rows past SETTINGS) */
                 }
-                if (pressed & BTN_X) Audio_PlaySfx(SFX_ALT);
+                if (pressed & BTN_X) {            /* X = add a custom category */
+                    Audio_PlaySfx(SFX_SELECT);
+                    CustomAdd_Open();
+                }
                 if (pressed & BTN_B) Audio_PlaySfx(SFX_BACK);
                 if (pressed & BTN_START) {           /* launch a present game disc */
                     const DiscState* ds = Disc_Get();
@@ -870,7 +921,7 @@ void __cdecl main(void) {
            bare main menu (no transition, no overlay). 0 = disabled. */
         if (!saverOn) {
             int ssMin = Data_Get()->screensaverMin;
-            if (ssMin > 0 && screen == SCR_MAIN && trans == 0 && !recOpen && !powOpen &&
+            if (ssMin > 0 && screen == SCR_MAIN && trans == 0 && !recOpen && !powOpen && !CustomAdd_IsOpen() &&
                 (t - lastInputMs) > (DWORD)ssMin * 60000u) {
                 Saver_Enter();
                 saverOn = 1;
@@ -896,6 +947,7 @@ void __cdecl main(void) {
             else                            DrawSplash(sel, glowA, glitch);
             if (screen == SCR_MAIN && recOpen) DrawRecents(recSel);
             if (screen == SCR_MAIN && powOpen) DrawPowerMenu(powSel);
+            if (screen == SCR_MAIN && CustomAdd_IsOpen()) CustomAdd_Draw(Gfx_Device());
         }
         TRACED("r.draw<", "");
         /* ambient overlays, over all content: CRT scanlines + roll, then the
@@ -910,6 +962,7 @@ void __cdecl main(void) {
     }
 
     Smbsvc_Stop();           /* stop the SMBus service thread before tearing down */
+    XView_Stop();            /* outro + shut down the X-View panel thread          */
     Ftp_Stop();
     Fx_Shutdown();
     Egg_Shutdown();

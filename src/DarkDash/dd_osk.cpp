@@ -179,6 +179,7 @@ int Osk_Update(WORD pressed) {
     }
     if (pressed & BTN_B) { if (s_len > 0) { s_len--; s_text[s_len] = 0; } }
     if ((pressed & BTN_X) && s_mode == OSK_TEXT) s_keyset = (s_keyset + 1) % 3;
+    if ((pressed & BTN_LTHUMB) && s_mode == OSK_TEXT) s_keyset = (s_keyset == 1) ? 0 : 1;  /* L3 = caps toggle */
     if ((pressed & BTN_Y) && s_mode == OSK_TEXT) { if (s_len < s_maxLen) { s_text[s_len++] = ' '; s_text[s_len] = 0; } }
     if (pressed & BTN_START) { s_open = 0; return  1; }
     if (pressed & BTN_BACK) { s_open = 0; return -1; }
@@ -270,6 +271,6 @@ void Osk_Draw(IDirect3DDevice8* d) {
         UI_VIRT_W,
         (s_mode == OSK_NUMERIC)
         ? "A Type   B Del   Start OK   Back Cancel"
-        : "A Type  B Del  X Case  Y Space  Start OK  Back Cancel",
+        : "A Type  B Del  X Case  L3 Caps  Y Space  Start OK  Back Cancel",
         FONT_SIZE_SMALL, dim);
 }

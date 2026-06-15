@@ -29,4 +29,9 @@ int Xbe_ReadTitle(const char* xbePath, char* nameOut, int nameCap, unsigned* tit
    Returns 1 on success, 0 if absent/unsupported. Caller frees via Texture_Release. */
 int Xbe_LoadTitleImage(IDirect3DDevice8* dev, const char* xbePath, Texture* out);
 
+/* Extracts the raw $$XTIMAGE XPR0 block (TitleImage.xbx) into 'out' (<= cap bytes).
+   Returns 1 + *sizeOut on success, 0 if absent or larger than cap. Used to copy a
+   game's icon into a cert-patched attach.xbe for ISO->HDD installs. */
+int Xbe_ExtractTitleXpr0(const char* xbePath, BYTE* out, DWORD cap, DWORD* sizeOut);
+
 #endif /* DD_XBE_H */

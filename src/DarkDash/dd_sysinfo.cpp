@@ -15,6 +15,7 @@
 #include "dd_sysinfo.h"
 #include "dd_watchdog.h"
 #include "dd_smbus.h"          /* the single SMBus owner -- all access goes here now */
+#include "dd_rtc.h"            /* X-RTC mirror (no-op when absent) */
 
 #define SMBADDR_PIC      0x20   /* PIC16/SMC          (software-shifted 8-bit) */
 #define SMBADDR_ADM1032  0x98   /* ADM1032 temp mon   (software-shifted 8-bit) */
@@ -552,7 +553,11 @@ int Sys_SetClock(const SysClock* c) {
     st.wMilliseconds = 0;
     if (!SystemTimeToFileTime(&st, &local))      return 0;   /* invalid date */
     if (!LocalFileTimeToFileTime(&local, &utc))  return 0;
-    return NtSetSystemTime(&utc, NULL) == 0;                 /* 0 = STATUS_SUCCESS */
+    {
+        int ok = (NtSetSystemTime(&utc, NULL) == 0);         /* 0 = STATUS_SUCCESS */
+        if (ok) Rtc_WriteUtc(&utc);                          /* persist to X-RTC (no-op if absent) */
+        return ok;
+    }
 }
 
 /* Set the clock from already-resolved wall-clock fields WITHOUT going through
@@ -569,5 +574,22 @@ int Sys_SetClockDirect(const SysClock* c) {
     st.wHour = (WORD)c->hour;  st.wMinute = (WORD)c->min;  st.wSecond = (WORD)c->sec;
     st.wMilliseconds = 0;
     if (!SystemTimeToFileTime(&st, &ft)) return 0;           /* invalid date */
+    {
+        int ok = (NtSetSystemTime(&ft, NULL) == 0);
+        if (ok) Rtc_WriteUtc(&ft);                           /* persist to X-RTC (no-op if absent) */
+        return ok;
+    }
+}
+
+/* One-shot boot restore: if an X-RTC is present, read its UTC and seed the kernel
+   system clock from it. Cerbios does not seed the clock from the X-RTC, so the
+   dashboard makes the X-RTC authoritative -- loaded here at boot, updated on every
+   Set/NTP. UTC goes straight in (the timezone is applied at display). No-op and
+   harmless if absent, or if Cerbios already happened to seed the same value.
+   Returns 1 if it seeded. */
+int Sys_SeedFromRtc(void) {
+    FILETIME ft;
+    if (!Rtc_Present())     return 0;
+    if (!Rtc_ReadUtc(&ft))  return 0;
     return NtSetSystemTime(&ft, NULL) == 0;
 }

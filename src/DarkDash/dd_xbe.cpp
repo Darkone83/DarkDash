@@ -169,3 +169,55 @@ int Xbe_LoadTitleImage(IDirect3DDevice8* dev, const char* xbePath, Texture* out)
     out->pw = (int)w; out->ph = (int)hh;
     return 1;
 }
+/* Extract the raw $$XTIMAGE section (the XPR0 / TitleImage.xbx block) into 'out'
+   (up to 'cap' bytes). Same section-find as Xbe_LoadTitleImage, but returns the
+   raw block instead of decoding a texture -- used to copy a game's icon into a
+   cert-patched attach.xbe. Returns 1 + *sizeOut on success; 0 if absent/too big. */
+int Xbe_ExtractTitleXpr0(const char* xbePath, BYTE* out, DWORD cap, DWORD* sizeOut) {
+    HANDLE h;
+    BYTE   hbuf[XBE_SECHDR_READ];
+    DWORD  got = 0, rd = 0;
+    DWORD  base, nsec, secVA, secOff, imgRaw = 0, imgSize = 0, i;
+
+    if (sizeOut) *sizeOut = 0;
+    if (!xbePath || !out || cap == 0) return 0;
+
+    h = CreateFile(xbePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    if (!ReadFile(h, hbuf, XBE_SECHDR_READ, &got, NULL) || got < 0x140) { CloseHandle(h); return 0; }
+    if (hbuf[0] != 'X' || hbuf[1] != 'B' || hbuf[2] != 'E' || hbuf[3] != 'H') { CloseHandle(h); return 0; }
+
+    base = Rd32(hbuf + 0x104);
+    nsec = Rd32(hbuf + 0x11C);
+    secVA = Rd32(hbuf + 0x120);
+    if (secVA < base || nsec == 0 || nsec > 64) { CloseHandle(h); return 0; }
+    secOff = secVA - base;
+
+    for (i = 0; i < nsec; i++) {
+        DWORD s = secOff + i * 0x38;
+        DWORD nameVA, nameOff;
+        if (s + 0x38 > got) break;
+        nameVA = Rd32(hbuf + s + 0x14);
+        if (nameVA < base) continue;
+        nameOff = nameVA - base;
+        if (nameOff + 9 > got) continue;
+        {
+            const char* nm = (const char*)(hbuf + nameOff);
+            if (nm[0] == '$' && nm[1] == '$' && nm[2] == 'X' && nm[3] == 'T' &&
+                nm[4] == 'I' && nm[5] == 'M' && nm[6] == 'A' && nm[7] == 'G' && nm[8] == 'E') {
+                imgRaw = Rd32(hbuf + s + 0x0C);   /* section file offset */
+                imgSize = Rd32(hbuf + s + 0x10);
+                break;
+            }
+        }
+    }
+    if (!imgRaw || imgSize < 0x20 || imgSize > cap) { CloseHandle(h); return 0; }
+
+    SetFilePointer(h, imgRaw, NULL, FILE_BEGIN);
+    if (!ReadFile(h, out, imgSize, &rd, NULL) || rd != imgSize) { CloseHandle(h); return 0; }
+    CloseHandle(h);
+
+    if (out[0] != 'X' || out[1] != 'P' || out[2] != 'R' || out[3] != '0') return 0;  /* must be XPR0 */
+    if (sizeOut) *sizeOut = imgSize;
+    return 1;
+}
