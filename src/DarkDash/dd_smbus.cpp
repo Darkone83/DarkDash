@@ -16,12 +16,21 @@
 #include "dd_trace.h"
 
 #define SMB_STS_OK        0x10   /* nForce status: last transaction completed OK */
-#define SMB_DEF_TURN_GAP  2500   /* inter-master guard after each turn (us)      */
+#define SMB_DEF_TURN_GAP  1500   /* inter-master guard after each turn (us)      */
+/* Relaxed from 2500 (Type-D's conservative match). Safe to shorten because the
+   load-bearing fix is Hal-only access (the kernel already serializes our calls
+   against its own SMC/temp/fan/eject traffic); this gap is just belt-and-braces
+   politeness margin on top. The DrawSplash hard lock traced to the NV2A holding
+   the memory bus, not SMBus contention, so there's no reason to keep SMBus pacing
+   maximally conservative. US2066 command dwell (clear/home/init) is separate --
+   it's the Sleep()s in dd_lcd.cpp -- so this does NOT touch device timing.
+   Tunable at runtime via Smb_SetTurnGapUs(); ~1200 if a console stays clean,
+   back toward 2000+ if any box shows SMBus errors or temp-read hiccups.        */
 #define SMB_DEF_FAILRESET 4      /* consecutive fails before self W1C            */
 #define SMB_SETTLE_US     2000   /* post-W1C settle (PIC/ADM recover <100us)     */
 #define SMB_DEF_BOOT_SETTLE_MS 3000 /* hold all kernel SMBus traffic this long after init */
 
-/* ---- broker state (all mutated only while holding s_cs) ------------------- */
+   /* ---- broker state (all mutated only while holding s_cs) ------------------- */
 static CRITICAL_SECTION s_cs;
 static int   s_inited = 0;
 static int   s_depth = 0;            /* current turn nesting depth          */

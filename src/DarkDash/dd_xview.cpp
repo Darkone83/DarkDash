@@ -121,6 +121,8 @@ void XView_RefreshTheme(void) {
 
 static XvInfo   s_info;
 static int      s_haveInfo = 0;
+static XvCaps   s_caps;
+static int      s_haveCaps = 0;
 #define XV_ART_DIM 200
 static uint16_t s_art[XV_ART_DIM * XV_ART_DIM];
 static LONG s_ready = 0;
@@ -715,17 +717,21 @@ static void XvBrightFade(int from, int to) {
 }
 
 static int RunPages(void) {
-    int order[8]; int n, cur = 0, t = 0, fails = 0, dimmed = 0, lastBright = -1; DWORD pageStart, lastBuild, lastLink;
+    int order[8]; int n, cur = 0, t = 0, fails = 0, dimmed = 0, lastBright = -1; DWORD pageStart, lastBuild, lastLink, lastBeat;
     if (s_palDirty) BuildPalette();
     n = BuildOrder(order);
     BuildContent(order[0]);
-    pageStart = lastBuild = lastLink = GetTickCount();
+    pageStart = lastBuild = lastLink = lastBeat = GetTickCount();
     while (!Stopping()) {
         DWORD now = GetTickCount();
         DWORD interval = (DWORD)s_cfg.intervalMs;   /* re-read live each frame */
         int rc;
         if (interval < 1000)  interval = 4000;
         if (interval > 30000) interval = 30000;
+        if (s_haveCaps && (s_caps.caps32 & XV_CAP_HEARTBEAT) && now - lastBeat >= 1500) {
+            lastBeat = now;                 /* keep host-gone timer at bay (esp. while dimmed) */
+            XvCli_Heartbeat();
+        }
         /* authoritative unplug check (hub PORT_CONNECTION + USBD remove latch),
            polled ~1/s -- does not depend on bulk-transfer timeouts. */
         if (now - lastLink >= 1000) {
@@ -808,6 +814,183 @@ static int RunPages(void) {
 
 /* ---- the panel thread ------------------------------------------------- */
 
+/* ----------------------------------------------------------------------------
+   v2 showcase intro: a wireframe Xbox "X" (two crossed prisms) tumbling in over
+   a warping starfield, with the title fading in. Rendered on the device's
+   geometry + command-buffer pipeline (native resolution, vector) -- a few
+   hundred bytes/frame instead of a half-res pixel blit. Caps-gated; XvProc
+   falls back to the 2D DrawSplash on v1 firmware.
+---------------------------------------------------------------------------- */
+#define XV_LOGO_ID 1
+
+static const int32_t s_logoPos[32][3] = {
+    {    46341,    46341,   -11796 },
+    {     9952,    24025,   -11796 },
+    {        0,    18350,   -11796 },
+    {    -9952,    24025,   -11796 },
+    {   -46341,    46341,   -11796 },
+    {   -24025,     9952,   -11796 },
+    {   -18350,        0,   -11796 },
+    {   -24025,    -9952,   -11796 },
+    {   -46341,   -46341,   -11796 },
+    {    -9952,   -24025,   -11796 },
+    {        0,   -18350,   -11796 },
+    {     9952,   -24025,   -11796 },
+    {    46341,   -46341,   -11796 },
+    {    24025,    -9952,   -11796 },
+    {    18350,        0,   -11796 },
+    {    24025,     9952,   -11796 },
+    {    46341,    46341,    11796 },
+    {     9952,    24025,    11796 },
+    {        0,    18350,    11796 },
+    {    -9952,    24025,    11796 },
+    {   -46341,    46341,    11796 },
+    {   -24025,     9952,    11796 },
+    {   -18350,        0,    11796 },
+    {   -24025,    -9952,    11796 },
+    {   -46341,   -46341,    11796 },
+    {    -9952,   -24025,    11796 },
+    {        0,   -18350,    11796 },
+    {     9952,   -24025,    11796 },
+    {    46341,   -46341,    11796 },
+    {    24025,    -9952,    11796 },
+    {    18350,        0,    11796 },
+    {    24025,     9952,    11796 },
+};
+static const uint16_t s_logoIdx[96] = {
+     0,  1, 17,  0, 17, 16,  1,  2, 18,  1, 18, 17,
+     2,  3, 19,  2, 19, 18,  3,  4, 20,  3, 20, 19,
+     4,  5, 21,  4, 21, 20,  5,  6, 22,  5, 22, 21,
+     6,  7, 23,  6, 23, 22,  7,  8, 24,  7, 24, 23,
+     8,  9, 25,  8, 25, 24,  9, 10, 26,  9, 26, 25,
+    10, 11, 27, 10, 27, 26, 11, 12, 28, 11, 28, 27,
+    12, 13, 29, 12, 29, 28, 13, 14, 30, 13, 30, 29,
+    14, 15, 31, 14, 31, 30, 15,  0, 16, 15, 16, 31,
+};
+
+static void DrawTitle3D(void) {
+    enum {
+        STARS = 48, WARP_END = 28, FLY_END = 78, SET_END = 110, SPIN_STOP = 96,
+        TOTAL = 150, FOCAL = 200, SPIN_UNITS = 2048, WOBBLE_AMP = 100, WOBBLE_START = SPIN_STOP
+    };
+    static const char k_title[] = "DARKDASH";
+    const int32_t ZFAR = 9 * XV_FX_ONE, ZNEAR = 249037;   /* 3.8 in 16.16 */
+    int W = s_haveInfo ? s_info.width : 320;
+    int H = s_haveInfo ? s_info.height : 240;
+    int cols = s_haveInfo ? s_info.cols : 40;
+    int rows = s_haveInfo ? s_info.rows : 15;
+    int cx = W / 2, cy = H / 2;
+    int sX[STARS], sY[STARS], sZ[STARS], sPZ[STARS], sC[STARS];
+    int trow = rows - 3, tcol = (cols - 8) / 2;
+    XvVtx v[32];
+    uint16_t green, bg;
+    unsigned int rng = (GetTickCount() | 1u);
+    int i, F, angY = 0;
+    unsigned char cbuf[1536];
+    static const unsigned char k_starPal[9][3] = {
+        { 255, 255, 255 }, { 120, 210, 255 }, { 255, 120, 220 },
+        { 255, 210, 110 }, { 120, 140, 255 }, { 255, 140, 110 },
+        { 170, 255, 150 }, { 210, 160, 255 }, { 255, 100, 120 }
+    };
+
+    if (trow < 0) trow = 0;
+    if (tcol < 0) tcol = 0;
+    bg = XvCli_Rgb565(0, 0, 0);
+    green = XvCli_Rgb565(130, 205, 70);
+    for (i = 0; i < 32; i++) {
+        v[i].x = s_logoPos[i][0]; v[i].y = s_logoPos[i][1]; v[i].z = s_logoPos[i][2];
+        v[i].color = green;
+    }
+    XvCli_DefineMesh(XV_LOGO_ID, v, 32, s_logoIdx, 96, XV_MESH_WIREFRAME, 0);
+
+    for (i = 0; i < STARS; i++) {
+        rng = rng * 1664525u + 1013904223u; sX[i] = (int)((rng >> 16) % 6000u) - 3000;
+        rng = rng * 1664525u + 1013904223u; sY[i] = (int)((rng >> 16) % 4000u) - 2000;
+        rng = rng * 1664525u + 1013904223u; sZ[i] = 400 + (int)((rng >> 16) % 5600u);
+        rng = rng * 1664525u + 1013904223u; sC[i] = (int)((rng >> 16) % 9u);
+        sPZ[i] = sZ[i];
+    }
+
+    for (F = 0; F <= TOTAL; F++) {
+        int32_t mRY[12], mRX[12], m[12];
+        int zPush, angX, speed, tA;
+        XvCmd c;
+        if (Stopping()) { XvCli_FreeMesh(XV_LOGO_ID); return; }
+
+        zPush = (F < FLY_END) ? (ZFAR + (ZNEAR - ZFAR) * F / FLY_END) : ZNEAR;
+        angX = 40;                                  /* ~14 deg tilt */
+
+        /* hybrid Y motion: fast eased tumble during arrival (skew hidden while small/far),
+           decelerating to a face-on landing, then a gentle wobble at rest */
+        if (F < SPIN_STOP) {
+            int dd = SPIN_STOP - F;
+            angY = SPIN_UNITS - (int)((__int64)SPIN_UNITS * dd * dd / ((__int64)SPIN_STOP * SPIN_STOP));
+        }
+        else {
+            angY = SPIN_UNITS;
+        }
+        if (F >= WOBBLE_START) {
+            int wf = F - WOBBLE_START;
+            int amp = (wf < 24) ? (WOBBLE_AMP * wf / 24) : WOBBLE_AMP;
+            angY += (int)(((__int64)amp * XvFx_Sin(wf * 18)) >> 16);
+        }
+        angY &= (XV_FX_TURN - 1);
+
+        XvMat_RotY(mRY, angY);                       /* tumble -> wobble */
+        XvMat_RotX(mRX, angX);                       /* tilt */
+        XvMat_Mul(m, mRX, mRY);
+        XvMat_Translate(m, 0, 0, zPush);
+        XvCli_SetMatrix(m);                          /* current matrix for DRAW_MESH */
+
+        XvCmd_Begin(&c, cbuf, sizeof(cbuf));
+        XvCmd_SetColor(&c, bg);
+        XvCmd_Fill(&c, 0, 0, W, H);                  /* clear (MANUAL present persists fb) */
+
+        speed = (F < WARP_END) ? (50 + 230 * F / WARP_END) : 120;
+        for (i = 0; i < STARS; i++) {
+            int z = sZ[i], pz = sPZ[i], x2, y2, px, py, br;
+            if (z < 200) z = 200;
+            if (pz < 200) pz = 200;
+            x2 = cx + sX[i] * FOCAL / z;   y2 = cy - sY[i] * FOCAL / z;
+            px = cx + sX[i] * FOCAL / pz;  py = cy - sY[i] * FOCAL / pz;
+            br = 255 - (sZ[i] * 255 / 6000);
+            if (br < 50)  br = 50;
+            if (br > 255) br = 255;
+            {
+                const unsigned char* pc = k_starPal[sC[i]];
+                XvCmd_SetColor(&c, XvCli_Rgb565(pc[0] * br / 255, pc[1] * br / 255, pc[2] * br / 255));
+            }
+            XvCmd_Line(&c, px, py, x2, y2);
+            sPZ[i] = sZ[i]; sZ[i] -= speed;
+            if (sZ[i] < 200) {
+                rng = rng * 1664525u + 1013904223u; sX[i] = (int)((rng >> 16) % 6000u) - 3000;
+                rng = rng * 1664525u + 1013904223u; sY[i] = (int)((rng >> 16) % 4000u) - 2000;
+                rng = rng * 1664525u + 1013904223u; sC[i] = (int)((rng >> 16) % 9u);
+                sZ[i] = 5900; sPZ[i] = 5900;
+            }
+        }
+
+        XvCli_CmdList(&c);                           /* flush clear + starfield into the fb */
+
+        XvCli_DrawMesh(XV_LOGO_ID, 0);               /* cull OFF -> the full X wireframe draws */
+
+        XvCmd_Begin(&c, cbuf, sizeof(cbuf));         /* title list (transparent text) + present */
+        if (F >= FLY_END) {                          /* title fades in */
+            int g;
+            tA = (F < SET_END) ? (255 * (F - FLY_END) / (SET_END - FLY_END)) : 255;
+            g = 60 + 195 * tA / 255;
+            XvCmd_SetColor(&c, XvCli_Rgb565(g, g, g));
+            XvCmd_Text(&c, trow, tcol, k_title);
+        }
+
+        XvCmd_Present(&c);
+        XvCli_CmdList(&c);
+
+        if (SleepChecked(28)) { XvCli_FreeMesh(XV_LOGO_ID); return; }
+    }
+    XvCli_FreeMesh(XV_LOGO_ID);
+}
+
 static DWORD WINAPI XvProc(LPVOID arg) {
     (void)arg;
 
@@ -837,7 +1020,16 @@ static DWORD WINAPI XvProc(LPVOID arg) {
         XvCli_Clear(XvCli_Rgb565(s_bg.r, s_bg.g, s_bg.b));   /* clear on init (s3.7) */
         XvCli_Present();
 
-        DrawSplash();
+        s_haveCaps = (XvCli_QueryCaps(&s_caps) == 0);   /* v2 capability negotiation */
+
+        if (s_haveCaps &&
+            (s_caps.caps32 & XV_CAP_GEOMETRY_3D) &&
+            (s_caps.caps32 & XV_CAP_COMMAND_BUFFER)) {
+            DrawTitle3D();          /* v2 showcase */
+        }
+        else {
+            DrawSplash();           /* v1 fallback */
+        }
         InterlockedExchange(&s_ready, 1);
         rc = RunPages();                                /* 0 = stop, 1 = unplugged */
         InterlockedExchange(&s_ready, 0);

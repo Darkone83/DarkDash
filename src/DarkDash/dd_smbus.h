@@ -65,7 +65,8 @@ extern "C" {
 
     /* Tuning knobs (optional; sane defaults baked in).
          TurnGapUs : quiet inter-master guard left after each outer turn
-                     (default 2500us -- matches the Type-D Expansion's guard).
+                     (default 1500us; relaxed from Type-D's 2500us guard --
+                      see dd_smbus.cpp. Safe range ~1200..2500).
          FailReset : consecutive transaction failures before the broker W1Cs
                      the controller itself (default 4). */
     void Smb_SetTurnGapUs(unsigned us);
