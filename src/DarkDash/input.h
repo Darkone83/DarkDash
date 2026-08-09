@@ -42,7 +42,9 @@ void InitInput();
 // Polls & updates button state + analog stick state.
 void PumpInput();
 
-// Returns OR of all controller button masks (BTN_* flags above).
+// Returns the button mask for the dashboard's active navigation port.
+// Port 1 (index 0) is exclusive when present; otherwise the first connected
+// controller among ports 2-4 drives navigation. See nav_port in input.cpp.
 WORD GetButtons();
 
 // Port-specific reads for local multiplayer. Port 0 = player 1, port 1 = player 2.

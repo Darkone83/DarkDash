@@ -147,6 +147,8 @@ typedef enum {
     XV_OP_ANIM_DEFINE = 0x73,  /* xv_anim_define_t (tween/sheet/generator)  */
     XV_OP_ANIM_CONTROL = 0x74,  /* xv_anim_control_t (play/stop/loop/seek)   */
     XV_OP_NODE_SET = 0x75,  /* xv_node_set_t (mutate one node property)  */
+    XV_OP_SET_GEN_PALETTE = 0x76, /* xv_gen_palette_t + stops: theme the generator LUT */
+    XV_OP_SCENE_TEXT = 0x77,  /* xv_scene_text_t + chars: set a scene string slot   */
 
     /* 0x8x  asset cache / flash  (CAP_FLASH_CACHE)
        Write-once / read-many. Flash is only ever written on an explicit client
@@ -179,6 +181,7 @@ typedef enum {
 #define XV_CAP_DMA_FLUSH      (1u << 10)  /* DMA/PIO panel scanout             */
 #define XV_CAP_GENERATORS     (1u << 11)  /* on-device plasma/fire/etc.        */
 #define XV_CAP_RESYNC         (1u << 12)  /* SYNC/scene-version handshake       */
+#define XV_CAP_GEN_PALETTE    (1u << 13)  /* host-settable generator palette ramp */
 
 /* orientation */
 #define XV_ROT_0             0x00u
@@ -440,6 +443,26 @@ typedef struct {
     uint8_t  _pad;
     int32_t  value;
 } xv_node_set_t;                 /* 12 bytes */
+
+/* SET_GEN_PALETTE: a compact theme ramp the firmware interpolates into the
+   256-entry generator LUT. Header below, then stop_count x uint16 RGB565 stops.
+   2..XV_GEN_PALETTE_MAX_STOPS stops; the default LUT is the built-in rainbow. */
+#define XV_GEN_PALETTE_MAX_STOPS 16
+typedef struct {
+    uint8_t  stop_count;         /* number of RGB565 stops that follow (2..16) */
+    uint8_t  _pad;
+} xv_gen_palette_t;              /* 2 bytes + stop_count * uint16 */
+
+/* SCENE_TEXT: set the string in a fixed scene-text slot (overwrite in place, no
+   allocation). A NODE_TEXT node references the slot by id in its `a` field and is
+   redrawn from the slot every scene tick, so updating live text = re-send this op
+   with the new bytes (a few bytes), never a scene rebuild. */
+typedef struct {
+    uint8_t  slot;              /* 0 .. XV_SCENE_STR_SLOTS-1                  */
+    uint8_t  count;            /* char count that follows (clamped to MAX)   */
+    /* then `count` char-code bytes */
+} xv_scene_text_t;              /* 2 bytes + chars */
+
 
 /* ----- 0x8x asset cache / flash ----- */
 #define XV_ASSET_BITMAP   0x00u   /* RGB565 pixels (w*h)                      */

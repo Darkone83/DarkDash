@@ -24,6 +24,7 @@
 #include "settings.h"
 #include "dd_launcher.h"
 #include "dd_stbi.h"
+#include "dd_id3.h"
 #include "dd_xv_font.h"
 
 /* ---- config (xview.dat) ----------------------------------------------- */
@@ -123,6 +124,7 @@ static XvInfo   s_info;
 static int      s_haveInfo = 0;
 static XvCaps   s_caps;
 static int      s_haveCaps = 0;
+
 #define XV_ART_DIM 200
 static uint16_t s_art[XV_ART_DIM * XV_ART_DIM];
 static LONG s_ready = 0;
@@ -345,6 +347,20 @@ static int   s_pgLineN;
 static int   s_pgHasBar;
 static unsigned long s_pgBarDone, s_pgBarTotal;
 
+/* ---- Now Playing rich page: album art + ID3 tags + progress ----------- */
+#define XV_NPART_MAX XV_H                /* art never exceeds the half-res height */
+static DD_Id3Info s_npMeta;             /* ID3 title/artist/album/duration       */
+static char     s_npPathKey[260];       /* path last decoded for (change guard)  */
+static uint16_t s_npArt[XV_NPART_MAX * XV_NPART_MAX]; /* letterboxed art, RGB565  */
+static int      s_npArtDim = 0;       /* 0 = no art decoded                    */
+static char     s_npTitleStr[64];       /* resolved title (ID3, else filename)   */
+static DWORD    s_npElapsed = 0;
+static DWORD    s_npDuration = 0;
+static int      s_npLive = 0;       /* 1 = Shuffle playing a real track       */
+
+static void ArtLetterbox(const unsigned char* src, int sw, int sh, uint16_t* out, int dim);
+static void NpRefresh(void);            /* defined after ArtLetterbox             */
+
 static void KV(int* n, const char* label, const char* val) {
     if (*n >= 8) return;
     lstrcpynA(s_pgLines[*n].label, label, (int)sizeof(s_pgLines[0].label));
@@ -432,18 +448,10 @@ static void BuildContent(int bit) {
         v[p++] = (char)('0' + c.min / 10);  v[p++] = (char)('0' + c.min % 10);  v[p++] = ':';
         v[p++] = (char)('0' + c.sec / 10);  v[p++] = (char)('0' + c.sec % 10);  v[p] = 0; KV(&n, "Time", v);
     } break;
-    case LCD_PAGE_NOWPLAYING: {
-        const char* name = ""; DWORD el = 0; char tm[8]; int secs, mm, ss;
+    case LCD_PAGE_NOWPLAYING:
         lstrcpynA(s_pgTitle, "Now Playing", sizeof(s_pgTitle));
-        if (!Settings_ShuffleNowPlaying(&name, &el)) { KV(&n, "", "(stopped)"); }
-        else {
-            KV(&n, "", name);
-            secs = (int)(el / 1000); mm = secs / 60; ss = secs % 60; if (mm > 99) { mm = 99; ss = 59; }
-            tm[0] = (char)('0' + (mm / 10) % 10); tm[1] = (char)('0' + mm % 10); tm[2] = ':';
-            tm[3] = (char)('0' + ss / 10);      tm[4] = (char)('0' + ss % 10); tm[5] = 0;
-            KV(&n, "Elapsed", tm);
-        }
-    } break;
+        NpRefresh();                       /* decode ID3 tags + art on track change */
+        break;
     default: lstrcpynA(s_pgTitle, "", sizeof(s_pgTitle)); break;
     }
     s_pgLineN = n;
@@ -488,6 +496,65 @@ static void ArtLetterbox(const unsigned char* src, int sw, int sh, uint16_t* out
     }
 }
 
+/* album-art square (half-res px): fills the height between the header and the
+   progress strip, capped to ~42% width so the metadata column has room. */
+static int NpArtDim(void) {
+    int hdr = (s_rh >= 90) ? 17 : 13;
+    int d = s_rh - hdr - 4 - 16;          /* 16 = progress bar + time row */
+    int wcap = s_rw * 5 / 12;
+    if (d > wcap)          d = wcap;
+    if (d > XV_NPART_MAX)  d = XV_NPART_MAX;
+    if (d < 8)             d = 8;
+    return d;
+}
+
+static int NpStrEq(const char* a, const char* b) {
+    int i;
+    for (i = 0; a[i] && b[i]; i++) if (a[i] != b[i]) return 0;
+    return a[i] == b[i];
+}
+
+/* Refresh Now Playing state. Cheap every call; the file decode (ID3 tags + cover
+   art) only runs when the track path changes. Driven from BuildContent (~1/s). */
+static void NpRefresh(void) {
+    const char* name = 0;
+    const char* path = 0;
+    DWORD el = 0;
+
+    s_npLive = Settings_ShuffleNowPlaying(&name, &el);
+    if (!s_npLive) {
+        s_npPathKey[0] = 0; s_npArtDim = 0;
+        s_npElapsed = 0; s_npDuration = 0;
+        return;
+    }
+    s_npElapsed = el;
+    if (!Settings_ShuffleNowPlayingPath(&path)) path = 0;
+
+    if (!(path && s_npPathKey[0] && NpStrEq(path, s_npPathKey))) {  /* track changed */
+        int aw = 0, ah = 0; unsigned char* argb;
+        s_npArtDim = 0;
+        s_npMeta.title[0] = s_npMeta.artist[0] = s_npMeta.album[0] = 0;
+        s_npMeta.durationMs = 0;
+        if (path) {
+            DD_Id3Read(path, &s_npMeta);
+            argb = DD_Id3LoadArtRGBA(path, &aw, &ah);
+            if (argb && aw > 0 && ah > 0) {
+                int d = NpArtDim();
+                ArtLetterbox(argb, aw, ah, s_npArt, d);
+                s_npArtDim = d;
+                DD_StbFree(argb);
+            }
+            lstrcpynA(s_npPathKey, path, (int)sizeof(s_npPathKey));
+        }
+        else {
+            s_npPathKey[0] = 0;
+        }
+        if (s_npMeta.title[0]) lstrcpynA(s_npTitleStr, s_npMeta.title, (int)sizeof(s_npTitleStr));
+        else                   lstrcpynA(s_npTitleStr, name ? name : "", (int)sizeof(s_npTitleStr));
+    }
+    s_npDuration = s_npMeta.durationMs;
+}
+
 /* compose one data-page frame: plasma + translucent header/rows + glowing text */
 static void ComposeFrame(int t) {
     uint16_t acc = XvCli_Rgb565(s_acc.r, s_acc.g, s_acc.b);
@@ -524,6 +591,164 @@ static void ComposeFrame(int t) {
         FbRect(x0, y + 1, w, 6, dim);
         FbRect(x0, y + 1, fw, 6, acc);
     }
+}
+
+/* ---- Now Playing compose ---------------------------------------------- */
+
+static int NpStrLen(const char* s) { int n = 0; while (s[n]) n++; return n; }
+
+/* one glyph, clipped to the horizontal span [clipL, clipR) as well as the frame */
+static void FbGlyphClipX(int x, int y, uint16_t col, int ch, int clipL, int clipR) {
+    const unsigned char* g; int row, bx;
+    if (ch < XVFONT_FIRST || ch > XVFONT_LAST) ch = '?';
+    g = s_xvfont[ch - XVFONT_FIRST];
+    for (row = 0; row < XVFONT_H; row++) {
+        unsigned char bits = g[row];
+        int py = y + row; uint16_t* dst;
+        if (!bits) continue;
+        if (py < 0 || py >= s_rh) continue;
+        dst = s_fb + py * s_rw;
+        for (bx = 0; bx < XVFONT_W; bx++) {
+            int px = x + bx;
+            if (!(bits & (1 << (7 - bx)))) continue;
+            if (px < clipL || px >= clipR || px < 0 || px >= s_rw) continue;
+            dst[px] = col;
+        }
+    }
+}
+
+/* text within a column [x, x+colW): static when it fits, else a left-scrolling
+   marquee that wraps with a gap. 1px drop shadow for legibility over plasma. */
+static void FbTextMarquee(int x, int y, uint16_t col, const char* s, int colW, int t) {
+    uint16_t sh = XvCli_Rgb565(0, 0, 0);
+    int len, textPx, clipR, i, base, gap, span, off;
+    if (!s || !s[0] || colW <= 0) return;
+    clipR = x + colW;
+    len = NpStrLen(s);
+    textPx = len * XVFONT_W;
+    if (textPx <= colW) {                       /* fits: draw once, no scroll */
+        for (i = 0; i < len; i++) {
+            int gx = x + i * XVFONT_W;
+            FbGlyphClipX(gx + 1, y + 1, sh, (unsigned char)s[i], x, clipR);
+            FbGlyphClipX(gx, y, col, (unsigned char)s[i], x, clipR);
+        }
+        return;
+    }
+    gap = XVFONT_W * 3;                          /* blank gap before the wrap */
+    span = textPx + gap;
+    off = (t / 10) % span;                      /* ~33 px/s leftward, readable */
+    for (base = x - off; base < clipR; base += span) {
+        for (i = 0; i < len; i++) {
+            int gx = base + i * XVFONT_W;
+            if (gx >= clipR) break;
+            if (gx + XVFONT_W <= x) continue;
+            FbGlyphClipX(gx + 1, y + 1, sh, (unsigned char)s[i], x, clipR);
+            FbGlyphClipX(gx, y, col, (unsigned char)s[i], x, clipR);
+        }
+    }
+}
+
+/* ms -> "m:ss" / "mm:ss"; returns length written */
+static int NpFmtTime(char* out, DWORD ms) {
+    int secs = (int)(ms / 1000), mm = secs / 60, ss = secs % 60, p = 0;
+    if (mm > 99) { mm = 99; ss = 59; }
+    if (mm >= 10) out[p++] = (char)('0' + mm / 10);
+    out[p++] = (char)('0' + mm % 10);
+    out[p++] = ':';
+    out[p++] = (char)('0' + ss / 10);
+    out[p++] = (char)('0' + ss % 10);
+    out[p] = 0;
+    return p;
+}
+
+/* the rich Now Playing layout: plasma + header, album art on the left, scrolling
+   title/artist/album on the right, and an elapsed/duration progress strip. */
+static void ComposeNowPlaying(int t) {
+    uint16_t acc = XvCli_Rgb565(s_acc.r, s_acc.g, s_acc.b);
+    uint16_t txt = XvCli_Rgb565(s_text.r, s_text.g, s_text.b);
+    uint16_t dim = XvCli_Rgb565(s_dim.r, s_dim.g, s_dim.b);
+    int hdr, artD, ax, ay, cx, cw, ty, lineH, barY, barW;
+
+    RenderPlasma(t);
+    hdr = (s_rh >= 90) ? 17 : 13;
+    DarkenBand(0, 0, s_rw, hdr, 96);
+    FbRect(0, hdr, s_rw, 2, acc);
+    FbText(4, (s_rh >= 90) ? 1 : 0, 1, acc, 1, "Now Playing");
+
+    if (!s_npLive) {
+        FbText(4, hdr + 8, 1, txt, 1, "(stopped)");
+        return;
+    }
+
+    ay = hdr + 4;
+    ax = 4;
+    artD = (s_npArtDim > 0) ? s_npArtDim : NpArtDim();
+
+    if (s_npArtDim > 0) {                         /* album art + thin accent frame */
+        DarkenBand(ax - 1, ay - 1, artD + 2, artD + 2, 40);
+        FbBlitImg(ax, ay, s_npArt, artD, artD);
+        FbRect(ax - 1, ay - 1, artD + 2, 1, acc);
+        FbRect(ax - 1, ay + artD, artD + 2, 1, acc);
+        FbRect(ax - 1, ay - 1, 1, artD + 2, acc);
+        FbRect(ax + artD, ay - 1, 1, artD + 2, acc);
+    }
+    else {                                      /* no art: a plain framed box */
+        DarkenBand(ax, ay, artD, artD, 120);
+        FbRect(ax, ay, artD, 1, dim);
+        FbRect(ax, ay + artD - 1, artD, 1, dim);
+        FbRect(ax, ay, 1, artD, dim);
+        FbRect(ax + artD - 1, ay, 1, artD, dim);
+    }
+
+    cx = ax + artD + 6;
+    cw = s_rw - cx - 4;
+    lineH = XVFONT_H + 1;
+    ty = ay + 2;
+    if (cw > XVFONT_W) {
+        DarkenBand(cx - 2, ty - 1, cw + 3, lineH - 2, 150);
+        FbTextMarquee(cx, ty, acc, s_npTitleStr, cw, t);
+        ty += lineH;
+        if (s_npMeta.artist[0]) {
+            DarkenBand(cx - 2, ty - 1, cw + 3, lineH - 2, 165);
+            FbTextMarquee(cx, ty, txt, s_npMeta.artist, cw, t);
+            ty += lineH;
+        }
+        if (s_npMeta.album[0] && ty + lineH < ay + artD) {
+            DarkenBand(cx - 2, ty - 1, cw + 3, lineH - 2, 180);
+            FbTextMarquee(cx, ty, dim, s_npMeta.album, cw, t);
+        }
+    }
+
+    /* progress strip: time labels then the bar, full width across the bottom */
+    barW = s_rw - 8;
+    barY = s_rh - 7;
+    {
+        char el[8], du[8];
+        int dl;
+        NpFmtTime(el, s_npElapsed);
+        FbText(4, barY - 13, 1, txt, 1, el);
+        if (s_npDuration > 0) {
+            dl = NpFmtTime(du, s_npDuration);
+            FbText(s_rw - 4 - dl * XVFONT_W, barY - 13, 1, dim, 1, du);
+        }
+    }
+    {
+        unsigned long done = s_npElapsed, total = s_npDuration;
+        int fw = 0;
+        while (total > 0x7FFFFUL) { total >>= 4; done >>= 4; }
+        if (total > 0) {
+            fw = (int)((unsigned long)barW * done / total);
+            if (fw < 0) fw = 0; if (fw > barW) fw = barW;
+        }
+        FbRect(4, barY, barW, 4, dim);
+        if (total > 0) FbRect(4, barY, fw, 4, acc);
+    }
+}
+
+/* pick the rich Now Playing layout for that page, the generic layout otherwise */
+static void ComposePage(int pageId, int t) {
+    if (pageId == LCD_PAGE_NOWPLAYING) ComposeNowPlaying(t);
+    else                               ComposeFrame(t);
 }
 
 /* animated brand splash: plasma behind a glowing DarkDash / Darkone83 */
@@ -755,7 +980,7 @@ static int RunPages(void) {
             }
             else if (dimmed) {                     /* wake: fresh frame, then fade in */
                 BuildContent(order[cur]);
-                ComposeFrame(t);
+                ComposePage(order[cur], t);
                 XvCli_BlitScaled(0, 0, s_rw, s_rh, s_scale, s_fb);
                 XvCli_Present();
                 XvBrightFade(0, full);
@@ -790,7 +1015,7 @@ static int RunPages(void) {
         else if (now - lastBuild >= 1000) {
             BuildContent(order[cur]); lastBuild = now;
         }
-        ComposeFrame(t);
+        ComposePage(order[cur], t);
         rc = XvCli_BlitScaled(0, 0, s_rw, s_rh, s_scale, s_fb);
         XvCli_Present();
         if (rc != 0) {
@@ -1009,6 +1234,7 @@ static DWORD WINAPI XvProc(LPVOID arg) {
         }
 
         /* connected -- bring the panel up */
+        XvCli_SceneShow(0xFFFF);          /* clean slate: stop any scene left from a prior run */
         XvCli_Ping();
         XvCli_SetPanel(s_cfg.panel);                        /* apply saved preset  */
         InterlockedExchange(&s_panelDirty, 0);
@@ -1035,10 +1261,12 @@ static DWORD WINAPI XvProc(LPVOID arg) {
         InterlockedExchange(&s_ready, 0);
 
         if (Stopping()) {                               /* real shutdown / hand-off */
-            if (InterlockedCompareExchange(&s_npMode, 0, 0))
-                DrawNowPlayingFrame(s_npTitle, s_npXbe);  /* freeze art, no clear */
-            else
+            if (InterlockedCompareExchange(&s_npMode, 0, 0)) {
+                DrawNowPlayingFrame(s_npTitle, s_npXbe);   /* frozen Now Playing frame */
+            }
+            else {
                 DrawOutro();
+            }
             XvXbox_Shutdown();
             break;
         }

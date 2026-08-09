@@ -560,6 +560,143 @@ void XvCli_FreeMesh(int id)
     send_cmd(buf, 8 + 2);
 }
 
+/* ----------------------------- v2 theme + live overlay ------------------- */
+
+/* Set the generator (plasma) color ramp from 2..16 RGB565 stops; the device
+   interpolates them across its 256-entry LUT. 0 = ok, -1 = bad count/null. */
+int XvCli_SetGenPalette(const uint16_t* stops, int n)
+{
+    unsigned char buf[8 + 2 + XV_GEN_PALETTE_MAX_STOPS * 2];
+    int payload, i;
+    if (!stops || n < 2 || n > XV_GEN_PALETTE_MAX_STOPS) return -1;
+    payload = 2 + n * 2;
+    put_header(buf, XV_OP_SET_GEN_PALETTE, (unsigned int)payload, s_seq++);
+    buf[8] = (unsigned char)n;          /* stop_count */
+    buf[9] = 0;                         /* _pad       */
+    for (i = 0; i < n; i++) wr16(buf + 10 + i * 2, stops[i]);
+    return send_cmd(buf, 8 + payload);
+}
+
+/* Overwrite a scene-text slot (a NODE_TEXT node references it by id). Length is
+   explicit -- RXDK has no CRT str* -- and the device clamps to its slot max. */
+int XvCli_SceneText(int slot, const char* text, int n)
+{
+    unsigned char buf[8 + 2 + 32];
+    int payload, i;
+    if (!text || slot < 0 || slot > 255) return -1;
+    if (n < 0) n = 0;
+    if (n > 32) n = 32;                 /* bound the wire buffer; device clamps further */
+    payload = 2 + n;
+    put_header(buf, XV_OP_SCENE_TEXT, (unsigned int)payload, s_seq++);
+    buf[8] = (unsigned char)slot;       /* slot  */
+    buf[9] = (unsigned char)n;          /* count */
+    for (i = 0; i < n; i++) buf[10 + i] = (unsigned char)text[i];
+    return send_cmd(buf, 8 + payload);
+}
+
+/* ----------------------------- v2 scene machinery ------------------------ */
+
+/* Define (or replace) a scene: header + node_count * xv_node_t, streamed.
+   flags bit0 marks it as the host-gone fallback. Device buffers <= 2048 B. */
+int XvCli_SceneDefine(int sceneId, const XvNode* nodes, int n, int flags)
+{
+    unsigned char buf[8 + 2048];
+    int payload, i, off;
+    if (n < 0 || (n > 0 && !nodes)) return -1;
+    payload = 6 + n * 16;
+    if (payload > 2048) return -1;          /* device BUF_MAX */
+    put_header(buf, XV_OP_SCENE_DEFINE, (unsigned int)payload, s_seq++);
+    wr16(buf + 8, (unsigned)sceneId);
+    wr16(buf + 10, (unsigned)n);
+    buf[12] = (unsigned char)flags;
+    buf[13] = 0;
+    off = 14;
+    for (i = 0; i < n; i++) {
+        wr16(buf + off + 0, (unsigned)nodes[i].id);
+        buf[off + 2] = (unsigned char)nodes[i].type;
+        buf[off + 3] = (unsigned char)nodes[i].layer;
+        wr16(buf + off + 4, (unsigned)(nodes[i].x & 0xFFFF));
+        wr16(buf + off + 6, (unsigned)(nodes[i].y & 0xFFFF));
+        wr16(buf + off + 8, (unsigned)nodes[i].a);
+        wr16(buf + off + 10, (unsigned)nodes[i].b);
+        wr16(buf + off + 12, (unsigned)nodes[i].c);
+        wr16(buf + off + 14, (unsigned)nodes[i].d);
+        off += 16;
+    }
+    return send_cmd_chunked(buf, 8 + payload);
+}
+
+int XvCli_SceneShow(int sceneId)
+{
+    unsigned char buf[8 + 2];
+    put_header(buf, XV_OP_SCENE_SHOW, 2, s_seq++);
+    wr16(buf + 8, (unsigned)sceneId);
+    return send_cmd(buf, 8 + 2);
+}
+
+/* sceneId < 0 => free all (0xFFFF). */
+int XvCli_SceneFree(int sceneId)
+{
+    unsigned char buf[8 + 2];
+    unsigned id = (sceneId < 0) ? 0xFFFFu : (unsigned)sceneId;
+    put_header(buf, XV_OP_SCENE_FREE, 2, s_seq++);
+    wr16(buf + 8, id);
+    return send_cmd(buf, 8 + 2);
+}
+
+/* kind = XV_DEFAULT_BOOT / XV_DEFAULT_IDLE; sceneId < 0 clears (0xFFFF).
+   Flash-persists the id, so the host-gone fallback survives within a session. */
+int XvCli_SetDefaultScene(int kind, int sceneId)
+{
+    unsigned char buf[8 + 4];
+    unsigned id = (sceneId < 0) ? 0xFFFFu : (unsigned)sceneId;
+    put_header(buf, XV_OP_SET_DEFAULT, 4, s_seq++);
+    buf[8] = (unsigned char)kind;
+    buf[9] = 0;
+    wr16(buf + 10, id);
+    return send_cmd(buf, 8 + 4);
+}
+
+/* ----------------------------- v2 asset cache --------------------------- */
+
+/* Upload an RGB565 bitmap as a RAM asset (referenced by NODE_ASSET / sprites).
+   Streams like a blit. payload = 10-byte asset header + w*h*2; must fit u16. */
+int XvCli_DefineAsset(int id, int w, int h, const uint16_t* px)
+{
+    unsigned char hdr[8 + 10];
+    int pxbytes, sent, fails = 0;
+    const unsigned char* pb = (const unsigned char*)px;
+    if (!px || w <= 0 || h <= 0) return -1;
+    pxbytes = w * h * 2;
+    if (10 + pxbytes > 65535) return -1;            /* u16 length ceiling */
+    put_header(hdr, XV_OP_ASSET_DEFINE, (unsigned int)(10 + pxbytes), s_seq++);
+    wr16(hdr + 8, (unsigned)id);
+    wr16(hdr + 10, (unsigned)w);
+    wr16(hdr + 12, (unsigned)h);
+    hdr[14] = XV_ASSET_BITMAP;
+    hdr[15] = XV_TARGET_RAM;
+    hdr[16] = XV_FMT_RGB565;
+    hdr[17] = 0;
+    if (XvXbox_SendBulk(hdr, 18) != 18) fails++;
+    sent = 0;
+    while (sent < pxbytes) {
+        int c = pxbytes - sent; if (c > XV_BLIT_CHUNK) c = XV_BLIT_CHUNK;
+        if (XvXbox_SendBulk(pb + sent, c) != c) fails++;
+        sent += c;
+    }
+    return fails ? -1 : 0;
+}
+
+/* id < 0 => free all (0xFFFF). */
+int XvCli_FreeAsset(int id)
+{
+    unsigned char buf[8 + 2];
+    unsigned aid = (id < 0) ? 0xFFFFu : (unsigned)id;
+    put_header(buf, XV_OP_ASSET_FREE, 2, s_seq++);
+    wr16(buf + 8, aid);
+    return send_cmd(buf, 8 + 2);
+}
+
 /* ----------------------------- fixed-point 16.16 trig + matrices --------- */
 /* quarter-wave sine table, 0..256 maps to 0..90deg, value in 16.16 */
 static const int32_t s_sinq[257] = {

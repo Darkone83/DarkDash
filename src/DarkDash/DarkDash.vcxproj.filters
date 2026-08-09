@@ -237,6 +237,9 @@
     <ClCompile Include="dd_xview.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="dd_id3.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Text Include="Media\Copy Assets Here.txt">
@@ -473,6 +476,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="dd_xv_font.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_id3.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

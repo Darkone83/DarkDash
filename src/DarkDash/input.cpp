@@ -233,10 +233,32 @@ void PumpInput()
 // -----------------------------------------------------------------------------
 // GetButtons – returns synthesized unified mask from the active port
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// nav_port - resolves which port drives the dashboard, with Port 1 priority.
+//
+// Physical Port 1 (index 0) is exclusive: when a controller is present there,
+// it is the ONLY port that navigates the dash -- input from ports 2-4 is gated
+// out. When Port 1 is empty, the first connected controller among ports 2-4
+// (lowest index) drives the dash instead. Recomputed on every read, so hot-
+// plugging a pad into Port 1 immediately reclaims exclusive control.
+//
+// This governs the default navigation reads only (GetButtons / GetSticks /
+// GetRawSticks / GetTriggers). The explicit per-port and active-port APIs
+// (GetButtonsForPort, GetSticksForPort, Get/Set/StepActivePort) are unaffected.
+// -----------------------------------------------------------------------------
+static int nav_port()
+{
+    if (g_padHandles[0]) return 0;              // Port 1 present -> exclusive
+    for (int i = 1; i < MAX_PORTS; ++i)         // else first connected of 2-4
+        if (g_padHandles[i]) return i;
+    return -1;                                  // nothing connected
+}
+
 WORD GetButtons()
 {
-    if (g_activePort < 0 || !g_padHandles[g_activePort]) return 0;
-    return g_padButtons[g_activePort];
+    int p = nav_port();
+    if (p < 0) return 0;
+    return g_padButtons[p];
 }
 
 WORD GetButtonsForPort(int port)
@@ -268,7 +290,7 @@ static void get_sticks_for_port_internal(int port, int& lx, int& ly, int& rx, in
 
 void GetSticks(int& lx, int& ly, int& rx, int& ry)
 {
-    get_sticks_for_port_internal(g_activePort, lx, ly, rx, ry);
+    get_sticks_for_port_internal(nav_port(), lx, ly, rx, ry);
 }
 
 void GetSticksForPort(int port, int& lx, int& ly, int& rx, int& ry)
@@ -282,10 +304,11 @@ void GetSticksForPort(int port, int& lx, int& ly, int& rx, int& ry)
 // -----------------------------------------------------------------------------
 void GetRawSticks(int& lx, int& ly, int& rx, int& ry)
 {
+    int p = nav_port();
     lx = ly = rx = ry = 0;
-    if (g_activePort < 0 || !g_padHandles[g_activePort]) return;
+    if (p < 0 || !g_padHandles[p]) return;
 
-    const XINPUT_GAMEPAD& gp = g_padStates[g_activePort].Gamepad;
+    const XINPUT_GAMEPAD& gp = g_padStates[p].Gamepad;
     lx = gp.sThumbLX;
     ly = gp.sThumbLY;
     rx = gp.sThumbRX;
@@ -298,10 +321,11 @@ void GetRawSticks(int& lx, int& ly, int& rx, int& ry)
 void GetTriggers(int& lt, int& rt, int& black, int& white,
     int& btnA, int& btnB, int& btnX, int& btnY)
 {
+    int p = nav_port();
     lt = rt = black = white = btnA = btnB = btnX = btnY = 0;
-    if (g_activePort < 0 || !g_padHandles[g_activePort]) return;
+    if (p < 0 || !g_padHandles[p]) return;
 
-    const BYTE* a = g_padStates[g_activePort].Gamepad.bAnalogButtons;
+    const BYTE* a = g_padStates[p].Gamepad.bAnalogButtons;
     lt = a[XINPUT_GAMEPAD_LEFT_TRIGGER];
     rt = a[XINPUT_GAMEPAD_RIGHT_TRIGGER];
     black = a[XINPUT_GAMEPAD_BLACK];

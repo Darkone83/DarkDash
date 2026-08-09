@@ -303,6 +303,7 @@ static DWORD s_npStart = 0;        /* GetTickCount at toast start; 0 = inactive 
    playback stops or the mode leaves Shuffle. */
 static char  s_curTrack[64];
 static DWORD s_curTrackStart = 0;  /* GetTickCount when the track began; 0 = none */
+static char  s_curTrackPath[260];  /* full path of the current shuffle track (ID3/art) */
 
 static void NowPlayingSet(const char* file) {
     int i;
@@ -336,6 +337,7 @@ void Settings_StartMusic(int loop) {
         Audio_StopMusic();
         s_npStart = 0;
         s_curTrackStart = 0;
+        s_curTrackPath[0] = 0;
         return;
     }
 
@@ -351,12 +353,14 @@ void Settings_StartMusic(int loop) {
                 Audio_SetMusicPath(full);
                 Audio_StartMusic(0);         /* NON-looping: the tick rolls the next track on end */
                 NowPlayingSet(s_mp3[idx]);   /* arm the under-pedestal toast */
+                strncpy(s_curTrackPath, full, 259); s_curTrackPath[259] = 0;
             }
             else {
                 Audio_SetMusicPath(0);       /* no real songs -> built-in, looped */
                 Audio_StartMusic(1);
                 s_npStart = 0;               /* nothing real to announce */
                 s_curTrackStart = 0;
+                s_curTrackPath[0] = 0;
             }
         }
         return;
@@ -368,6 +372,7 @@ void Settings_StartMusic(int loop) {
     Audio_StartMusic(loop);
     s_npStart = 0;
     s_curTrackStart = 0;
+    s_curTrackPath[0] = 0;
 }
 
 /* Per-frame music pump. Only Shuffle needs it: when the current (non-looping)
@@ -400,6 +405,15 @@ int Settings_ShuffleNowPlaying(const char** name, DWORD* elapsedMs) {
     if (s_curTrackStart == 0) return 0;
     if (name)      *name = s_curTrack;
     if (elapsedMs) *elapsedMs = GetTickCount() - s_curTrackStart;
+    return 1;
+}
+
+/* Full path of the current shuffle track, for ID3 tags + cover art. Returns 1
+   and sets *path while Shuffle is playing a real track; 0 otherwise. */
+int Settings_ShuffleNowPlayingPath(const char** path) {
+    if (Data_Get()->musicMode != DD_MUSIC_SHUFFLE) return 0;
+    if (s_curTrackStart == 0 || s_curTrackPath[0] == 0) return 0;
+    if (path) *path = s_curTrackPath;
     return 1;
 }
 

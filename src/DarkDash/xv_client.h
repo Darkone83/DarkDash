@@ -126,6 +126,23 @@ extern "C" {
     void XvCli_DrawMesh(int id, int flags);            /* flags bit0 = backface cull      */
     void XvCli_FreeMesh(int id);
 
+    /* v2 theme + live overlay (caps-gated: XV_CAP_GEN_PALETTE / generators) */
+    int  XvCli_SetGenPalette(const uint16_t* stops, int n);   /* 2..16 RGB565 stops -> LUT */
+    int  XvCli_SceneText(int slot, const char* text, int n); /* set a scene string slot   */
+
+    /* Scene node (host mirror of xv_node_t). a/b/c/d are type-specific:
+       GENERATOR: a=kind(0=plasma) b=w c=h d=phase; TEXT: a=slot b=fg c=bg;
+       FILL: a=w b=h c=color; MESH: a=mesh_id b=cull c=angle; ASSET/SPRITE: a=id. */
+    typedef struct { int id, type, layer, x, y, a, b, c, d; } XvNode;
+
+    int  XvCli_SceneDefine(int sceneId, const XvNode* nodes, int n, int flags);
+    int  XvCli_SceneShow(int sceneId);
+    int  XvCli_SceneFree(int sceneId);                  /* <0 = free all          */
+    int  XvCli_SetDefaultScene(int kind, int sceneId);   /* XV_DEFAULT_BOOT / IDLE  */
+
+    int  XvCli_DefineAsset(int id, int w, int h, const uint16_t* px); /* RGB565 -> RAM asset */
+    int  XvCli_FreeAsset(int id);                                    /* <0 = free all       */
+
     /* 16.16 fixed-point matrix helpers. Angles are 1/1024 of a turn (XV_FX_TURN).
        NB: meshes centered on the origin sit at tz~0 and get near-culled -- push +z
        with XvMat_Translate(m,0,0, 2*XV_FX_ONE .. 3*XV_FX_ONE). */

@@ -32,5 +32,6 @@ int Settings_NowPlaying(const char** name, float* alpha);
    track, filling *name and *elapsedMs (ms since the track began). 0 otherwise.
    name / elapsedMs may be NULL. */
 int Settings_ShuffleNowPlaying(const char** name, DWORD* elapsedMs);
+int Settings_ShuffleNowPlayingPath(const char** path);
 
 #endif /* SETTINGS_H */

@@ -34,6 +34,7 @@
     <ClCompile Include="dd_ftp.cpp" />
     <ClCompile Include="dd_gfx.cpp" />
     <ClCompile Include="dd_hidden.cpp" />
+    <ClCompile Include="dd_id3.cpp" />
     <ClCompile Include="dd_iso.cpp" />
     <ClCompile Include="dd_isoinstall.cpp" />
     <ClCompile Include="dd_isoui.cpp" />
@@ -112,6 +113,7 @@
     <ClInclude Include="dd_fx.h" />
     <ClInclude Include="dd_gfx.h" />
     <ClInclude Include="dd_hidden.h" />
+    <ClInclude Include="dd_id3.h" />
     <ClInclude Include="dd_iso.h" />
     <ClInclude Include="dd_isoinstall.h" />
     <ClInclude Include="dd_isoui.h" />

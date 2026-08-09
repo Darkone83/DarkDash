@@ -142,6 +142,7 @@ static void MenuRebuild(void) { s_mrowCount = BuildMenuRows(s_mrows); }
 static char  s_status[192] = "DARKDASH";
 static DWORD s_lastStatus = 0;
 static int   s_ntpDone = 0;    /* one-shot internet time sync at boot */
+static DWORD s_lastDiscPoll = 0; /* dedicated cadence for optical-disc detection */
 
 static void StrAppend(char* dst, int cap, const char* s) {
     strncat(dst, s, cap - (int)strlen(dst) - 1);
@@ -638,6 +639,20 @@ void __cdecl main(void) {
         PumpInput();
         btn = GetButtons();
 
+        /* optical-disc detection runs on EVERY screen, every ~500ms, decoupled
+           from the 1/sec header-status refresh below. A game disc inserted while
+           in any submenu (launcher, file manager, settings, save manager), while
+           an overlay is open, or mid-transition is picked up and mounted just the
+           same. dd_disc internally throttles the mount/probe, so this only costs
+           one cheap SMC tray read per tick. */
+        {
+            DWORD dpt = GetTickCount();
+            if (s_lastDiscPoll == 0 || dpt - s_lastDiscPoll >= 500) {
+                s_lastDiscPoll = dpt;
+                Disc_Poll();          /* mount/unmount a disc on tray change */
+            }
+        }
+
         Ftp_Tick();   /* service the FTP server every frame (single-threaded) */
         TypeD_Tick(); /* broadcast Type-D status (background, rate-limited)       */
         Udp_DiscoTick(); /* discover XBOX-RGB / OXFP for accessory menu gating    */
@@ -852,7 +867,6 @@ void __cdecl main(void) {
             s_lastStatus = t;
             Net_Poll();
             BuildStatus();
-            Disc_Poll();          /* mount/unmount a disc on tray change */
 
             /* one-shot internet time sync: fire once DHCP has resolved an
                address, if the user enabled it. Give up after a grace window so
