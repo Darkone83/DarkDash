@@ -85,7 +85,8 @@ footprint, leaving plenty of headroom on a stock console.
   **Settings → Accessories**: a front-panel LCD (which can show the current
   track while Shuffle is playing), the Type-D info module, and the
   XBOX-RGB and OXFP lighting controllers. Connected devices are selectable; the
-  rest stay greyed out until they're found.
+  rest stay greyed out until they're found. **NEW** Added support for the X-View
+  USB display.
 - **Fan control** — let the console manage the fan automatically, or set a
   manual fan speed, in **Settings → Fan**.
 - **Self-updating** — check for and install updates right from the Settings
