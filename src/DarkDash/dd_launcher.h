@@ -21,7 +21,7 @@ typedef struct {
     const char* cacheId;    /* cache filename stem in D:\data\, e.g. "apps" */
 } LauncherConfig;
 
-void Launcher_Enter(const LauncherConfig* cfg);   /* scan + reset cursor  */
+void Launcher_Enter(const LauncherConfig* cfg);   /* scan + restore session selection */
 int  Launcher_Update(WORD pressed, WORD held);     /* nav; returns 1 on B  */
 void Launcher_Render(void);                        /* draw the screen      */
 

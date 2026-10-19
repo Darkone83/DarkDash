@@ -4,12 +4,12 @@
     dd_audio -- DirectSound SFX + music for DarkDash, decoded with minimp3.
 
     Layout (runtime, 'D:' = launched XBE home):
-        D:\Media\audio\snd\*.mp3      one-shot SFX
-        D:\Media\audio\music\bg.mp3   looping background music
+        D:\audio\snd\*.mp3        one-shot SFX
+        D:\audio\music\bg.mp3     default background music
 
-    SFX and music are decoded fully to PCM at init and held in DS buffers.
-    (bg.mp3 is decoded fully too; if it ever becomes a long track, switch it
-    to a DirectSoundStream -- the header supports DirectSoundCreateStream.)
+    SFX are decoded fully into small DirectSound buffers. Music is decoded on
+    demand into a 256 KB ring buffer; the compressed MP3 remains in RAM while
+    it plays. The same stream is reused by background music and Jukebox tracks.
 ---------------------------------------------------------------------------*/
 #include <xtl.h>
 
@@ -27,7 +27,7 @@ extern "C" {
         SFX_COUNT
     };
 
-    int  Audio_Init(void);            /* DirectSound + decode SFX bank + bg music */
+    int  Audio_Init(void);            /* DirectSound + decode the small SFX bank */
     void Audio_Shutdown(void);
 
     /* Service the Xbox DirectSound mixer. MUST be called once per frame, or the
@@ -37,6 +37,12 @@ extern "C" {
     void Audio_PlaySfx(int id);       /* one-shot, restarts from the beginning */
     void Audio_StartMusic(int loop);  /* play bg.mp3 (loop!=0 to loop) */
     void Audio_StopMusic(void);
+
+    /* Pause/resume the live music stream without discarding decoder/buffer
+       state. Used by the Jukebox transport controls. */
+    void Audio_SetMusicPaused(int paused);
+    int  Audio_MusicPaused(void);
+    int  Audio_MusicPlaying(void);
 
     /* 1 when a non-looping track has reached its natural end (and its buffered
        tail has drained). 0 while looping or stopped. Drives Shuffle advancing. */

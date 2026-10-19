@@ -31,6 +31,10 @@ extern "C" {
        Wired and callable; format/usage decisions come later. */
     int  Texture_LoadJPEG(const char* path, Texture* out);
 
+    /* Upload a caller-owned tightly packed RGBA8 image. Used by ID3 embedded
+       cover art so the Jukebox can reuse the normal swizzled texture path. */
+    int  Texture_LoadRGBA(const unsigned char* rgba, int w, int h, Texture* out);
+
     /* Load an XPR0 (.xbx) texture (TitleImage.xbx / SaveImage.xbx). Handles DXT1
        and 32-bit A8R8G8B8 / X8R8G8B8 (swizzled or linear). 1 on success. */
     int  Texture_LoadXPR(const char* path, Texture* out);

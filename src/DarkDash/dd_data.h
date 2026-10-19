@@ -71,6 +71,11 @@ extern "C" {
         int  screensaverMin;                 /* idle screensaver: 0 = off, else minutes      */
 
         int  musicMode;                      /* DD_MUSIC_* (was reserved[0]; 0 = NORMAL)     */
+        int  lightingPct;                   /* global UI lighting 0..200, default 100 */
+        int  shadowPct;                     /* alpha-masked panel shadows 0..200 */
+        int  reflectionPct;                 /* material reflections 0..200 */
+        int  atmospherePct;                 /* environmental lighting 0..200 */
+        int  parallaxPct;                   /* background movement 0..200 */
     } DD_Settings;
 
     /* Load settings.dat into memory (defaults if missing/old/corrupt). Safe to
@@ -86,6 +91,16 @@ extern "C" {
 
     /* convenience: 1 if the given DD_FX_* effect bit is enabled */
     int Data_FxOn(int bit);
+
+    /* Global user multipliers (0..200%, defaults 100%). Applied at the
+       shared render layer so theme-authored palettes/materials are retained. */
+#define DD_EFFECT_LIGHTING    0
+#define DD_EFFECT_SHADOW      1
+#define DD_EFFECT_REFLECTION  2
+#define DD_EFFECT_ATMOSPHERE  3
+#define DD_EFFECT_PARALLAX    4
+    int Data_EffectPercent(int effect);
+    int Data_EffectScale(int effect, int alpha);
 
 #ifdef __cplusplus
 }

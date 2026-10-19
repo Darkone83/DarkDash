@@ -9,16 +9,20 @@
 ---------------------------------------------------------------------------*/
 #include <xtl.h>
 #include "dd_browse.h"
+#include "dd_storage.h"
 #include "dd_ui.h"
+#include "dd_select.h"
 #include "dd_theme.h"
 #include "dd_texture.h"
 #include "font.h"
+#include "dd_hints.h"
 #include "input.h"
 #include "dd_audio.h"
 #include "dd_fileops.h"   /* Mu_Present / Mu_Letter */
 #include "dd_disc.h"      /* Disc_Get               */
+#include "dd_path.h"
 
-#define BR_PATH_MAX     256
+#define BR_PATH_MAX     DD_PATH_MAX
 #define BR_MAX_ENTRIES  512
 #define BR_NAME_MAX     80
 
@@ -93,19 +97,16 @@ static void SortEnts(void) {
 }
 
 static void LoadDrives(void) {
-    static const char* const k_hdd[] = { "C", "E", "F", "G", "X", "Y", "Z", 0 };
     int di, mu;
     s_count = 0; s_cursor = 0; s_scroll = 0; s_path[0] = 0;
 
-    for (di = 0; k_hdd[di]; di++) {
-        char root[8], label[8];
-        DWORD attr;
-        root[0] = k_hdd[di][0]; root[1] = ':'; root[2] = '\\'; root[3] = 0;
-        attr = GetFileAttributesA(root);
-        if (attr != 0xFFFFFFFF && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
-            label[0] = k_hdd[di][0]; label[1] = ':'; label[2] = 0;
-            AddEnt(label, 1, 1, root);
-        }
+    for (di = 0; di < DD_Storage_Count(); di++) {
+        const DD_StorageVolume* v = DD_Storage_At(di);
+        char root[4], label[32];
+        if (!DD_Storage_Ready(v)) continue;
+        root[0] = v->letter; root[1] = ':'; root[2] = '\\'; root[3] = 0;
+        DD_Storage_Label(v, label, sizeof(label));
+        AddEnt(label, 1, 1, root);
     }
     for (mu = 0; mu < 8; mu++) {
         int port = mu / 2, slot = mu % 2;
@@ -133,17 +134,13 @@ static void LoadDir(const char* path) {
     char pat[BR_PATH_MAX + 4];
     WIN32_FIND_DATA fd;
     HANDLE h;
-    int n;
 
     if (path[0] == 0) { LoadDrives(); return; }
 
-    BCopy(s_path, sizeof(s_path), path);
+    if (!DD_PathCopy(s_path, sizeof(s_path), path)) return;
     s_count = 0; s_cursor = 0; s_scroll = 0;
 
-    BCopy(pat, sizeof(pat), path);
-    n = BLen(pat);
-    if (n > 0 && pat[n - 1] != '\\' && n < (int)sizeof(pat) - 2) pat[n++] = '\\';
-    pat[n++] = '*'; pat[n] = 0;
+    if (!DD_PathJoin(pat, sizeof(pat), path, "*")) return;
 
     h = FindFirstFile(pat, &fd);
     if (h != INVALID_HANDLE_VALUE) {
@@ -160,20 +157,12 @@ static void LoadDir(const char* path) {
 }
 
 /* full path of the cursor entry into out */
-static void EntryPath(int idx, char* out, int cap) {
+static int EntryPath(int idx, char* out, int cap) {
     const BrEntry* e;
-    int n;
-    if (idx < 0 || idx >= s_count) { out[0] = 0; return; }
+    if (idx < 0 || idx >= s_count) { if (cap > 0) out[0] = 0; return 0; }
     e = &s_ent[idx];
-    if (e->isDrive) { BCopy(out, cap, e->devPath); return; }
-    BCopy(out, cap, s_path);
-    n = BLen(out);
-    if (n > 0 && out[n - 1] != '\\' && n < cap - 1) { out[n++] = '\\'; out[n] = 0; }
-    {
-        int i = 0;
-        while (e->name[i] && n < cap - 1) out[n++] = e->name[i++];
-        out[n] = 0;
-    }
+    if (e->isDrive) return DD_PathCopy(out, cap, e->devPath);
+    return DD_PathJoin(out, cap, s_path, e->name);
 }
 
 /* go up one level from s_path; back to drive list if at a drive root */
@@ -229,6 +218,7 @@ static int VisRows(void) {
 void Browse_Open(const char* title) {
     BCopy(s_title, sizeof(s_title), title ? title : "Select Folder");
     s_result[0] = 0;
+    DD_Storage_RefreshSecondary();         /* refresh selectable HDD1 roots */
     LoadDrives();
     s_open = 1;
 }
@@ -254,7 +244,7 @@ int Browse_Update(WORD pressed) {
     if (pressed & BTN_A) {
         if (s_count > 0 && s_ent[s_cursor].isDir) {
             char np[BR_PATH_MAX];
-            EntryPath(s_cursor, np, sizeof(np));
+            if (!EntryPath(s_cursor, np, sizeof(np))) return 0;
             Audio_PlaySfx(SFX_SELECT);
             LoadDir(np);
         }
@@ -271,7 +261,7 @@ int Browse_Update(WORD pressed) {
        once we're inside a drive (not at the bare drive list). */
     if ((pressed & BTN_Y) || (pressed & BTN_START)) {
         if (s_path[0] != 0) {
-            BCopy(s_result, sizeof(s_result), s_path);
+            if (!DD_PathCopy(s_result, sizeof(s_result), s_path)) return 0;
             Audio_PlaySfx(SFX_SELECT);
             s_open = 0;
             return 1;
@@ -300,7 +290,9 @@ void Browse_Draw(IDirect3DDevice8* d) {
 
     /* dim the screen behind, then the framed picker */
     UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(150, 0, 0, 0));
+    UI_DrawPanelDepthMasked(frame, BR_FX, BR_FY, BR_FW, BR_FH, 255, 0.0f, 0.0f, 0.0f, 0.0f);
     if (frame) UI_DrawSprite(frame, BR_FX, BR_FY, BR_FW, BR_FH, 0xFFFFFFFF, 0);
+    UI_DrawPanelLightingMasked(frame, BR_FX, BR_FY, BR_FW, BR_FH, 255, 0.0f, 0.0f, 0.0f, 0.0f);
 
     /* title + current path header -- inset below the frame's top chrome */
     Font_DrawText(d, BR_FX + 22.0f, BR_FY + 34.0f, s_title, FONT_SIZE_MEDIUM, accent, 0);
@@ -325,10 +317,14 @@ void Browse_Draw(IDirect3DDevice8* d) {
             float ry = rowY0 + rowDY * (float)i;
             DWORD c;
             if (idx == s_cursor) {
+                Select_BeginModal(0x6103, s_cursor);
                 float gh = (float)Font_GlyphHeight(FONT_SIZE_SMALL) + 4.0f;
                 if (gh > rowDY) gh = rowDY;
-                UI_FillRect(BR_FX + 14.0f, ry + (rowDY - gh) * 0.5f - 1.0f,
-                    BR_FW - 28.0f, gh, UI_ARGB(60, 174, 255, 60));
+                Select_DrawModalBoxFlat(BR_FX + 14.0f, ry + (rowDY - gh) * 0.5f - 1.0f,
+                    BR_FW - 28.0f, gh, UI_ARGB(100,
+                        (int)((accent >> 16) & 255),
+                        (int)((accent >> 8) & 255),
+                        (int)(accent & 255)));
             }
             /* folders/drives in normal text, files dimmed (not selectable) */
             c = e->isDir ? ((idx == s_cursor) ? glow : text)
@@ -339,6 +335,6 @@ void Browse_Draw(IDirect3DDevice8* d) {
     }
 
     /* footer hint (sits in the reserved BR_FOOTER_H band, clear of bottom chrome) */
-    Font_DrawText(d, BR_FX + 22.0f, BR_FY + BR_FH - 26.0f,
-        "A OPEN  Y SELECT  B UP", FONT_SIZE_SMALL, dim, 0);
+    DD_Hints_Draw(d, BR_FX + 22.0f, BR_FY + BR_FH - 30.0f,
+        BR_FW - 44.0f, 24.0f, "A OPEN  Y SELECT  B UP", dim);
 }

@@ -48,20 +48,14 @@ static int          s_filesSeen = 0;
 
 /* ---- string helpers ---------------------------------------------------- */
 
-static int CjLen(const char* s) { int n = 0; while (s && s[n]) n++; return n; }
-
 static void CjCopy(char* dst, int cap, const char* src) {
     int i = 0; if (cap <= 0) return;
     while (src && src[i] && i < cap - 1) { dst[i] = src[i]; i++; }
     dst[i] = 0;
 }
 
-static void CjJoin(char* out, int cap, const char* base, const char* leaf) {
-    int n;
-    CjCopy(out, cap, base);
-    n = CjLen(out);
-    if (n > 0 && out[n - 1] != '\\' && n < cap - 1) { out[n++] = '\\'; out[n] = 0; }
-    { int i = 0; while (leaf && leaf[i] && n < cap - 1) out[n++] = leaf[i++]; out[n] = 0; }
+static int CjJoin(char* out, int cap, const char* base, const char* leaf) {
+    return DD_PathJoin(out, cap, base, leaf);
 }
 
 static int CjIsDotDir(const char* n) {
@@ -70,24 +64,20 @@ static int CjIsDotDir(const char* n) {
 
 /* ---- walk-stack ops ---------------------------------------------------- */
 
-static void CjPushDir(const char* src, const char* dst) {
+static int CjPushDir(const char* src, const char* dst) {
     CjFrame* f;
     char pat[COPYJOB_PATH_MAX + 4];
-    int n;
-    if (s_depth >= CJ_MAX_DEPTH) return;     /* refuse deeper -> tree truncated */
-    CreateDirectoryA(dst, NULL);             /* ensure target dir exists */
+    if (s_depth >= CJ_MAX_DEPTH) return 0;
+    if (!DD_PathCopy(s_stk[s_depth].src, sizeof(s_stk[s_depth].src), src)) return 0;
+    if (!DD_PathCopy(s_stk[s_depth].dst, sizeof(s_stk[s_depth].dst), dst)) return 0;
+    if (!DD_PathJoin(pat, sizeof(pat), src, "*")) return 0;
 
+    CreateDirectoryA(dst, NULL);
     f = &s_stk[s_depth];
-    CjCopy(f->src, sizeof(f->src), src);
-    CjCopy(f->dst, sizeof(f->dst), dst);
-    CjCopy(pat, sizeof(pat), src);
-    n = CjLen(pat);
-    if (n > 0 && pat[n - 1] != '\\' && n < (int)sizeof(pat) - 2) pat[n++] = '\\';
-    pat[n++] = '*'; pat[n] = 0;
-
     f->h = FindFirstFileA(pat, &f->fd);
     f->first = 1;
     s_depth++;
+    return 1;
 }
 
 static void CjPopDir(void) {
@@ -112,7 +102,7 @@ int CopyJob_Begin(const CopyJobItem* items, int nItems,
 
     for (i = 0; i < nItems; i++) s_items[i] = items[i];
     s_nItems = nItems;
-    CjCopy(s_destDir, sizeof(s_destDir), destDir);
+    if (!DD_PathCopy(s_destDir, sizeof(s_destDir), destDir)) return 0;
 
     s_isMove = isMove ? 1 : 0;
     s_cancel = 0;
@@ -131,7 +121,10 @@ int CopyJob_Begin(const CopyJobItem* items, int nItems,
 /* start copying one file; returns 1 if a copy began */
 static int CjBeginFile(const char* src, const char* dst, const char* name) {
     if (!FileopsCopy_Begin(&s_copy, src, dst)) return 0;
-    CjCopy(s_curSrc, sizeof(s_curSrc), src);
+    if (!DD_PathCopy(s_curSrc, sizeof(s_curSrc), src)) {
+        FileopsCopy_Abort(&s_copy);
+        return 0;
+    }
     CjCopy(s_curName, sizeof(s_curName), name);
     s_copying = 1;
     s_filesSeen++;
@@ -156,9 +149,12 @@ static int CjStepWalk(void) {
         const CopyJobItem* it;
         if (s_itemIdx >= s_nItems) return 0;     /* nothing left */
         it = &s_items[s_itemIdx++];
-        CjJoin(dst, sizeof(dst), s_destDir, it->name);
+        if (!CjJoin(dst, sizeof(dst), s_destDir, it->name)) {
+            s_state = CJ_FAILED;
+            return 1;
+        }
         if (Fileops_IsDir(it->src)) {
-            CjPushDir(it->src, dst);
+            if (!CjPushDir(it->src, dst)) s_state = CJ_FAILED;
         }
         else {
             if (CjBeginFile(it->src, dst, it->name)) return 1;
@@ -179,10 +175,13 @@ static int CjStepWalk(void) {
 
         {
             char cs[COPYJOB_PATH_MAX], cd[COPYJOB_PATH_MAX];
-            CjJoin(cs, sizeof(cs), f->src, f->fd.cFileName);
-            CjJoin(cd, sizeof(cd), f->dst, f->fd.cFileName);
+            if (!CjJoin(cs, sizeof(cs), f->src, f->fd.cFileName) ||
+                !CjJoin(cd, sizeof(cd), f->dst, f->fd.cFileName)) {
+                s_state = CJ_FAILED;
+                return 1;
+            }
             if (f->fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                CjPushDir(cs, cd);
+                if (!CjPushDir(cs, cd)) s_state = CJ_FAILED;
             }
             else {
                 if (!CjBeginFile(cs, cd, f->fd.cFileName)) s_state = CJ_FAILED;

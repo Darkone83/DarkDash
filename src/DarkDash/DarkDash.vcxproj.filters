@@ -240,6 +240,15 @@
     <ClCompile Include="dd_id3.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="dd_jukebox.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_hints.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dd_storage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Text Include="Media\Copy Assets Here.txt">
@@ -479,6 +488,18 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="dd_id3.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_path.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_jukebox.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_hints.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dd_storage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

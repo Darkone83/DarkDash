@@ -22,6 +22,7 @@ extern "C" {
     int  Gfx_Width(void);    /* backbuffer width  in pixels */
     int  Gfx_Height(void);   /* backbuffer height in pixels */
     const char* Gfx_VideoModeStr(void);   /* "480i"/"480p"/"576i"/"720p" */
+    int  Gfx_MsaaSamples(void);  /* actual backbuffer samples: 0 or 2 */
 
     /* Clear to 'clearColour' (ARGB) and open the scene. */
     void Gfx_BeginFrame(DWORD clearColour);

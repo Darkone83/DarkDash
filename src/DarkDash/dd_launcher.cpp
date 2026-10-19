@@ -16,12 +16,14 @@
 #include "dd_theme.h"
 #include "dd_texture.h"
 #include "font.h"
+#include "dd_hints.h"
 #include "input.h"
 #include "dd_watchdog.h"
 #include "dd_audio.h"
 #include "dd_xbe.h"
 #include "dd_stbi.h"
 #include "dd_mount.h"
+#include "dd_storage.h"
 #include "dd_smbsvc.h"
 #include "dd_xview.h"
 #include "dd_lcd.h"
@@ -32,6 +34,7 @@
 #include "dd_isoui.h"
 #include "dd_backdrop.h"
 #include "dd_pedestal.h"
+#include "dd_select.h"
 #include "dd_dc.h"
 #include "dd_typedart.h"
 #include "dd_hidden.h"
@@ -44,6 +47,7 @@
 #define LAUNCH_NAME_MAX     64
 #define LAUNCH_PATH_MAX     256
 #define LAUNCH_ROWS_VISIBLE 9
+#define LAUNCH_STATE_MAX    24
 
 typedef struct {
     char     label[LAUNCH_NAME_MAX];   /* display text (cert title, A2)      */
@@ -86,7 +90,85 @@ static Texture s_ped = { 0, 0, 0, 0, 0 };
 static int     s_pedIdx = -1;
 static int     s_pedFlat = 0;   /* 1 = art is _resources case art -> flat hologram */
 
+/* Game-specific background art uses the same resource-pack folder as cover
+   images. Only current and outgoing textures are retained during a fade. */
+#define LAUNCH_FANART_FADE_MS  320
+static Texture s_fanart = { 0, 0, 0, 0, 0 };
+static Texture s_fanartOld = { 0, 0, 0, 0, 0 };
+/* One warm texture for returning to a recently selected game. Ownership of
+   each texture is exclusive to current, outgoing, or cached. */
+static Texture s_fanartCached = { 0, 0, 0, 0, 0 };
+static int s_fanartOldIdx = -1;
+static int s_fanartCachedIdx = -1;
+static DWORD s_fanartFadeAt = 0;
+static int s_fanartCurrentIdx = -1;
+
+
+/* Session-only navigation memory. Key by cacheId (stable for built-in and
+   custom categories) so leaving a library and coming back lands on the same
+   title and roughly the same row on screen. Nothing is written to disk. */
+typedef struct {
+    char cacheId[32];
+    char xbePath[LAUNCH_PATH_MAX];
+    int  rowOffset;                  /* cursor - scroll, 0..visible-1 */
+    int  used;
+} LaunchState;
+
+static LaunchState s_state[LAUNCH_STATE_MAX];
+
 static void JoinPath(char* out, int cap, const char* a, const char* b);  /* fwd */
+
+static void QueuePedestalLoad(DWORD settleMs) {
+    s_pedPending = 1;
+    s_pedSettleAt = GetTickCount() + settleMs;
+}
+
+static LaunchState* FindState(const char* cacheId, int create) {
+    int i, freeIdx = -1;
+    if (!cacheId || !cacheId[0]) return NULL;
+    for (i = 0; i < LAUNCH_STATE_MAX; i++) {
+        if (s_state[i].used) {
+            if (lstrcmpiA(s_state[i].cacheId, cacheId) == 0) return &s_state[i];
+        }
+        else if (freeIdx < 0) freeIdx = i;
+    }
+    if (!create || freeIdx < 0) return NULL;
+    ZeroMemory(&s_state[freeIdx], sizeof(s_state[freeIdx]));
+    lstrcpynA(s_state[freeIdx].cacheId, cacheId, (int)sizeof(s_state[freeIdx].cacheId));
+    s_state[freeIdx].used = 1;
+    return &s_state[freeIdx];
+}
+
+static void SaveNavState(void) {
+    LaunchState* st;
+    int off;
+    if (!s_cfg || !s_cfg->cacheId || s_count <= 0 || s_cursor < 0 || s_cursor >= s_count) return;
+    st = FindState(s_cfg->cacheId, 1);
+    if (!st) return;
+    lstrcpynA(st->xbePath, s_items[s_cursor].xbePath, (int)sizeof(st->xbePath));
+    off = s_cursor - s_scroll;
+    if (off < 0) off = 0;
+    if (off >= LAUNCH_ROWS_VISIBLE) off = LAUNCH_ROWS_VISIBLE - 1;
+    st->rowOffset = off;
+}
+
+static void RestoreNavState(void) {
+    LaunchState* st;
+    int i;
+    if (!s_cfg || !s_cfg->cacheId || s_count <= 0) return;
+    st = FindState(s_cfg->cacheId, 0);
+    if (!st || !st->xbePath[0]) return;
+    for (i = 0; i < s_count; i++) {
+        if (lstrcmpiA(s_items[i].xbePath, st->xbePath) == 0) {
+            s_cursor = i;
+            s_scroll = s_cursor - st->rowOffset;
+            if (s_scroll < 0) s_scroll = 0;
+            if (s_scroll > s_count - LAUNCH_ROWS_VISIBLE && s_count > LAUNCH_ROWS_VISIBLE)
+                s_scroll = s_count - LAUNCH_ROWS_VISIBLE;
+            return;
+        }
+    }
+}
 
 /* ---- _resources support ------------------------------------------------
    A title folder may carry a "_resources" subfolder (the standard Xbox
@@ -271,6 +353,124 @@ const char* Launcher_CurrentXbePath(void) {
     return s_items[s_cursor].xbePath;
 }
 
+/* Free both fanart textures before leaving or rebuilding the launcher. */
+static void ReleaseFanart(void) {
+    if (s_fanart.tex) Texture_Release(&s_fanart);
+    if (s_fanartOld.tex) Texture_Release(&s_fanartOld);
+    if (s_fanartCached.tex) Texture_Release(&s_fanartCached);
+    s_fanart.tex = NULL;
+    s_fanartOld.tex = NULL;
+    s_fanartCached.tex = NULL;
+    s_fanartCurrentIdx = -1;
+    s_fanartOldIdx = -1;
+    s_fanartCachedIdx = -1;
+    s_fanartFadeAt = 0;
+}
+
+/* Keep just one outgoing background as a warm decode cache. This is only
+   called for an outgoing texture, never for the active texture. */
+static void CacheFanart(Texture* art, int idx) {
+    if (s_fanartCached.tex) Texture_Release(&s_fanartCached);
+    s_fanartCached.tex = NULL;
+    s_fanartCachedIdx = -1;
+    if (art->tex && idx >= 0) {
+        s_fanartCached = *art;
+        art->tex = NULL;
+        s_fanartCachedIdx = idx;
+    }
+    else if (art->tex) {
+        Texture_Release(art);
+        art->tex = NULL;
+    }
+}
+
+static int LoadFanart(const char* xbePath, Texture* out) {
+    char folder[LAUNCH_PATH_MAX], path[LAUNCH_PATH_MAX];
+    static const char* const candidates[] = {
+        "_resources\\artwork\\fanart-blur.jpg",
+        "_resources\\artwork\\fanart.jpg",
+        NULL
+    };
+    int i;
+    if (!xbePath || !out) return 0;
+    TitleFolder(xbePath, folder, sizeof(folder));
+    for (i = 0; candidates[i]; ++i) {
+        DWORD attrs;
+        JoinPath(path, sizeof(path), folder, candidates[i]);
+        attrs = GetFileAttributesA(path);
+        if (attrs == 0xFFFFFFFF || (attrs & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (Texture_LoadJPEG(path, out)) return 1;
+    }
+    return 0;
+}
+
+/* Called on the existing deferred pedestal-load path: no I/O during draw. */
+static void LoadFanartFor(int idx) {
+    Texture next = { 0, 0, 0, 0, 0 };
+    DWORD now = GetTickCount();
+    int previous = s_fanartCurrentIdx;
+    if (idx == previous) return;
+
+    /* Reuse either the fading-out texture or our one-entry warm cache.
+       Decode only on a true cache miss; navigation is already debounced. */
+    if (idx >= 0 && idx == s_fanartOldIdx && s_fanartOld.tex) {
+        next = s_fanartOld;
+        s_fanartOld.tex = NULL;
+        s_fanartOldIdx = -1;
+    }
+    else if (idx >= 0 && idx == s_fanartCachedIdx && s_fanartCached.tex) {
+        next = s_fanartCached;
+        s_fanartCached.tex = NULL;
+        s_fanartCachedIdx = -1;
+    }
+    else if (idx >= 0 && idx < s_count) {
+        LoadFanart(s_items[idx].xbePath, &next);
+    }
+    if (s_fanartOld.tex) CacheFanart(&s_fanartOld, s_fanartOldIdx);
+    s_fanartOldIdx = -1;
+    if (s_fanart.tex) {
+        s_fanartOld = s_fanart;
+        s_fanart.tex = NULL;
+        s_fanartOldIdx = previous;
+    }
+    s_fanart = next;
+    s_fanartCurrentIdx = idx;
+    s_fanartFadeAt = now;
+}
+
+/* Aspect-preserving center-fill: oversize rather than stretch the artwork. */
+static void DrawFanart(const Texture* t, int alpha) {
+    float iw, ih, scale, w, h;
+    if (!t || !t->tex || alpha <= 0 || !t->w || !t->h) return;
+    iw = (float)t->w; ih = (float)t->h;
+    scale = 640.0f / iw;
+    if (480.0f / ih > scale) scale = 480.0f / ih;
+    w = iw * scale; h = ih * scale;
+    UI_DrawSprite(t, (640.0f - w) * 0.5f, (480.0f - h) * 0.5f,
+        w, h, UI_ARGB(alpha, 255, 255, 255), 0);
+}
+
+static void DrawFanartBackdrop(void) {
+    DWORD now = GetTickCount();
+    DWORD elapsed = now - s_fanartFadeAt;
+    int incoming = 168;
+    if (elapsed < LAUNCH_FANART_FADE_MS) {
+        incoming = (int)(168u * elapsed / LAUNCH_FANART_FADE_MS);
+        DrawFanart(&s_fanartOld, 168 - incoming);
+    }
+    else if (s_fanartOld.tex) {
+        CacheFanart(&s_fanartOld, s_fanartOldIdx);
+        s_fanartOldIdx = -1;
+    }
+    DrawFanart(&s_fanart, incoming);
+    if (s_fanart.tex || (s_fanartOld.tex && elapsed < LAUNCH_FANART_FADE_MS)) {
+        /* Theme colors remain visible and live text remains legible. */
+        UI_FillGradient(0.0f, 0.0f, 640.0f, 480.0f,
+            UI_ARGB(122, 2, 3, 9), UI_ARGB(176, 2, 3, 9),
+            UI_ARGB(146, 2, 3, 9), UI_ARGB(200, 2, 3, 9), 0);
+    }
+}
+
 /* decode (or clear) the title image for item 'idx'; no-op if unchanged */
 static void LoadPedestal(int idx) {
     if (idx == s_pedIdx) return;
@@ -278,8 +478,10 @@ static void LoadPedestal(int idx) {
     s_ped.tex = NULL;
     s_pedIdx = idx;
     s_pedFlat = 0;
-    if (idx < 0 || idx >= s_count) return;
+    if (idx < 0 || idx >= s_count) { LoadFanartFor(-1); return; }
     Launcher_LoadArtFor(s_items[idx].xbePath, &s_ped, &s_pedFlat);
+    if (s_ped.tex) Pedestal_Pulse();
+    LoadFanartFor(idx);
 }
 
 /* join "a" + "\" + "b" into out (no sprintf) */
@@ -506,7 +708,7 @@ static void AlphaJump(int dir) {
     if (i != s_cursor) {
         s_cursor = i;
         ClampScroll();
-        LoadPedestal(s_cursor);   /* discrete + infrequent -> immediate load is fine */
+        QueuePedestalLoad(110);   /* skip decode if the user keeps jumping */
         Audio_PlaySfx(dir > 0 ? SFX_NAV_DOWN : SFX_NAV_UP);
     }
 }
@@ -516,10 +718,39 @@ static void AlphaJump(int dir) {
 static void RescanCurrent(void) {
     int i;
     if (!s_cfg) return;
+    DD_Storage_RefreshSecondary();         /* refresh N:/O:/P:/R: before scans */
+    ReleaseFanart();  /* item indices change on scan; invalidate artwork identity */
     s_count = 0;
     CacheLoad(s_cfg->cacheId);               /* prior cert results, if any */
     for (i = 0; i < s_cfg->rootCount; i++)
         ScanRoot(s_cfg->roots[i], 0);
+    /* Built-in equivalents on the CerBIOS secondary disk. These are
+       optional additions; user-defined paths and cache IDs remain intact. */
+    {
+        int vi;
+        for (vi = 0; vi < DD_Storage_Count(); vi++) {
+            const DD_StorageVolume* v = DD_Storage_At(vi);
+            char path[64];
+            static const char* const appDirs[] = { "Apps", "Applications", NULL };
+            static const char* const emuDirs[] = { "emu", "emulators", NULL };
+            static const char* const gameDirs[] = { "Games", NULL };
+            static const char* const hbDirs[] = { "Homebrew", NULL };
+            const char* const* dirs = NULL;
+            int j;
+            if (!v || !v->disk || !DD_Storage_Ready(v)) continue;
+            if (v->partition != 1 && v->partition != 6 && v->partition != 7) continue;
+            if (!lstrcmpiA(s_cfg->cacheId, "apps")) dirs = appDirs;
+            else if (!lstrcmpiA(s_cfg->cacheId, "emu")) dirs = emuDirs;
+            else if (!lstrcmpiA(s_cfg->cacheId, "games")) dirs = gameDirs;
+            else if (!lstrcmpiA(s_cfg->cacheId, "homebrew")) dirs = hbDirs;
+            if (!dirs) continue;
+            for (j = 0; dirs[j]; j++) {
+                path[0] = v->letter; path[1] = ':'; path[2] = '\\'; path[3] = 0;
+                lstrcatA(path, dirs[j]);
+                ScanRoot(path, 0);
+            }
+        }
+    }
     /* also scan any user-added custom paths for this category */
     {
         int np = Paths_Count(s_cfg->cacheId), k;
@@ -535,10 +766,14 @@ void Launcher_Enter(const LauncherConfig* cfg) {
     s_count = 0; s_cursor = 0; s_scroll = 0;
     s_showHidden = 0;        /* always enter in normal view */
     s_active = 1;             /* a launcher list is now the active screen */
+    Select_Reset();           /* first launcher frame snaps to the restored row */
     if (!cfg) return;
     RescanCurrent();
+    RestoreNavState();
+    ReleaseFanart();
     s_pedIdx = -1;
-    LoadPedestal(s_cursor);   /* decode the first app's title image */
+    s_pedPending = 0;
+    LoadPedestal(s_cursor);   /* decode the restored/first app's title image */
 }
 
 /* One-shot "NOW LOADING" screen for a launch: the selected title's pedestal +
@@ -587,6 +822,7 @@ int Launcher_Update(WORD pressed, WORD held) {
         if (r == 1) {                /* a game was installed -> show it now */
             RescanCurrent();
             s_pedIdx = -1;
+            s_pedPending = 0;
             LoadPedestal(s_cursor);
         }
         return 0;
@@ -606,6 +842,7 @@ int Launcher_Update(WORD pressed, WORD held) {
                     s_cursor = 0; s_scroll = 0;
                     RescanCurrent();
                     s_pedIdx = -1;
+                    s_pedPending = 0;
                     LoadPedestal(s_cursor);
                 }
             }
@@ -621,8 +858,10 @@ int Launcher_Update(WORD pressed, WORD held) {
 
     if (pressed & BTN_B) {
         Audio_PlaySfx(SFX_BACK);
+        SaveNavState();
         if (s_ped.tex) Texture_Release(&s_ped);
         s_ped.tex = NULL; s_pedIdx = -1; s_pedFlat = 0;
+        ReleaseFanart();
         s_active = 0;        /* back to main menu: stop reporting a title to Type-D */
         return 1;
     }
@@ -645,11 +884,15 @@ int Launcher_Update(WORD pressed, WORD held) {
     if (pressed & BTN_X) {
         int keep = s_cursor;
         Audio_PlaySfx(SFX_SELECT);
+        SaveNavState();                 /* prefer the same title after sorting changes */
         RescanCurrent();
         s_cursor = (keep < s_count) ? keep : (s_count > 0 ? s_count - 1 : 0);
         if (s_cursor < 0) s_cursor = 0;
+        ClampScroll();                  /* sensible index fallback if the title vanished */
+        RestoreNavState();              /* otherwise restore by stable XBE path */
         ClampScroll();
         s_pedIdx = -1;
+        s_pedPending = 0;
         LoadPedestal(s_cursor);
     }
 
@@ -695,6 +938,7 @@ int Launcher_Update(WORD pressed, WORD held) {
                 if (s_cursor >= s_count) s_cursor = (s_count > 0) ? s_count - 1 : 0;
                 ClampScroll();
                 s_pedIdx = -1;
+                s_pedPending = 0;
                 LoadPedestal(s_cursor);
             }
         }
@@ -713,16 +957,17 @@ int Launcher_Update(WORD pressed, WORD held) {
         if (s_cursor < 0) s_cursor = 0;
         ClampScroll();
         s_pedIdx = -1;
+        s_pedPending = 0;
         LoadPedestal(s_cursor);
         return 0;
     }
 
     if (s_count > 0) {
         if (pressed & BTN_DPAD_DOWN) {
-            if (s_cursor < s_count - 1) { s_cursor++; Audio_PlaySfx(SFX_NAV_DOWN); ClampScroll(); LoadPedestal(s_cursor); }
+            if (s_cursor < s_count - 1) { s_cursor++; Audio_PlaySfx(SFX_NAV_DOWN); ClampScroll(); QueuePedestalLoad(110); }
         }
         if (pressed & BTN_DPAD_UP) {
-            if (s_cursor > 0) { s_cursor--; Audio_PlaySfx(SFX_NAV_UP); ClampScroll(); LoadPedestal(s_cursor); }
+            if (s_cursor > 0) { s_cursor--; Audio_PlaySfx(SFX_NAV_UP); ClampScroll(); QueuePedestalLoad(110); }
         }
         /* D-Pad LEFT / RIGHT: alpha-jump -- skip to the previous / next letter
            group. Pairs with single-step (D-pad U/D), page (LT/RT), and analog
@@ -736,14 +981,14 @@ int Launcher_Update(WORD pressed, WORD held) {
             if (s_cursor < s_count - 1) {
                 s_cursor += LAUNCH_ROWS_VISIBLE;
                 if (s_cursor > s_count - 1) s_cursor = s_count - 1;
-                Audio_PlaySfx(SFX_NAV_DOWN); ClampScroll(); LoadPedestal(s_cursor);
+                Audio_PlaySfx(SFX_NAV_DOWN); ClampScroll(); QueuePedestalLoad(110);
             }
         }
         if (pressed & BTN_LTRIG) {
             if (s_cursor > 0) {
                 s_cursor -= LAUNCH_ROWS_VISIBLE;
                 if (s_cursor < 0) s_cursor = 0;
-                Audio_PlaySfx(SFX_NAV_UP); ClampScroll(); LoadPedestal(s_cursor);
+                Audio_PlaySfx(SFX_NAV_UP); ClampScroll(); QueuePedestalLoad(110);
             }
         }
 
@@ -779,8 +1024,7 @@ int Launcher_Update(WORD pressed, WORD held) {
                         DWORD interval = ANALOG_STEP_SLOW -
                             (ramp * (ANALOG_STEP_SLOW - ANALOG_STEP_FAST) / ANALOG_RAMP_MS);
                         ClampScroll();
-                        s_pedPending = 1;                /* defer the art decode */
-                        s_pedSettleAt = now + ANALOG_PED_SETTLE;
+                        QueuePedestalLoad(ANALOG_PED_SETTLE); /* defer the art decode */
                         if (now >= s_stickNextSfx) {     /* throttle the tick */
                             Audio_PlaySfx(dir > 0 ? SFX_NAV_DOWN : SFX_NAV_UP);
                             s_stickNextSfx = now + ANALOG_SFX_MS;
@@ -794,12 +1038,13 @@ int Launcher_Update(WORD pressed, WORD held) {
             }
         }
 
-        /* Deferred cover-art load: once a scroll burst settles (stick released,
-           or a short pause), decode the highlighted title's art once. LoadPedestal
-           no-ops when the index hasn't changed, so this is cheap if already current. */
+        /* Deferred cover-art load: once navigation has been quiet for the short
+           settle window, decode the highlighted title's art once. D-pad, page,
+           alpha-jump, and analog scrolling all share this path so a rapid burst
+           never decodes artwork for rows the user only passed through. */
         if (s_pedPending) {
             DWORD now = GetTickCount();
-            if (s_stickDir == 0 || now >= s_pedSettleAt) {
+            if ((LONG)(now - s_pedSettleAt) >= 0) {
                 LoadPedestal(s_cursor);
                 s_pedPending = 0;
             }
@@ -809,12 +1054,19 @@ int Launcher_Update(WORD pressed, WORD held) {
                toggle on (XL Art and/or Type-D Art). */
             int artOn = TypeDArt_WillSend();
             Audio_PlaySfx(SFX_SELECT);
+            /* A can arrive during the short navigation debounce. Ensure the
+               loading screen always shows the title that is actually launching. */
+            if (s_pedPending) {
+                LoadPedestal(s_cursor);
+                s_pedPending = 0;
+            }
             /* show the loading screen while s_ped art is still loaded, then
                release the pedestal texture, stop the music, and hand off.
                Mount_LaunchXbe does not return on success. */
             if (artOn) DrawLoadingScreen();
             if (s_ped.tex) Texture_Release(&s_ped);
             s_ped.tex = NULL; s_pedIdx = -1; s_pedFlat = 0;
+            ReleaseFanart();
             Audio_StopMusic();
             Recents_Add(s_items[s_cursor].label, s_items[s_cursor].xbePath);
             /* Stop the SMBus service thread BEFORE touching the panel. It pages
@@ -851,13 +1103,35 @@ int Launcher_Update(WORD pressed, WORD held) {
     return 0;
 }
 
-/* copy src into dst, truncating with ".." if longer than max visible chars */
-static void FitLabel(char* dst, int cap, const char* src, int maxChars) {
-    int n = (int)strlen(src);
-    if (maxChars > cap - 1) maxChars = cap - 1;
-    if (n <= maxChars) { strncpy(dst, src, cap - 1); dst[cap - 1] = 0; return; }
-    strncpy(dst, src, maxChars - 2);
-    dst[maxChars - 2] = '.'; dst[maxChars - 1] = '.'; dst[maxChars] = 0;
+/* Fit to virtual pixels, not a fixed character count. This respects the
+   variable advances of .ddf fonts without changing the format or atlas. */
+static void FitLabelPixels(char* dst, int cap, const char* src, int maxPixels) {
+    int n = 0;
+    int reserve;
+    if (!dst || cap < 1) return;
+    dst[0] = 0;
+    if (!src || cap < 2 || maxPixels <= 0) return;
+    while (src[n] && n < cap - 1) { dst[n] = src[n]; ++n; }
+    dst[n] = 0;
+    if (!src[n] && Font_MeasureText(dst, FONT_SIZE_SMALL) <= maxPixels) return;
+    reserve = Font_MeasureText("..", FONT_SIZE_SMALL);
+    if (reserve >= maxPixels || cap < 4) { dst[0] = 0; return; }
+    n = 0;
+    while (src[n] && n < cap - 3) {
+        dst[n] = src[n]; dst[n + 1] = 0;
+        if (Font_MeasureText(dst, FONT_SIZE_SMALL) > maxPixels - reserve) break;
+        ++n;
+    }
+    dst[n++] = '.'; dst[n++] = '.'; dst[n] = 0;
+}
+
+static int AppendUInt(char* dst, int pos, int cap, unsigned v) {
+    char tmp[12]; int n = 0, i;
+    if (v == 0) tmp[n++] = '0';
+    else while (v > 0 && n < (int)sizeof(tmp)) { tmp[n++] = (char)('0' + (v % 10)); v /= 10; }
+    for (i = n - 1; i >= 0 && pos < cap - 1; i--) dst[pos++] = tmp[i];
+    dst[pos] = 0;
+    return pos;
 }
 
 void Launcher_Render(void) {
@@ -872,7 +1146,6 @@ void Launcher_Render(void) {
 
     const Texture* hdr = Theme_Asset("bar_header");
     const Texture* menu = Theme_Asset("frame_menu_v");
-    const Texture* foot = Theme_Asset("bar_footer");
     const Texture* ped = Theme_Asset("platform_round");
 
     float menuX = 352.0f, menuY = 48.0f;
@@ -882,16 +1155,35 @@ void Launcher_Render(void) {
 
     /* shared ambient bloom (same green wash as the main menu) */
     Backdrop_Draw();
+    DrawFanartBackdrop();
 
     /* header */
     if (hdr) UI_DrawSprite(hdr, 8.0f, 8.0f, 300.0f, 40.0f, 0xFFFFFFFF, 0);
     Font_DrawText(d, 26.0f, 14.0f, title, FONT_SIZE_LARGE, accent, 0);
     if (s_showHidden)
         Font_DrawText(d, 500.0f, 18.0f, "[ HIDDEN ]", FONT_SIZE_SMALL, glow, 0);
+    else if (s_count > 0) {
+        char pos[24]; int n = 0;
+        n = AppendUInt(pos, n, sizeof(pos), (unsigned)(s_cursor + 1));
+        if (n < (int)sizeof(pos) - 1) pos[n++] = '/';
+        pos[n] = 0;
+        AppendUInt(pos, n, sizeof(pos), (unsigned)s_count);
+        Font_DrawTextRight(d, 614.0f, 18.0f, pos, FONT_SIZE_SMALL, dim);
+    }
 
     /* pedestal (left): platform base, then the light + title showpiece.
        _resources case art renders as a flat flickering hologram; an XBE title
        image (square) keeps the spinning cube. */
+       /* Ambient floor light belongs to the launcher scene, not pedestal logic.
+          Two gentle falloff passes sit UNDER the existing authored platform. */
+    {
+        DWORD c = Theme_StageLighting()->beam;
+        int lr = (int)((c >> 16) & 255), lg = (int)((c >> 8) & 255);
+        int lb = (int)(c & 255);
+        UI_FillGradient(79.0f, 328.0f, 201.0f, 41.0f,
+            UI_ARGB(0, lr, lg, lb), UI_ARGB(24, lr, lg, lb),
+            UI_ARGB(0, lr, lg, lb), UI_ARGB(15, lr, lg, lb), 0);
+    }
     if (ped) UI_DrawSprite(ped, 70.0f, 270.0f, 220.0f, 116.0f, 0xFFFFFFFF, 0);
     if (s_ped.tex && s_pedFlat) {
         Pedestal_DrawHologram(&s_ped, GetTickCount(), ar, ag, ab);
@@ -908,45 +1200,87 @@ void Launcher_Render(void) {
 
     if (s_count <= 0) {
         const char* em = (s_cfg && s_cfg->emptyMsg) ? s_cfg->emptyMsg : "Nothing found";
-        Font_DrawTextIso(d, menuX + 30.0f, 206.0f, em, FONT_SIZE_SMALL, dim);
+        Font_DrawTextIsoClip(d, menuX + 24.0f, 192.0f, em,
+            FONT_SIZE_SMALL, dim, 224.0f);
+        Font_DrawTextIsoClip(d, menuX + 24.0f, 219.0f,
+            "Y ADD PATH  /  X RESCAN", FONT_SIZE_SMALL, text, 224.0f);
     }
     else {
-        /* selection glow under the cursor row */
+        /* same spring/pop/chromatic selection language as the main menu. */
         float gy = rowY0 + rowDY * (float)(s_cursor - s_scroll) - 6.0f;
-        Iso_FillRect(menuX + 6.0f, gy, 258.0f, 32.0f, UI_ARGB(80, ar, ag, ab), 1);
+        Select_Begin(0x2000, gy);
+        Select_DrawGlow(menuX + 6.0f, gy, 258.0f, 32.0f, UI_ARGB(80, ar, ag, ab));
 
         visible = s_count - s_scroll;
         if (visible > LAUNCH_ROWS_VISIBLE) visible = LAUNCH_ROWS_VISIBLE;
         for (i = 0; i < visible; i++) {
             int  idx = s_scroll + i;
-            char row[30];
+            char row[LAUNCH_NAME_MAX + 4];
             int  hid = s_showHidden ? Hidden_Is(s_items[idx].xbePath) : 0;
             DWORD c = (idx == s_cursor) ? glow : (hid ? dim : text);
             if (hid) {
                 /* "x " marker so hidden entries are obvious while reverting */
-                char tmp[28];
+                char tmp[LAUNCH_NAME_MAX + 2];
                 int k = 0;
-                FitLabel(tmp, sizeof(tmp), s_items[idx].label, 24);
+                const int markerWidth = Font_MeasureText("x ", FONT_SIZE_SMALL);
+                FitLabelPixels(tmp, sizeof(tmp), s_items[idx].label,
+                    markerWidth < 224 ? 224 - markerWidth : 0);
                 row[0] = 'x'; row[1] = ' ';
-                while (tmp[k] && k < 27) { row[2 + k] = tmp[k]; k++; }
+                while (tmp[k] && k < (int)sizeof(row) - 3) { row[2 + k] = tmp[k]; ++k; }
                 row[2 + k] = 0;
             }
             else {
-                FitLabel(row, sizeof(row), s_items[idx].label, 26);
+                FitLabelPixels(row, sizeof(row), s_items[idx].label, 224);
             }
-            Font_DrawTextIso(d, menuX + 24.0f, rowY0 + rowDY * (float)i,
-                row, FONT_SIZE_SMALL, c);
+            Font_DrawTextIsoClip(d, menuX + 24.0f, rowY0 + rowDY * (float)i,
+                row, FONT_SIZE_SMALL, c, 224.0f);
         }
     }
 
     Iso_End();
 
-    /* footer */
-    if (foot) UI_DrawSprite(foot, 8.0f, 442.0f, 624.0f, 32.0f, 0xFFFFFFFF, 0);
-    if (s_showHidden)
-        Font_DrawText(d, 24.0f, 449.0f, "SHOWING HIDDEN   A LAUNCH  BLACK UNHIDE  START EXIT  B BACK", FONT_SIZE_SMALL, text, 0);
-    else
-        Font_DrawText(d, 24.0f, 449.0f, "A LAUNCH  X REFRESH  WHITE INFO  BLACK HIDE  START HIDDEN  B BACK", FONT_SIZE_SMALL, text, 0);
+    /* A subtle, read-only source marker for the selected XBE. Only identify
+       known mounted partitions; D: assets, S: optical and custom mappings
+       must never be mislabeled as an internal HDD. */
+    if (s_count > 0 && s_cursor >= 0 && s_cursor < s_count) {
+        const char* xbe = s_items[s_cursor].xbePath;
+        if (xbe[0] && xbe[1] == ':') {
+            const DD_StorageVolume* vol = DD_Storage_Letter(xbe[0]);
+            if (vol && vol->mounted) {
+                char source[24];
+                source[0] = 0;
+                source[0] = 'H'; source[1] = 'D'; source[2] = 'D';
+                source[3] = vol->disk ? '1' : '0'; source[4] = ' ';
+                source[5] = ' '; source[6] = vol->letter; source[7] = ':'; source[8] = 0;
+                Font_DrawText(d, 87.0f, 397.0f, source, FONT_SIZE_SMALL, dim, 0);
+            }
+        }
+    }
+
+    /* footer: expose the useful category controls, but fall back to a compact
+       hint with unusually wide custom fonts instead of drawing off the bar. */
+    {
+        const char* hint;
+        const char* compact;
+        if (s_count <= 0 && !s_showHidden) {
+            hint = "X REFRESH  Y ADD PATH  B BACK";
+            compact = hint;
+        }
+        else if (s_showHidden) {
+            hint = "SHOWING HIDDEN   A LAUNCH  BLACK UNHIDE  START EXIT  B BACK";
+            compact = "BLACK UNHIDE  START EXIT HIDDEN  B BACK";
+        }
+        else if (s_cfg && s_cfg->cacheId && lstrcmpiA(s_cfg->cacheId, "games") == 0) {
+            hint = "A LAUNCH X REFRESH Y PATH R3 ISO BLACK HIDE START HIDDEN B BACK";
+            compact = "A LAUNCH  Y PATH  R3 ISO  X REFRESH  B BACK";
+        }
+        else {
+            hint = "A LAUNCH X REFRESH Y PATH WHITE INFO BLACK HIDE START HIDDEN B BACK";
+            compact = "A LAUNCH  Y PATH  WHITE INFO  X REFRESH  B BACK";
+        }
+        if (DD_Hints_Measure(hint) > 590.0f) hint = compact;
+        DD_Hints_Footer(d, 442.0f, 32.0f, 24.0f, 590.0f, hint, text);
+    }
 
     /* overlays on top of everything */
     Browse_Draw(d);

@@ -19,10 +19,35 @@
 extern "C" {
 #endif
 
+    /* Build-wide A4 depth switch. Override with a project-wide compiler definition
+       when comparing rendering, not with a local define in one .cpp. */
+#ifndef DD_A4_DEPTH
+#define DD_A4_DEPTH 1
+#endif
+
+       /* A5 surface/material and environment lighting; project-wide rollback.
+          Needs the shared A4 depth layer, but requires no new theme.ini fields. */
+#ifndef DD_A5_LIGHTING
+#define DD_A5_LIGHTING 1
+#endif
+
+          /* A6: short-lived panel-arrival lighting and focus response. Shared by all
+             screens; disabled with project-wide DD_A6_INTERACTION=0. The Effects >
+             Selection setting still gates all motion/interaction feedback. */
+#ifndef DD_A6_INTERACTION
+#define DD_A6_INTERACTION 1
+#endif
+
+             /* Visually stronger materials and atmosphere, without changing legacy themes.
+                Set to 0 project-wide to A/B against the previous A6 appearance. */
+#ifndef DD_VISUAL_IMPACT
+#define DD_VISUAL_IMPACT 1
+#endif
+
 #define UI_VIRT_W 640.0f
 #define UI_VIRT_H 480.0f
 
-    /* ARGB pack helper */
+                /* ARGB pack helper */
 #define UI_ARGB(a,r,g,b) (((DWORD)(a)<<24)|((DWORD)(r)<<16)|((DWORD)(g)<<8)|(DWORD)(b))
 
 /* Call once after Gfx_Init with the real backbuffer size. */
@@ -52,9 +77,45 @@ extern "C" {
     void  UI_DrawSpriteNative(const Texture* t, float vx, float vy,
         DWORD colour, int additive);
 
+    /* Draw scalable flat chrome without stretching its decorative corners.
+       Borders are in the source texture's original pixel units; destination
+       coordinates remain in virtual 640x480 units. One draw call per frame. */
+    void UI_DrawNineSlice(const Texture* t, float vx, float vy, float vw, float vh,
+        float left, float top, float right, float bottom,
+        DWORD colour, int additive);
+
     /* Solid colour rectangle in virtual coords. */
     void  UI_FillRect(float vx, float vy, float vw, float vh, DWORD colour);
     void  UI_FillRectAdd(float vx, float vy, float vw, float vh, DWORD colour);
+
+    /* Interpolated vertex-colour quad: TL, TR, BL, BR corners.
+       One draw call, no texture, useful for inexpensive atmospheric lights. */
+    void UI_FillGradient(float vx, float vy, float vw, float vh,
+        DWORD topLeft, DWORD topRight, DWORD bottomLeft, DWORD bottomRight,
+        int additive);
+
+    /* Render on top of a flat panel's artwork/backing but BEFORE text.
+       Same theme/material treatment as Iso_DrawPanel; respects modal fade. */
+    void UI_DrawPanelLighting(float vx, float vy, float vw, float vh, int opacity);
+
+    /* Optional arrival highlight for existing flat/isometric panels.
+       Tracks up to 32 visible rects without heap allocations; the light fades
+       out after first appearance or when a panel returns after being hidden.
+       kind=0 for a flat panel, 1 for an isometric panel. Return 0 when disabled. */
+    int UI_PanelArrivalAlpha(float vx, float vy, float vw, float vh, int kind);
+
+    /* Shared background elevation for all flat panels and modal dialogs.
+       Must draw BEFORE the existing themed panel artwork and live text. */
+    void  UI_DrawPanelDepth(float vx, float vy, float vw, float vh, int opacity);
+
+    /* Source-alpha-aware elevation and illumination for framed flat UI.
+       Zero slice margins draw the native sprite shape; nonzero margins use
+       the exact same nine-slice UV mapping as the visible frame.
+       Draw DepthMasked BEFORE the authored frame, LightingMasked AFTER it. */
+    void UI_DrawPanelDepthMasked(const Texture* frame, float vx, float vy,
+        float vw, float vh, int opacity, float left, float top, float right, float bottom);
+    void UI_DrawPanelLightingMasked(const Texture* frame, float vx, float vy,
+        float vw, float vh, int opacity, float left, float top, float right, float bottom);
 
     /* solid triangle from three virtual-space points (corner markers, etc.) */
     void  UI_FillTri(float ax, float ay, float bx, float by, float cx, float cy,

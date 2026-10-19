@@ -174,6 +174,8 @@ static LONG                s_musicGen = 0;   /* bumped on each stop; a fill thre
                                                  a detached zombie can never touch the new
                                                  stream even if s_musicStop is reset */
 static LONG                s_musicEOF = 0;
+static LONG                s_musicPaused = 0;
+static DWORD               s_musicPauseTick = 0;
 static int                 s_musicLoop = 1;
 static DWORD               s_musicEofTick = 0;   /* GetTickCount when a non-looping track hit decoder EOF */
 static DWORD               s_musicDrainMs = 1500;/* ms for the already-buffered tail to finish playing    */
@@ -357,6 +359,7 @@ static DWORD WINAPI MusicThreadProc(LPVOID pParam) {
         DWORD dwPlay = 0, dwWrite = 0;
         int   playHalf, fillHalf;
 
+        if (InterlockedCompareExchange(&s_musicPaused, 0, 0)) { Sleep(8); continue; }
         if (!s_music) { lastFilled = -1; Sleep(4); continue; }
         /* After a non-looping track hits EOF we keep filling: FillHalf pads
            silence, so the genuine tail plays out once and everything after it is
@@ -460,12 +463,42 @@ void Audio_SetMusicVolume(int pct) {
 
 int Audio_GetMusicVolume(void) { return (int)s_musicVolPct; }
 
+void Audio_SetMusicPaused(int paused) {
+    int want = paused ? 1 : 0;
+    int cur = (int)InterlockedCompareExchange(&s_musicPaused, 0, 0);
+    if (!s_music || want == cur) return;
+    if (want) {
+        /* Stop the play cursor first and tell the fill thread to stand down.
+           The buffer and decoder stay resident so resume continues in place. */
+        InterlockedExchange(&s_musicPaused, 1);
+        s_musicPauseTick = GetTickCount();
+        EnterCriticalSection(&s_dsCS);
+        if (s_music) s_music->Stop();
+        LeaveCriticalSection(&s_dsCS);
+    }
+    else {
+        if (s_musicPauseTick && s_musicEofTick)
+            s_musicEofTick += GetTickCount() - s_musicPauseTick;
+        s_musicPauseTick = 0;
+        EnterCriticalSection(&s_dsCS);
+        if (s_music) s_music->Play(0, 0, DSBPLAY_LOOPING);
+        LeaveCriticalSection(&s_dsCS);
+        InterlockedExchange(&s_musicPaused, 0);
+    }
+}
+
+int Audio_MusicPaused(void) {
+    return (int)InterlockedCompareExchange(&s_musicPaused, 0, 0);
+}
+
+int Audio_MusicPlaying(void) { return s_music ? 1 : 0; }
+
 /* 1 only when a non-looping track has played to its natural end: the decoder hit
    EOF AND the buffered tail has had time to drain. Returns 0 while looping music
    plays and 0 when music is stopped (s_music NULL) -- so a deliberate stop (game
    launch / screensaver) never looks like a finished track. */
 int Audio_MusicFinished(void) {
-    if (!s_music) return 0;
+    if (!s_music || InterlockedCompareExchange(&s_musicPaused, 0, 0)) return 0;
     if (!InterlockedCompareExchange(&s_musicEOF, 1, 1)) return 0;
     if (s_musicEofTick == 0) return 0;
     return ((DWORD)(GetTickCount() - s_musicEofTick) >= s_musicDrainMs) ? 1 : 0;
@@ -568,6 +601,8 @@ void Audio_StartMusic(int loop) {
     s_musicLoop = loop ? 1 : 0;
     s_carryBytes = 0;
     InterlockedExchange(&s_musicEOF, 0);
+    InterlockedExchange(&s_musicPaused, 0);
+    s_musicPauseTick = 0;
     s_musicEofTick = 0;
 
     /* probe the first frame for channels/hz. Require an actually DECODED frame
@@ -673,6 +708,8 @@ void Audio_StopMusic(void) {
        drains any such lingering thread before reusing the globals. s_musicStop
        stays set so the zombie exits the instant its Lock unblocks. */
 
+    InterlockedExchange(&s_musicPaused, 0);
+    s_musicPauseTick = 0;
     s_musicSize = 0; s_musicPos = 0; s_carryBytes = 0;
     s_levelLow = 0; s_levelHigh = 0; s_lpState = 0;
     InterlockedExchange(&s_playCursor, 0);

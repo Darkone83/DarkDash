@@ -305,7 +305,9 @@ void Synopsis_Draw(IDirect3DDevice8* d) {
         int br = (int)((bg >> 16) & 0xFF), bgg = (int)((bg >> 8) & 0xFF), bb = (int)(bg & 0xFF);
         UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(180, br / 3, bgg / 3, bb / 3));
     }
+    UI_DrawPanelDepthMasked(frame, fx, fy, fw, fh, 255, 0.0f, 0.0f, 0.0f, 0.0f);
     if (frame) UI_DrawSprite(frame, fx, fy, fw, fh, 0xFFFFFFFF, 0);
+    UI_DrawPanelLightingMasked(frame, fx, fy, fw, fh, 255, 0.0f, 0.0f, 0.0f, 0.0f);
 
     /* ---- left: cover image (front poster.jpg / back alt_synopsis.jpg) ---- */
     /* both pack images are 362x512-ish portrait; size to fit the left band

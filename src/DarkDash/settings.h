@@ -34,4 +34,7 @@ int Settings_NowPlaying(const char** name, float* alpha);
 int Settings_ShuffleNowPlaying(const char** name, DWORD* elapsedMs);
 int Settings_ShuffleNowPlayingPath(const char** path);
 
+/* Clear Shuffle/Now-Playing bookkeeping when Jukebox temporarily owns music. */
+void Settings_SuspendMusicState(void);
+
 #endif /* SETTINGS_H */

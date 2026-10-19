@@ -29,6 +29,23 @@ typedef struct { float x, y, z, u, v; } CubeVert;
 typedef struct { float x, y, z; DWORD c; } BeamVert;
 typedef struct { float x, y, z; DWORD c; float u, v; } HoloVert;
 
+#define PED_MAT_MS 190u
+static DWORD s_matAt = 0;
+
+void Pedestal_Pulse(void) { s_matAt = GetTickCount(); }
+
+/* 0..1 eased materialization progress; inactive/done returns 1. */
+static float Pedestal_MatProgress(DWORD ms) {
+    DWORD e;
+    float t, inv;
+    if (!s_matAt) return 1.0f;
+    e = ms - s_matAt;
+    if (e >= PED_MAT_MS) return 1.0f;
+    t = (float)e / (float)PED_MAT_MS;
+    inv = 1.0f - t;
+    return 1.0f - inv * inv;             /* ease-out */
+}
+
 /* unit cube (half = 0.9), full texture per face, UV rotated 180 so the art is
    upright and reads correctly. CULL NONE + Z-buffer sorts the faces. */
 static const CubeVert s_cube[36] = {
@@ -58,7 +75,7 @@ void Pedestal_Draw(const Texture* art, const Texture* glow,
     D3DVIEWPORT8 vpOld, vpCube;
     D3DXMATRIX   world, view, proj, ident, rY, rX;
     D3DXVECTOR3  eye, at, up;
-    float        ay;
+    float        ay, matP, matScale;
     int          apexA;
     DWORD        apexC, topC;
     BeamVert     beam[6];
@@ -89,7 +106,11 @@ void Pedestal_Draw(const Texture* art, const Texture* glow,
     d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
 
     /* ---- 1) emissive light shaft (additive, fixed, behind the cube) ---- */
+    matP = Pedestal_MatProgress(ms);
+    matScale = 0.84f + 0.16f * matP;
     apexA = 140 + (int)((ms >> 4) & 63);          /* gentle hologram pulse */
+    if (matP < 1.0f) apexA += (int)((1.0f - matP) * 70.0f);
+    if (apexA > 255) apexA = 255;
     apexC = ((DWORD)apexA << 24) | ((DWORD)ar << 16) | ((DWORD)ag << 8) | (DWORD)ab;
     topC = ((DWORD)0 << 24) | ((DWORD)ar << 16) | ((DWORD)ag << 8) | (DWORD)ab;
     /* two crossed triangles: narrow bright apex at the pedestal, fanning up
@@ -120,6 +141,12 @@ void Pedestal_Draw(const Texture* art, const Texture* glow,
     D3DXMatrixRotationY(&rY, ay);
     D3DXMatrixRotationX(&rX, -0.5f);
     D3DXMatrixMultiply(&world, &rY, &rX);
+    if (matP < 1.0f) {
+        D3DXMATRIX sc, tmp;
+        D3DXMatrixScaling(&sc, matScale, matScale, matScale);
+        D3DXMatrixMultiply(&tmp, &sc, &world);
+        world = tmp;
+    }
     d->SetTransform(D3DTS_WORLD, (D3DMATRIX*)&world);
 
     d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
@@ -170,7 +197,7 @@ void Pedestal_DrawHologram(const Texture* icon, DWORD ms, int ar, int ag, int ab
     D3DXVECTOR3  eye, at, up;
     int          apexA;
     DWORD        apexC, topC;
-    float        ay;
+    float        ay, matP, matScale;
     BeamVert     beam[6];
 
     if (!d || !icon || !icon->tex) return;
@@ -198,7 +225,11 @@ void Pedestal_DrawHologram(const Texture* icon, DWORD ms, int ar, int ag, int ab
     d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
 
     /* ---- light shaft (identical to the cube version) ---- */
+    matP = Pedestal_MatProgress(ms);
+    matScale = 0.84f + 0.16f * matP;
     apexA = 140 + (int)((ms >> 4) & 63);
+    if (matP < 1.0f) apexA += (int)((1.0f - matP) * 70.0f);
+    if (apexA > 255) apexA = 255;
     apexC = ((DWORD)apexA << 24) | ((DWORD)ar << 16) | ((DWORD)ag << 8) | (DWORD)ab;
     topC = ((DWORD)0 << 24) | ((DWORD)ar << 16) | ((DWORD)ag << 8) | (DWORD)ab;
     beam[0].x = 0.0f;  beam[0].y = -1.85f; beam[0].z = 0.0f;  beam[0].c = apexC;
@@ -264,6 +295,7 @@ void Pedestal_DrawHologram(const Texture* icon, DWORD ms, int ar, int ag, int ab
             if (aspect >= 1.0f) { hx = fit;          hy = fit / aspect; }
             else { hx = fit * aspect; hy = fit; }
         }
+        hx *= matScale; hy *= matScale;
         umax = (icon->pw > 0) ? (float)icon->w / (float)icon->pw : 1.0f;
         vmax = (icon->ph > 0) ? (float)icon->h / (float)icon->ph : 1.0f;
 

@@ -17,19 +17,16 @@
 
 static int FoLen(const char* s) { int n = 0; while (s[n]) n++; return n; }
 
-static void FoCopy(char* dst, int cap, const char* src) {
-    int i = 0;
-    if (cap <= 0) return;
-    while (src[i] && i < cap - 1) { dst[i] = src[i]; i++; }
-    dst[i] = 0;
-}
-
-/* append "\name" onto a path buffer (adds the separator if missing) */
-static void FoJoin(char* path, int cap, const char* name) {
-    int n = FoLen(path), i = 0;
-    if (n > 0 && path[n - 1] != '\\' && n < cap - 1) path[n++] = '\\';
-    while (name[i] && n < cap - 1) path[n++] = name[i++];
+static int FoJoin(char* path, int cap, const char* name) {
+    int n = FoLen(path), i = 0, needSlash = 0, leafLen;
+    if (!path || cap <= 0 || !name) return 0;
+    if (n > 0 && path[n - 1] != '\\') needSlash = 1;
+    leafLen = FoLen(name);
+    if (n + needSlash + leafLen >= cap) return 0;
+    if (needSlash) path[n++] = '\\';
+    while (name[i]) path[n++] = name[i++];
     path[n] = 0;
+    return 1;
 }
 
 /* ---- existence ----------------------------------------------------------- */
@@ -107,7 +104,7 @@ static int CopyTreeRec(const char* src, const char* dst, int depth) {
     char            pat[FILEOPS_PATH_MAX + 4];
     WIN32_FIND_DATA fd;
     HANDLE          h;
-    int             ok = 1, n;
+    int             ok = 1;
 
     if (!Fileops_IsDir(src))
         return Fileops_CopyFile(src, dst);
@@ -116,10 +113,7 @@ static int CopyTreeRec(const char* src, const char* dst, int depth) {
 
     CreateDirectoryA(dst, NULL);     /* mkdir target; ignore exists */
 
-    FoCopy(pat, sizeof(pat), src);
-    n = FoLen(pat);
-    if (n > 0 && pat[n - 1] != '\\' && n < (int)sizeof(pat) - 2) pat[n++] = '\\';
-    pat[n++] = '*'; pat[n] = 0;
+    if (!DD_PathJoin(pat, sizeof(pat), src, "*")) return 0;
 
     h = FindFirstFile(pat, &fd);
     if (h == INVALID_HANDLE_VALUE) return ok;
@@ -127,8 +121,8 @@ static int CopyTreeRec(const char* src, const char* dst, int depth) {
         char s2[FILEOPS_PATH_MAX], d2[FILEOPS_PATH_MAX];
         if (fd.cFileName[0] == '.' &&
             (fd.cFileName[1] == 0 || fd.cFileName[1] == '.')) continue;
-        FoCopy(s2, sizeof(s2), src); FoJoin(s2, sizeof(s2), fd.cFileName);
-        FoCopy(d2, sizeof(d2), dst); FoJoin(d2, sizeof(d2), fd.cFileName);
+        if (!DD_PathCopy(s2, sizeof(s2), src) || !FoJoin(s2, sizeof(s2), fd.cFileName)) { ok = 0; continue; }
+        if (!DD_PathCopy(d2, sizeof(d2), dst) || !FoJoin(d2, sizeof(d2), fd.cFileName)) { ok = 0; continue; }
         if (!CopyTreeRec(s2, d2, depth + 1)) ok = 0;
     } while (FindNextFile(h, &fd));
     FindClose(h);
@@ -145,17 +139,14 @@ static int DeleteRec(const char* path, int depth) {
     char            pat[FILEOPS_PATH_MAX + 4];
     WIN32_FIND_DATA fd;
     HANDLE          h;
-    int             ok = 1, n;
+    int             ok = 1;
 
     if (!Fileops_IsDir(path))
         return DeleteFileA(path) != 0;
 
     if (depth >= FILEOPS_MAX_DEPTH) return 0;   /* refuse to recurse deeper */
 
-    FoCopy(pat, sizeof(pat), path);
-    n = FoLen(pat);
-    if (n > 0 && pat[n - 1] != '\\' && n < (int)sizeof(pat) - 2) pat[n++] = '\\';
-    pat[n++] = '*'; pat[n] = 0;
+    if (!DD_PathJoin(pat, sizeof(pat), path, "*")) return 0;
 
     h = FindFirstFile(pat, &fd);
     if (h != INVALID_HANDLE_VALUE) {
@@ -163,8 +154,10 @@ static int DeleteRec(const char* path, int depth) {
             char child[FILEOPS_PATH_MAX];
             if (fd.cFileName[0] == '.' &&
                 (fd.cFileName[1] == 0 || fd.cFileName[1] == '.')) continue;
-            FoCopy(child, sizeof(child), path);
-            FoJoin(child, sizeof(child), fd.cFileName);
+            if (!DD_PathCopy(child, sizeof(child), path) ||
+                !FoJoin(child, sizeof(child), fd.cFileName)) {
+                ok = 0; continue;
+            }
             if (!DeleteRec(child, depth + 1)) ok = 0;
         } while (FindNextFile(h, &fd));
         FindClose(h);

@@ -17,11 +17,14 @@
 #include "dd_theme.h"
 #include "dd_texture.h"
 #include "font.h"
+#include "dd_hints.h"
 #include "input.h"
 #include "dd_audio.h"
 #include "dd_backdrop.h"
 #include "dd_fileops.h"
 #include "dd_mount.h"
+#include "dd_storage.h"
+#include "dd_select.h"
 
 #define SM_PATH   272
 #define SM_NAME    48
@@ -205,21 +208,18 @@ static void LoadGames(void) {
 }
 
 static void LoadDest(const char* path) {
-    static const char* k_hdd[] = { "C", "E", "F", "G", "X", "Y", "Z", 0 };
     s_destCount = 0; s_destCursor = 0; s_destScroll = 0;
     SmCopy(s_destPath, sizeof(s_destPath), path ? path : "");
 
     if (s_destPath[0] == 0) {
         int di, mu;
-        for (di = 0; k_hdd[di]; di++) {
-            char root[8], label[8];
-            DWORD attr;
-            root[0] = k_hdd[di][0]; root[1] = ':'; root[2] = '\\'; root[3] = 0;
-            attr = GetFileAttributesA(root);
-            if (attr != 0xFFFFFFFF && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
-                label[0] = k_hdd[di][0]; label[1] = ':'; label[2] = 0;
-                AddEntry(s_dest, &s_destCount, label, root);
-            }
+        for (di = 0; di < DD_Storage_Count(); di++) {
+            const DD_StorageVolume* v = DD_Storage_At(di);
+            char root[4], label[32];
+            if (!DD_Storage_Ready(v)) continue;
+            root[0] = v->letter; root[1] = ':'; root[2] = '\\'; root[3] = 0;
+            DD_Storage_Label(v, label, sizeof(label));
+            AddEntry(s_dest, &s_destCount, label, root);
         }
         for (mu = 0; mu < 8; mu++) {
             int port = mu / 2, slot = mu % 2;
@@ -292,6 +292,7 @@ void SaveMgr_Enter(void) {
     s_msg[0] = 0;
     Mu_MountAll();
     LoadGames();
+    Select_Reset();
 }
 
 int SaveMgr_Update(WORD pressed, WORD held) {
@@ -374,22 +375,36 @@ int SaveMgr_Update(WORD pressed, WORD held) {
 static void DrawArtBorder(IDirect3DDevice8* d, float x, float y, float w, float h) {
     DWORD accent = Theme_Color("accent", 0xFF7FE000);
     int ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
+    const Texture* card = Theme_Asset("frame_card_blank");
     (void)d;
-    UI_FillRect(x, y, w, h, UI_ARGB(235, 6, 10, 8));
-    UI_FillRect(x, y, w, 2.0f, UI_ARGB(255, ar, ag, ab));
-    UI_FillRect(x, y + h - 2.0f, w, 2.0f, UI_ARGB(255, ar, ag, ab));
-    UI_FillRect(x, y, 2.0f, h, UI_ARGB(255, ar, ag, ab));
-    UI_FillRect(x + w - 2.0f, y, 2.0f, h, UI_ARGB(255, ar, ag, ab));
+    UI_DrawPanelDepthMasked(card, x, y, w, h, 255, 22.0f, 28.0f, 22.0f, 28.0f);
+    if (card) {
+        /* An authored cover-card chassis, already provided by every theme.
+           Nine-slice preserves its detailed corners at this large art size. */
+        UI_DrawNineSlice(card, x, y, w, h, 22.0f, 28.0f, 22.0f, 28.0f, 0xFFFFFFFF, 0);
+    }
+    else {
+        UI_FillRect(x, y, w, h, UI_ARGB(235, 6, 10, 8));
+        UI_FillRect(x, y, w, 2.0f, UI_ARGB(255, ar, ag, ab));
+        UI_FillRect(x, y + h - 2.0f, w, 2.0f, UI_ARGB(255, ar, ag, ab));
+        UI_FillRect(x, y, 2.0f, h, UI_ARGB(255, ar, ag, ab));
+        UI_FillRect(x + w - 2.0f, y, 2.0f, h, UI_ARGB(255, ar, ag, ab));
+    }
+    UI_DrawPanelLightingMasked(card, x, y, w, h, 255, 22.0f, 28.0f, 22.0f, 28.0f);
 }
 
 /* themed popup dialog -- dims the scene then draws the menu frame, exactly like
    FileManager's operation dialogs. */
 static void DrawDialog(IDirect3DDevice8* d, float x, float y, float w, float h) {
-    const Texture* frame = Theme_Asset("frame_menu_v");
+    const Texture* frame = Theme_Asset("frame_menu_h");
+    if (!frame) frame = Theme_Asset("frame_menu_v");
     (void)d;
     UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(150, 0, 0, 0));
-    if (frame) UI_DrawSprite(frame, x, y, w, h, 0xFFFFFFFF, 0);
+    UI_DrawPanelDepthMasked(frame, x, y, w, h, 255, 24.0f, 20.0f, 24.0f, 20.0f);
+    if (frame) UI_DrawNineSlice(frame, x, y, w, h,
+        24.0f, 20.0f, 24.0f, 20.0f, 0xFFFFFFFF, 0);
     else       UI_FillRect(x, y, w, h, UI_ARGB(235, 18, 22, 18));
+    UI_DrawPanelLightingMasked(frame, x, y, w, h, 255, 24.0f, 20.0f, 24.0f, 20.0f);
 }
 
 void SaveMgr_Render(void) {
@@ -400,7 +415,6 @@ void SaveMgr_Render(void) {
     DWORD glow = Theme_Color("glow", 0xFFAEFF3C);
     int   ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
     const Texture* frame = Theme_Asset("frame_menu_v");
-    const Texture* foot = Theme_Asset("bar_footer");
     const char* footHint = "A ACTIONS   B EXIT";
     float artX = 44.0f, artY = 96.0f, artW = 256.0f, artH = 256.0f;
     float listX = 320.0f, listY = 70.0f, listW = 296.0f, listH = 350.0f;
@@ -424,7 +438,10 @@ void SaveMgr_Render(void) {
         Font_DrawText(d, artX, artY + artH + 14.0f, s_list[s_cursor].name, FONT_SIZE_SMALL, text, (int)artW);
 
     /* --- game list --- */
+    UI_DrawPanelDepthMasked(frame, listX - 12.0f, listY - 10.0f,
+        listW + 24.0f, listH + 28.0f, 255, 0.0f, 0.0f, 0.0f, 0.0f);
     if (frame) UI_DrawSprite(frame, listX - 12.0f, listY - 10.0f, listW + 24.0f, listH + 28.0f, 0xFFFFFFFF, 0);
+    UI_DrawPanelLightingMasked(frame, listX - 12.0f, listY - 10.0f, listW + 24.0f, listH + 28.0f, 255, 0.0f, 0.0f, 0.0f, 0.0f);
     Font_DrawText(d, listX + 12.0f, listY + 4.0f, "GAMES", FONT_SIZE_SMALL, accent, 0);
     if (s_count == 0) {
         Font_DrawText(d, listX + 12.0f, listY + 44.0f, "No saves found", FONT_SIZE_MEDIUM, dim, 0);
@@ -433,8 +450,12 @@ void SaveMgr_Render(void) {
         for (i = 0; i < VIS && (s_scroll + i) < s_count; i++) {
             int idx = s_scroll + i;
             float ry = listY + 40.0f + (float)i * 32.0f;
-            if (idx == s_cursor)
-                UI_FillRect(listX + 6.0f, ry - 2.0f, listW - 12.0f, 28.0f, UI_ARGB(95, ar, ag, ab));
+            if (idx == s_cursor) {
+                float sy = ry - 2.0f;
+                Select_Begin(0x4000, sy);
+                Select_DrawGlowFlat(listX + 6.0f, sy, listW - 12.0f, 28.0f,
+                    UI_ARGB(95, ar, ag, ab));
+            }
             Font_DrawText(d, listX + 16.0f, ry, s_list[idx].name, FONT_SIZE_MEDIUM,
                 (idx == s_cursor) ? glow : text, (int)(listW - 28.0f));
         }
@@ -447,8 +468,11 @@ void SaveMgr_Render(void) {
         Font_DrawText(d, bx + 20.0f, by + 16.0f, "ACTIONS", FONT_SIZE_SMALL, accent, 0);
         for (i = 0; i < 3; i++) {
             float ry = by + 44.0f + (float)i * 26.0f;
-            if (i == s_opCursor)
-                UI_FillRect(bx + 12.0f, ry - 2.0f, bw - 24.0f, 22.0f, UI_ARGB(90, ar, ag, ab));
+            if (i == s_opCursor) {
+                Select_BeginModal(0x6104, s_opCursor);
+                Select_DrawModalBoxFlat(bx + 12.0f, ry - 2.0f, bw - 24.0f, 22.0f,
+                    UI_ARGB(100, ar, ag, ab));
+            }
             Font_DrawText(d, bx + 22.0f, ry, k_opNames[i], FONT_SIZE_SMALL,
                 (i == s_opCursor) ? glow : text, 0);
         }
@@ -461,7 +485,7 @@ void SaveMgr_Render(void) {
         Font_DrawText(d, bx + 20.0f, by + 48.0f, "for this game?", FONT_SIZE_SMALL, text, 0);
         if (s_count > 0)
             Font_DrawText(d, bx + 20.0f, by + 68.0f, s_list[s_cursor].name, FONT_SIZE_SMALL, glow, (int)(bw - 40.0f));
-        Font_DrawText(d, bx + 20.0f, by + 92.0f, "A = yes    B = no", FONT_SIZE_SMALL, dim, 0);
+        DD_Hints_Draw(d, bx + 20.0f, by + 90.0f, bw - 40.0f, 20.0f, "A YES  B NO", dim);
         footHint = "A YES   B NO";
     }
     else if (s_state == SM_DEST) {
@@ -478,8 +502,11 @@ void SaveMgr_Render(void) {
             for (i = 0; i < VIS && (s_destScroll + i) < s_destCount; i++) {
                 int idx = s_destScroll + i;
                 float ry = by + 44.0f + (float)i * 30.0f;
-                if (idx == s_destCursor)
-                    UI_FillRect(bx + 8.0f, ry - 2.0f, bw - 16.0f, 26.0f, UI_ARGB(95, ar, ag, ab));
+                if (idx == s_destCursor) {
+                    Select_BeginModal(0x6105, s_destCursor);
+                    Select_DrawModalBoxFlat(bx + 8.0f, ry - 2.0f, bw - 16.0f, 26.0f,
+                        UI_ARGB(100, ar, ag, ab));
+                }
                 Font_DrawText(d, bx + 16.0f, ry, s_dest[idx].name, FONT_SIZE_MEDIUM,
                     (idx == s_destCursor) ? glow : text, (int)(bw - 30.0f));
             }
@@ -487,6 +514,5 @@ void SaveMgr_Render(void) {
         footHint = "A ENTER  X UP  WHITE PASTE  B CANCEL";
     }
 
-    if (foot) UI_DrawSprite(foot, 8.0f, 442.0f, 624.0f, 32.0f, 0xFFFFFFFF, 0);
-    Font_DrawText(d, 24.0f, 449.0f, footHint, FONT_SIZE_SMALL, text, 0);
+    DD_Hints_Footer(d, 442.0f, 32.0f, 24.0f, 590.0f, footHint, text);
 }

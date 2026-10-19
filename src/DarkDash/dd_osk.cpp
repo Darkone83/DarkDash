@@ -13,6 +13,7 @@
 #include "dd_ui.h"
 #include "dd_theme.h"
 #include "font.h"
+#include "dd_hints.h"
 #include "input.h"
 
 typedef struct { char sets[3]; int wide; } Key;
@@ -188,6 +189,16 @@ int Osk_Update(WORD pressed) {
 
 /* ---- draw -----------------------------------------------------------------*/
 
+/* Keep the active end of an edit visible, including the caret, when a value
+   is wider than the input field. No changes to the stored text or cursor. */
+static const char* Osk_VisibleTextTail(const char* value, int maxWidth) {
+    if (!value) return "";
+    while (value[0] && value[1] &&
+        Font_MeasureText(value, FONT_SIZE_MEDIUM) > maxWidth)
+        ++value;
+    return value;
+}
+
 static void Outline(float x, float y, float w, float h, DWORD c) {
     UI_FillRect(x, y, w, 1.0f, c);
     UI_FillRect(x, y + h - 1.0f, w, 1.0f, c);
@@ -218,6 +229,14 @@ void Osk_Draw(IDirect3DDevice8* d) {
     /* dim the whole screen */
     UI_FillRect(0.0f, 0.0f, UI_VIRT_W, UI_VIRT_H, 0xCC000000);
 
+    /* Keyboard is a modal surface: ground its text and keys together. */
+    UI_DrawPanelDepth(s_panelX - 12.0f, KB_TEXT_Y - 10.0f,
+        s_panelW + 24.0f, s_panelY + ROWS * (KB_KEY_H + KB_ROW_GAP)
+        - KB_TEXT_Y + 10.0f, 255);
+    UI_DrawPanelLighting(s_panelX - 12.0f, KB_TEXT_Y - 10.0f,
+        s_panelW + 24.0f, s_panelY + ROWS * (KB_KEY_H + KB_ROW_GAP)
+        - KB_TEXT_Y + 10.0f, 255);
+
     /* text field */
     tx = (s_mode == OSK_NUMERIC) ? s_panelX : KB_TEXT_X;
     tw = (s_mode == OSK_NUMERIC) ? s_panelW : (UI_VIRT_W - KB_TEXT_X * 2.0f);
@@ -229,7 +248,8 @@ void Osk_Draw(IDirect3DDevice8* d) {
         lstrcpyA(disp, s_text);
         if ((s_blink / 20) % 2 == 0) lstrcatA(disp, "_");
         Font_DrawText(d, tx + 10.0f, KB_TEXT_Y + (KB_TEXT_H - (float)gh) * 0.5f,
-            disp, FONT_SIZE_MEDIUM, text, (int)(tw - 20.0f));
+            Osk_VisibleTextTail(disp, (int)(tw - 20.0f)),
+            FONT_SIZE_MEDIUM, text, (int)(tw - 20.0f));
     }
 
     /* keys */
@@ -267,10 +287,15 @@ void Osk_Draw(IDirect3DDevice8* d) {
         }
     }
 
-    Font_DrawTextCentered(d, 0.0f, s_panelY + ROWS * (KB_KEY_H + KB_ROW_GAP) + 8.0f,
-        UI_VIRT_W,
-        (s_mode == OSK_NUMERIC)
-        ? "A Type   B Del   Start OK   Back Cancel"
-        : "A Type  B Del  X Case  L3 Caps  Y Space  Start OK  Back Cancel",
-        FONT_SIZE_SMALL, dim);
+    {
+        const char* hint = (s_mode == OSK_NUMERIC)
+            ? "A Type   B Del   Start OK   Back Cancel"
+            : "A Type  B Del  X Case  L3 Caps  Y Space  Start OK  Back Cancel";
+        float width = DD_Hints_Measure(hint);
+        float start = (UI_VIRT_W - width) * 0.5f;
+        if (start < 16.0f) start = 16.0f;
+        DD_Hints_Draw(d, start,
+            s_panelY + ROWS * (KB_KEY_H + KB_ROW_GAP) + 8.0f,
+            UI_VIRT_W - start - 16.0f, 23.0f, hint, dim);
+    }
 }

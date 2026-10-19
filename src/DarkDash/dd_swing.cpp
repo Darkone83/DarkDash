@@ -72,13 +72,13 @@ void Swing_Start(void) {
     s_dir = 0;                   /* full sequence (entering) */
 }
 
-/* return path: the new (main) menu arrives. Skip the rect-out + swing-out and
-   jump to the dwell, so it plays dwell -> swing-back -> rect-in: the door
-   swings in with the menu and the rect fades in once it lands. Content is
-   already the main menu, so no midpoint swap needed. */
+/* return path: the new (main) menu is already present. Skip rect-out,
+   swing-out, AND the edge-on dwell: there is no hidden content swap to wait
+   for on the way back. This makes B feel immediate while preserving the same
+   290ms swing-back + 110ms highlight settle. */
 void Swing_StartIn(void) {
     s_active = 1;
-    s_elapsed = T_SWINGOUT_END;      /* begin at the dwell */
+    s_elapsed = T_DWELL_END;         /* begin at swing-back immediately */
     s_midpoint = 0;
     s_didMid = 1;
     s_dir = 1;

@@ -15,13 +15,18 @@
 #include "dd_gfx.h"
 #include "dd_theme.h"
 #include "dd_ui.h"
+#include "dd_paths.h"
+#include "dd_custom.h"
+#include "dd_hidden.h"
+#include "dd_path.h"
 #include "Applications.h"
 #include "Games.h"
 #include "Homebrew.h"
 #include "Emulators.h"
 
 #define SAVER_MAX_POOL   256
-#define SAVER_PATH_MAX   256
+#define SAVER_PATH_MAX   DD_PATH_MAX
+#define SAVER_MAX_DEPTH  4
 
 /* fade timings (ms) */
 #define SAVER_FADE_MS    1200u
@@ -29,7 +34,6 @@
 
 enum { SP_FADE_IN = 0, SP_HOLD, SP_FADE_OUT };
 
-static int   s_scanned = 0;
 static char  s_pool[SAVER_MAX_POOL][SAVER_PATH_MAX];
 static int   s_poolCount = 0;
 
@@ -45,18 +49,8 @@ static DWORD  s_enterMs = 0;
 
 /* ---- tiny helpers ------------------------------------------------------ */
 
-static int SvLen(const char* s) { int n = 0; while (s && s[n]) n++; return n; }
-
-static void SvCopy(char* dst, int cap, const char* src) {
-    int i = 0; if (cap <= 0) return;
-    while (src && src[i] && i < cap - 1) { dst[i] = src[i]; i++; }
-    dst[i] = 0;
-}
-
-static void SvJoin(char* out, int cap, const char* base, const char* leaf) {
-    int n; SvCopy(out, cap, base); n = SvLen(out);
-    if (n > 0 && out[n - 1] != '\\' && n < cap - 1) { out[n++] = '\\'; out[n] = 0; }
-    { int i = 0; while (leaf && leaf[i] && n < cap - 1) out[n++] = leaf[i++]; out[n] = 0; }
+static int SvJoin(char* out, int cap, const char* base, const char* leaf) {
+    return DD_PathJoin(out, cap, base, leaf);
 }
 
 static unsigned SvRand(void) {
@@ -81,42 +75,69 @@ static void SvHueRgb(unsigned h, int* r, int* g, int* b) {
 
 /* ---- pool scan --------------------------------------------------------- */
 
-static void ScanRootInto(const char* root) {
+static int PoolHas(const char* path) {
+    int i;
+    for (i = 0; i < s_poolCount; i++)
+        if (lstrcmpiA(s_pool[i], path) == 0) return 1;
+    return 0;
+}
+
+static void PoolAdd(const char* path) {
+    if (!path || !path[0] || s_poolCount >= SAVER_MAX_POOL) return;
+    if (Hidden_Is(path)) return;       /* match the launcher's normal library view */
+    if (PoolHas(path)) return;
+    if (!DD_PathCopy(s_pool[s_poolCount], SAVER_PATH_MAX, path)) return;
+    s_poolCount++;
+}
+
+/* Mirror the launcher's recursive discovery rules: add a folder when it has a
+   default.xbe; otherwise descend, capped at the same four levels. */
+static void ScanRootInto(const char* root, int depth) {
     char            pattern[SAVER_PATH_MAX], folder[SAVER_PATH_MAX], xbe[SAVER_PATH_MAX];
     WIN32_FIND_DATA fd;
     HANDLE          h;
 
-    SvJoin(pattern, sizeof(pattern), root, "*");
+    if (!SvJoin(pattern, sizeof(pattern), root, "*")) return;
     h = FindFirstFile(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         if (s_poolCount >= SAVER_MAX_POOL) break;
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         if (fd.cFileName[0] == '.') continue;
-        SvJoin(folder, sizeof(folder), root, fd.cFileName);
-        SvJoin(xbe, sizeof(xbe), folder, "default.xbe");
+        if (!SvJoin(folder, sizeof(folder), root, fd.cFileName)) continue;
+        if (!SvJoin(xbe, sizeof(xbe), folder, "default.xbe")) continue;
         if (GetFileAttributes(xbe) != 0xFFFFFFFF) {
-            SvCopy(s_pool[s_poolCount], SAVER_PATH_MAX, xbe);
-            s_poolCount++;
+            PoolAdd(xbe);
+        }
+        else if (depth + 1 < SAVER_MAX_DEPTH) {
+            ScanRootInto(folder, depth + 1);
         }
     } while (FindNextFile(h, &fd));
     FindClose(h);
 }
 
 static void ScanConfig(const LauncherConfig* cfg) {
-    int i;
+    int i, np;
     if (!cfg || !cfg->roots) return;
     for (i = 0; i < cfg->rootCount && s_poolCount < SAVER_MAX_POOL; i++)
-        ScanRootInto(cfg->roots[i]);
+        ScanRootInto(cfg->roots[i], 0);
+    /* User-added paths are part of the category just like its built-in roots. */
+    np = Paths_Count(cfg->cacheId);
+    for (i = 0; i < np && s_poolCount < SAVER_MAX_POOL; i++)
+        ScanRootInto(Paths_Get(cfg->cacheId, i), 0);
 }
 
 static void BuildPool(void) {
+    int i, cc;
     s_poolCount = 0;
     ScanConfig(App_Config());
     ScanConfig(Games_Config());
     ScanConfig(Homebrew_Config());
     ScanConfig(Emulators_Config());
-    s_scanned = 1;
+    /* Custom categories are first-class launcher libraries too. */
+    cc = Custom_Count();
+    for (i = 0; i < cc && s_poolCount < SAVER_MAX_POOL; i++)
+        ScanConfig(Custom_Get(i));
 }
 
 /* ---- art cycling ------------------------------------------------------- */
@@ -146,7 +167,10 @@ static void PickNext(void) {
 void Saver_Enter(void) {
     s_enterMs = GetTickCount();
     s_rng ^= (s_enterMs | 1u);
-    if (!s_scanned) BuildPool();
+    /* Rebuild on each activation. Screensaver entry is infrequent, and this
+       means FTP additions/path changes made during the session show up without
+       requiring a dashboard restart. */
+    BuildPool();
     s_cur = -1;
     PickNext();
 }

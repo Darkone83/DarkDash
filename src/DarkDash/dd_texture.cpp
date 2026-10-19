@@ -108,6 +108,12 @@ int Texture_LoadJPEG(const char* path, Texture* out) {
     return LoadImageFile(path, out);
 }
 
+int Texture_LoadRGBA(const unsigned char* rgba, int w, int h, Texture* out) {
+    if (out) { out->tex = NULL; out->w = out->h = out->pw = out->ph = 0; }
+    if (!rgba || !out || w <= 0 || h <= 0) return 0;
+    return UploadRGBA(rgba, (unsigned)w, (unsigned)h, out);
+}
+
 /* ---- XPR0 (.xbx) texture loader ----------------------------------------
    Parses an XPR0 container (TitleImage.xbx / SaveImage.xbx), decodes the first
    texture resource into BGRA, and uploads it swizzled like Texture_LoadPNG.

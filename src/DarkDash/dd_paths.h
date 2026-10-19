@@ -17,8 +17,10 @@
 extern "C" {
 #endif
 
-#define DDPATHS_PER_CAT   4     /* max custom paths per category */
-#define DDPATHS_PATH_MAX  120   /* max chars per path            */
+#include "dd_path.h"
+
+#define DDPATHS_PER_CAT   4             /* max custom paths per category */
+#define DDPATHS_PATH_MAX  DD_PATH_MAX   /* shared DarkDash path capacity */
 
     void Paths_Load(void);          /* load from disk (call once at boot) */
     int  Paths_Save(void);          /* persist to disk; 1 ok, 0 fail      */

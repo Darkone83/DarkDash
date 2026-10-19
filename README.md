@@ -14,6 +14,8 @@
 
 A lightweight, native dashboard for the original Xbox.
 
+**Current release: 0.1.7**
+
 DarkDash is a clean, themeable replacement dashboard for the OG Xbox. It boots
 fast, stays out of your way, and lets you launch your games, apps, emulators,
 and homebrew from one place. It is built natively (no script engine sitting on
@@ -45,11 +47,22 @@ footprint, leaving plenty of headroom on a stock console.
   and a scrolling description. Games without a pack simply don't show the prompt.
 - **Recently launched** — press **Y** on the main menu for a quick list of the
   last few titles you launched, and jump straight back into one.
+- **Jukebox** — press **L3** on the main menu to browse and play MP3 music,
+  including tracks in nested folders. Choose a music-library root, create and
+  manage playlists, add tracks or folders, shuffle playback, and skip between
+  songs. ID3 metadata and embedded cover art appear when available. The
+  Jukebox uses DarkDash's existing audio engine and saves its preferences.
 - **Save Manager** — browse your game saves by title, see the cover art, and
   copy, move, or delete a game's saves — including to and from memory units.
 - **Built-in file manager** — copy, move, rename, and delete files across your
-  hard drive and memory units, with a simple two-pane layout. Large copies and
+  hard drives and memory units, with a simple two-pane layout. Large copies and
   moves run in the background with a progress bar and can be cancelled.
+- **Dual-HDD support** — when CerBIOS is configured for two hard drives,
+  accessible secondary-drive partitions are available in the file manager,
+  launcher folder picker, game scan paths, and FTP. Common secondary partitions
+  use `N:` (HDD1 E), `O:` (HDD1 F), `P:` (HDD1 G), and `R:` (HDD1 C).
+  Missing or inaccessible secondary partitions are skipped; single-drive
+  installations continue using their normal drive letters.
 - **Insert and play** — pop in a game disc and a prompt appears in the top-right
   corner. Press **START** to play it. The disc also shows up in the file manager
   as a drive, so you can browse it like any other.
@@ -59,18 +72,22 @@ footprint, leaving plenty of headroom on a stock console.
   showpiece of your cover art across the screen with a rainbow light beam. Any
   button press brings you straight back. Set the timeout (or turn it off) in
   **Settings → Video**.
-- **Main-menu effects** — optional eye-candy for the hero pedestal and the menu
-  frame, like a music-reactive plasma orb and short energy arcs that crawl along
-  the frame border. All off by default; switch them on in **Settings → Video →
-  Effects**.
+- **Visual effects** — optional music-reactive plasma, frame arcs, scanlines,
+  selection effects, and idle motion, plus theme-aware ambient lighting,
+  reflections, depth, and softer alpha-shaped shadows across the interface.
+  In **Settings → Video → Effects**, adjust Lighting, Shadows, Reflections,
+  Atmosphere, and Parallax independently from 0–200%, or use **Reset Visuals**
+  to restore the recommended strengths. These settings scale each theme's
+  appearance without replacing its colors and artwork.
 - **Sound** — DarkDash has background music and menu sound effects. Pick your
   own music track — or choose **None** for silence, or **Shuffle** to play a
   random track and roll to another each time one finishes — and set the volume
   in **Settings → Audio**.
-- **Themes** — DarkDash is fully reskinnable. Swap colors, the glow, the
-  background, the on-screen artwork, and the menu icons with drop-in theme
-  folders. A theme can override as much or as little as it likes — anything it
-  doesn't include falls back to the default look.
+- **Themes** — DarkDash is fully reskinnable. Swap colors, backgrounds, menu
+  icons, panel artwork, and material and lighting styles with drop-in theme
+  folders. Themes support liquid, hologram, and metal 3D-stage lighting profiles
+  and authored interface frames, with sensible fallbacks for optional assets.
+  The existing music-reactive plasma behavior is preserved.
 - **Custom fonts** — replace the built-in font with your own. Tall or chunky
   fonts are scaled to fit the on-screen panels automatically, so a custom font
   won't spill out of the menus.
@@ -80,13 +97,16 @@ footprint, leaving plenty of headroom on a stock console.
 - **Network** — DHCP works out of the box. If you need it, set a static IP, or
   keep DHCP with your own DNS servers, in **Settings → Network**.
 - **FTP** — turn on the built-in FTP server to move files to and from your Xbox
-  over the network.
+  over the network. A dedicated transfer worker and buffered uploads help keep
+  transfers independent of the TV interface. HDD1 uses the same `N:`, `O:`,
+  `P:`, and `R:` letters as the file manager; older `/HDD1-*` FTP paths are
+  still accepted.
 - **Accessories** — DarkDash can control DarkoneCustoms hardware add-ons from
   **Settings → Accessories**: a front-panel LCD (which can show the current
   track while Shuffle is playing), the Type-D info module, and the
   XBOX-RGB and OXFP lighting controllers. Connected devices are selectable; the
-  rest stay greyed out until they're found. **NEW** Added support for the X-View
-  USB display.
+  rest stay greyed out until they're found. X-View USB color-display support
+  is also available, along with Type-D / Type-D XL game-cover display support.
 - **Fan control** — let the console manage the fan automatically, or set a
   manual fan speed, in **Settings → Fan**.
 - **Self-updating** — check for and install updates right from the Settings
@@ -103,6 +123,7 @@ footprint, leaving plenty of headroom on a stock console.
 | **A** | Select / open a section |
 | **B** | Back |
 | **Y** | Open the recently-launched list |
+| **L3** | Open the Jukebox |
 | **WHITE** (tap) | Open the power menu |
 | **START** | Launch an inserted game disc |
 
@@ -141,6 +162,13 @@ footprint, leaving plenty of headroom on a stock console.
 | **A** | Open actions (copy / move / delete this game's saves) |
 | **B** | Exit |
 
+### Jukebox
+
+Browse MP3 folders and playlists using the on-screen button hints. The
+Jukebox supports playback controls, shuffle, playlist editing, and a
+configurable music root; the available actions vary between its browser,
+playlist, and Now Playing views.
+
 ## Installing
 
 1. Copy the DarkDash folder to your Xbox (for example over FTP or with a USB
@@ -164,9 +192,21 @@ DarkDash ships with a default look, but you can fully reskin it and swap the
 font. Both are drop-in: build a theme folder or a font file, copy it to your
 Xbox, and pick it in **Settings**.
 
-The `tools` folder has two small desktop apps to help you make these — see the
-README in that folder for how to use them, including the exact artwork sizes a
-theme needs.
+The `tools` folder includes **Theme Studio**, a PySide6 desktop app for
+editing and building themes, previewing artwork, managing the named image
+slots, and setting colors and 3D lighting. It can open existing theme folders
+without discarding unrelated settings. The **Font Maker** creates `.ddf`
+fonts from TTF/OTF files. See `tools/README.md` for dependencies and guides.
+
+## Resource packs and launcher artwork
+
+DarkDash supports game artwork supplied by XBMC4Gamers-style `_resources`
+folders. The launcher prioritizes existing cover/case resources and can show
+`_resources\artwork\fanart-blur.jpg` (or `fanart.jpg`) as a subdued
+background behind the title list. Backgrounds crossfade when changing titles;
+when fanart is absent, the selected DarkDash theme background remains in use.
+
+Game discovery and launch behavior do not depend on fanart or a resource pack.
 
 ## Updating
 
@@ -180,6 +220,12 @@ When you insert a disc, DarkDash mounts it to a separate drive letter so the
 dashboard keeps working normally, and shows a "press START to play" prompt if
 it's an Xbox game. It also appears in the file manager as a drive (labelled
 **D:**) so you can browse it. It does not auto-launch — you stay in control.
+
+## Release notes
+
+See the project changelog for changes introduced in **0.1.7**, including
+Jukebox, dual-HDD, launcher fanart, FTP updates, adjustable effects, and
+theme tooling.
 
 ## Credits
 

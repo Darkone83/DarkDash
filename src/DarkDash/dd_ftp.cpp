@@ -1,9 +1,10 @@
 // FtpServ.cpp
 // XbDiag FTP server — split from FileExplorer.cpp.
 //
-// All sockets non-blocking (FIONBIO), polled once per frame via FtpServ_Tick().
-// FileExplorer calls FtpServ_Start/Stop/Tick/DrawWidget and reads g_ftp.state
-// for the status widget.
+// Nonblocking XbDiag FTP engine; optionally pumped by a dedicated normal-priority
+// Xbox worker so the data transfer no longer waits on D3D Present / frame pacing.
+// The main thread exclusively owns worker start/stop; the worker exclusively owns
+// sockets and file handles. Network restart synchronously joins the worker.
 //
 // Credentials : xbox / xbox   Port: 21   Mode: passive (PASV) only
 // Commands    : USER PASS SYST TYPE PWD CWD CDUP LIST RETR STOR PASV QUIT
@@ -13,7 +14,9 @@
 
 #include "dd_ftp.h"
 #include "input.h"        /* IsMUPresent */
-#include "dd_fileops.h"   /* Mu_Letter */
+#include "dd_fileops.h"
+#include "dd_storage.h"
+#include "dd_path.h"      /* shared path capacity */
 #include "dd_data.h"      /* port + credentials */
 #include "dd_net.h"       /* Net_Ip / Net_IsUp (deferred start) */
 #include <xtl.h>
@@ -55,12 +58,43 @@ static void IntToStr(int v, char* buf, int bufLen) {
 /* control port + credentials come from dd_data (Data_Get()) */
 #define FTP_DATA_PORT_BASE   2024
 #define FTP_DATA_PORT_COUNT  32
-#define FTP_MAX_PATH         256    // max path length used in FTP operations
+#define FTP_MAX_PATH         DD_PATH_MAX    // max path length used in FTP operations
 #define FTP_IDLE_TIMEOUT_MS  300000UL  // drop an idle control connection after 5 min
 
-// ============================================================================
-// Internal string helpers
-// ============================================================================
+/* Upload buffering: 1=coalesce small TCP segments across service ticks,
+   0=immediate FATX writes. Neither changes the TCP socket options. */
+#ifndef DD_FTP_BATCHED_STOR
+#define DD_FTP_BATCHED_STOR 1
+#endif
+
+   /* Experimental PrometheOS-inspired scheduling. 0 restores the original
+      frame-polled FTP engine. No FTP command or path handling changes. */
+#ifndef DD_FTP_WORKER_THREAD
+#define DD_FTP_WORKER_THREAD 1
+#endif
+
+      /* The original batched patch used 64 KiB. PrometheOS uses 128 KiB disk
+         batches; switch to 65536 for the earlier batch size. */
+#ifndef DD_FTP_STOR_BLOCK_BYTES
+#define DD_FTP_STOR_BLOCK_BYTES (128 * 1024)
+#endif
+
+         /* Incremental FATX reservation inspired by XBMC4Gamers. 0 keeps the working
+            threaded/128 KiB upload engine with no changes to file allocation. */
+#ifndef DD_FTP_PREALLOC_STOR
+#define DD_FTP_PREALLOC_STOR 1
+#endif
+#define DD_FTP_PREALLOC_STEP_BYTES (2UL * 1024UL * 1024UL)
+
+            /* PrometheOS requests a 4 MiB system file cache. OFF by default: it changes
+               cache policy process-wide, so benchmark the worker independently first. */
+#ifndef DD_FTP_USE_FILE_CACHE
+#define DD_FTP_USE_FILE_CACHE 0
+#endif
+
+               // ============================================================================
+               // Internal string helpers
+               // ============================================================================
 
 void FtpServ_AppendStr(char* out, int outLen, const char* src)
 {
@@ -98,6 +132,141 @@ FtpCtx g_ftp;
 static int  s_nextDataPort = 0;
 static char s_ipStr[20];
 static bool s_ipOK = false;
+
+/* Only the FTP service worker touches this memory; no producer/consumer
+   races or per-frame partial-block flushes. Exactly one session is active. */
+static char s_storBuf[DD_FTP_STOR_BLOCK_BYTES];
+static int  s_storBuffered = 0;
+
+/* Preallocation is transfer-local. Only the FTP worker touches these fields;
+   committed progress remains g_ftp.xferDone (never the reserved EOF). */
+#if DD_FTP_PREALLOC_STOR
+static DWORD s_storInitialEnd = 0;
+static DWORD s_storReservedEnd = 0;
+static bool  s_storHasReservation = false;
+static bool  s_storReserveDisabled = false;
+
+static void FtpStorResetAllocation()
+{
+    s_storInitialEnd = 0;
+    s_storReservedEnd = 0;
+    s_storHasReservation = false;
+    s_storReserveDisabled = false;
+}
+
+/* Passing a high part avoids treating positions above 2 GiB as negative.
+   SetLastError is needed because 0xffffffff is a valid final byte offset. */
+static bool FtpStorSeekAbsolute(HANDLE file, DWORD position)
+{
+    LONG highPart = 0;
+    SetLastError(NO_ERROR);
+    DWORD result = SetFilePointer(file, (LONG)position, &highPart, FILE_BEGIN);
+    return highPart == 0 &&
+        (result != 0xffffffffUL || GetLastError() == NO_ERROR);
+}
+
+static void FtpStorBeginAllocation(HANDLE file)
+{
+    FtpStorResetAllocation();
+    DWORD highPart = 0;
+    DWORD lowPart = GetFileSize(file, &highPart);
+    if (highPart != 0) { s_storReserveDisabled = true; return; }
+    s_storInitialEnd = lowPart;
+    s_storReservedEnd = lowPart;
+}
+
+/* Reserve enough to cover the next write, rounded to 2 MiB. A reservation
+   failure is only an optimization failure: restore the write pointer and
+   continue with ordinary FATX extension. Do not change the TCP behavior. */
+static bool FtpStorReserveForWrite(DWORD bytes)
+{
+    if (s_storReserveDisabled || bytes == 0) return true;
+    const unsigned __int64 required =
+        (unsigned __int64)g_ftp.xferDone + (unsigned __int64)bytes;
+    if (required > (unsigned __int64)0xffffffffUL) return false; // FATX single-file limit
+    if (required <= s_storReservedEnd) return true;
+
+    unsigned __int64 rounded =
+        ((required + DD_FTP_PREALLOC_STEP_BYTES - 1) /
+            DD_FTP_PREALLOC_STEP_BYTES) * DD_FTP_PREALLOC_STEP_BYTES;
+    if (rounded > (unsigned __int64)0xffffffffUL) rounded = (unsigned __int64)0xffffffffUL;
+
+    const DWORD committedPos = g_ftp.xferDone;
+    if (!FtpStorSeekAbsolute(g_ftp.xferFile, (DWORD)rounded))
+    {
+        s_storReserveDisabled = true;
+        return FtpStorSeekAbsolute(g_ftp.xferFile, committedPos);
+    }
+    bool reserved = SetEndOfFile(g_ftp.xferFile) != 0;
+    /* Track successful reservation *before* seeking back, so an unlikely
+       seek-back failure still triggers abort-time EOF restoration. */
+    if (reserved)
+    {
+        s_storReservedEnd = (DWORD)rounded;
+        s_storHasReservation = true;
+    }
+    if (!FtpStorSeekAbsolute(g_ftp.xferFile, committedPos)) return false;
+    if (!reserved) s_storReserveDisabled = true;
+    return true;
+}
+#endif
+
+/* Shared by clean EOF, ABOR, socket disconnect, QUIT and network restart.
+   On interruption, preserve at least the file's original size, so a resumed
+   upload does not accidentally destroy an existing suffix. On success,
+   truncate to exactly the committed upload length (never the reserved EOF).
+   Buffered but uncommitted network data are deliberately discarded on abort. */
+static bool FtpStorCloseFile(bool success)
+{
+    bool ok = true;
+    s_storBuffered = 0;
+    if (g_ftp.xferFile != INVALID_HANDLE_VALUE)
+    {
+#if DD_FTP_PREALLOC_STOR
+        if (g_ftp.xferType == XFER_STOR && s_storHasReservation)
+        {
+            DWORD finalLength = g_ftp.xferDone;
+            if (!success && finalLength < s_storInitialEnd)
+                finalLength = s_storInitialEnd;
+            if (!FtpStorSeekAbsolute(g_ftp.xferFile, finalLength) ||
+                !SetEndOfFile(g_ftp.xferFile))
+                ok = false;
+        }
+#endif
+        if (success && g_ftp.xferType == XFER_STOR &&
+            !FlushFileBuffers(g_ftp.xferFile)) ok = false;
+        if (!CloseHandle(g_ftp.xferFile)) ok = false;
+        g_ftp.xferFile = INVALID_HANDLE_VALUE;
+    }
+#if DD_FTP_PREALLOC_STOR
+    FtpStorResetAllocation();
+#endif
+    return ok;
+}
+
+#if DD_FTP_BATCHED_STOR
+/* Advance progress only after writes succeed, handling partial writes.
+   A 128 KiB staged block is one disk transaction in the normal case. */
+static bool FtpStorCommitBuffered()
+{
+    DWORD done = 0;
+    const DWORD total = (DWORD)s_storBuffered;
+#if DD_FTP_PREALLOC_STOR
+    if (!FtpStorReserveForWrite(total)) return false;
+#endif
+    while (done < total)
+    {
+        DWORD written = 0;
+        if (!WriteFile(g_ftp.xferFile, s_storBuf + done, total - done,
+            &written, NULL) || written == 0)
+            return false;
+        done += written;
+        g_ftp.xferDone += written;
+    }
+    s_storBuffered = 0;
+    return true;
+}
+#endif
 
 // ============================================================================
 // FTP helpers
@@ -316,12 +485,9 @@ void FtpServ_Start(const char* ipStr, bool ipOK)
 }
 
 // Stop FTP server — close all sockets
-void FtpServ_Stop()
+static void FtpServ_StopEngine()
 {
-    if (g_ftp.xferFile != INVALID_HANDLE_VALUE)
-    {
-        CloseHandle(g_ftp.xferFile); g_ftp.xferFile = INVALID_HANDLE_VALUE;
-    }
+    FtpStorCloseFile(false);
     if (g_ftp.dataSock != INVALID_SOCKET) { closesocket(g_ftp.dataSock);   g_ftp.dataSock = INVALID_SOCKET; }
     if (g_ftp.dataListen != INVALID_SOCKET) { closesocket(g_ftp.dataListen); g_ftp.dataListen = INVALID_SOCKET; }
     if (g_ftp.ctrlSock != INVALID_SOCKET) { closesocket(g_ftp.ctrlSock);   g_ftp.ctrlSock = INVALID_SOCKET; }
@@ -336,10 +502,13 @@ void FtpServ_Stop()
 // - Rejects components containing Windows-illegal chars (* ? " < > |).
 // - Accepts ANY other name: _folder, .hidden, __temp, F:, etc.
 // - Result always starts with '/' and has no trailing '/'.
-static void CleanVirtualPath(const char* virtualPath, char* out, int outLen)
+static int CleanVirtualPath(const char* virtualPath, char* out, int outLen)
 {
     int  oi = 0;
     const char* p = virtualPath;
+
+    if (!out || outLen < 2) return 0;
+    out[0] = '\0';
 
     while (*p)
     {
@@ -347,11 +516,15 @@ static void CleanVirtualPath(const char* virtualPath, char* out, int outLen)
         while (*p == '/' || *p == '\\') p++;
         if (!*p) break;
 
-        // Extract next component
+        // Extract next component. Refuse an overlong component rather than
+        // silently converting it into a different path.
         char tok[FTP_MAX_PATH];
         int  ti = 0;
-        while (*p && *p != '/' && *p != '\\' && ti < (int)sizeof(tok) - 1)
+        while (*p && *p != '/' && *p != '\\')
+        {
+            if (ti >= (int)sizeof(tok) - 1) return 0;
             tok[ti++] = *p++;
+        }
         tok[ti] = '\0';
 
         if (tok[0] == '\0')
@@ -372,94 +545,119 @@ static void CleanVirtualPath(const char* virtualPath, char* out, int outLen)
         }
 
         // Reject Windows-illegal chars (colon is allowed: needed for "F:")
-        bool bad = false;
         for (int i = 0; tok[i]; i++)
         {
             char c = tok[i];
             if (c == '*' || c == '?' || c == '"' ||
                 c == '<' || c == '>' || c == '|')
-            {
-                bad = true; break;
-            }
+                return 0;
         }
-        if (bad) continue;
 
-        // Append /component
-        if (oi < outLen - 1) out[oi++] = '/';
-        for (int i = 0; tok[i] && oi < outLen - 1; i++)
-            out[oi++] = tok[i];
+        // Append /component exactly; never truncate.
+        if (oi + 1 + ti >= outLen) return 0;
+        out[oi++] = '/';
+        for (int i = 0; tok[i]; i++) out[oi++] = tok[i];
     }
 
-    if (oi == 0) { out[0] = '/'; out[1] = '\0'; return; }
+    if (oi == 0) { out[0] = '/'; out[1] = '\0'; return 1; }
     out[oi] = '\0';
+    return 1;
 }
 
 
-static void ResolveRelative(const char* cwd, const char* arg, char* out, int outLen)
+static int ResolveRelative(const char* cwd, const char* arg, char* out, int outLen)
 {
     if (arg[0] != '/') {
-        // relative — join with backslash then clean
+        // Max accepted cwd + separator + arg fits exactly in this scratch buffer.
         char tmp[FTP_MAX_PATH * 2];
+        int need = DD_PathLen(cwd) + 1 + DD_PathLen(arg);
+        if (need >= (int)sizeof(tmp)) return 0;
         StrCopy(tmp, sizeof(tmp), cwd);
         FtpServ_AppendStr(tmp, sizeof(tmp), "\\");
         FtpServ_AppendStr(tmp, sizeof(tmp), arg);
-        CleanVirtualPath(tmp, out, outLen);
+        return CleanVirtualPath(tmp, out, outLen);
     }
-    else {
-        // absolute virtual path — clean as-is
-        CleanVirtualPath(arg, out, outLen);
-    }
+    // absolute virtual path — clean as-is
+    return CleanVirtualPath(arg, out, outLen);
 }
 
 // Port of PrometheOS mapFtpPath (simplified for bare drive-letter virtual paths).
-// "/F:/Apps/Type D" -> "F:\Apps\Type D"
+// "/F:/Apps/Type D" -> "F:\\Apps\\Type D"
 // "/" -> "/"  (virtual root — caller must check)
-static void MapFtpPath(const char* virt, char* out, int outLen)
+static int MapFtpPath(const char* virt, char* out, int outLen)
 {
     const char* a = (virt[0] == '/') ? virt + 1 : virt;
+    int alen = DD_PathLen(a);
+
+    if (!out || outLen <= 0) return 0;
+    out[0] = '\0';
+
+    // CerBIOS secondary disks are exposed as HDD1-E/HDD1-F/etc. Keep
+    // the legacy /N: path working too, but advertise unambiguous names.
+    {
+        int vi;
+        for (vi = 0; vi < DD_Storage_Count(); vi++) {
+            const DD_StorageVolume* v = DD_Storage_At(vi);
+            const char* alias = DD_Storage_FtpName(v);
+            int n = 0, k = 0;
+            if (!alias || !DD_Storage_Ready(v)) continue;
+            while (alias[n] && a[n] &&
+                ((alias[n] >= 'A' && alias[n] <= 'Z' ? alias[n] + 32 : alias[n]) ==
+                    (a[n] >= 'A' && a[n] <= 'Z' ? a[n] + 32 : a[n]))) ++n;
+            if (alias[n] || (a[n] && a[n] != '/' && a[n] != '\\')) continue;
+            if (3 + DD_PathLen(a + n) >= outLen) return 0;
+            out[k++] = v->letter; out[k++] = ':'; out[k++] = '\\';
+            if (a[n] == '/' || a[n] == '\\') ++n;
+            while (a[n]) { out[k++] = (a[n] == '/') ? '\\' : a[n]; ++n; }
+            out[k] = 0;
+            return 1;
+        }
+    }
 
     // Translate MU friendly names (P1-MMU1 etc.) to their drive letters.
-    // Format: P<port+1>-MMU<slot+1>  where port 0-3, slot 0=MMU1 1=MMU2
-    // Maps to letters A-H (port*2+slot).
     if ((a[0] == 'P') && (a[1] >= '1' && a[1] <= '4') && a[2] == '-' &&
         a[3] == 'M' && a[4] == 'M' && a[5] == 'U' && (a[6] == '1' || a[6] == '2'))
     {
-        int port = a[1] - '1';          // 0-3
-        int slot = a[6] - '1';          // 0-1
+        int port = a[1] - '1';
+        int slot = a[6] - '1';
         char letter = Mu_Letter(port, slot);
-        // Remaining path after the label (e.g. "/subdir" or "")
-        const char* rest = a + 7;       // skip "P1-MMU1"
-        out[0] = letter; out[1] = ':'; out[2] = '\\'; out[3] = '\0';
+        const char* rest = a + 7;
+        int restLen;
         if (*rest == '/' || *rest == '\\') ++rest;
+        restLen = DD_PathLen(rest);
+        if (3 + restLen >= outLen) return 0;
+        out[0] = letter; out[1] = ':'; out[2] = '\\'; out[3] = '\0';
         if (*rest)
         {
             int i = 3;
-            while (*rest && i < outLen - 1)
+            while (*rest)
             {
                 out[i++] = (*rest == '/') ? '\\' : *rest;
                 ++rest;
             }
             out[i] = '\0';
         }
-        return;
+        return 1;
     }
 
-    StrCopy(out, outLen, a);
+    // Non-MU mapping is length preserving except "F:" -> "F:\\".
+    if (alen >= outLen) return 0;
+    if (!DD_PathCopy(out, outLen, a)) return 0;
     for (int i = 0; out[i]; i++) if (out[i] == '/') out[i] = '\\';
-    // "F:" (drive root) -> "F:\"
-    int len = 0; while (out[len]) len++;
-    if (len == 2 && out[1] == ':')
+    if (alen == 2 && out[1] == ':')
     {
+        if (3 >= outLen) { out[0] = '\0'; return 0; }
         out[2] = '\\'; out[3] = '\0';
     }
+    return 1;
 }
 
 // Convenience: resolve arg against cwd then map to real Windows path.
-static void FtpResolvePath(const char* arg, char* out, int outLen)
+static int FtpResolvePath(const char* arg, char* out, int outLen)
 {
     char virt[FTP_MAX_PATH];
-    ResolveRelative(g_ftp.cwd, arg, virt, sizeof(virt));
-    MapFtpPath(virt, out, outLen);
+    if (!ResolveRelative(g_ftp.cwd, arg, virt, sizeof(virt))) return 0;
+    return MapFtpPath(virt, out, outLen);
 }
 // Execute a pending LIST — enumerate and send directly to dataSock, reply 226.
 // Build listing into listBuf then start async drain via XFER_LIST.
@@ -471,17 +669,17 @@ static void FtpDoListing()
 
     if (g_ftp.listVirtualRoot)
     {
-        const char* driveLetters[] = { "C", "D", "E", "F", "G", "X", "Y", "Z", NULL };
-        for (int di = 0; driveLetters[di]; ++di)
+        // D: is the dashboard installation volume, retained for legacy FTP.
+        if (GetFileAttributesA("D:\\") != 0xFFFFFFFFUL)
+            FtpAppendListLine("D:", true, 0);
+        for (int di = 0; di < DD_Storage_Count(); ++di)
         {
-            char pat[8];
-            pat[0] = driveLetters[di][0]; pat[1] = ':'; pat[2] = '\\'; pat[3] = '\0';
-            DWORD attr = GetFileAttributesA(pat);
-            if (attr != 0xFFFFFFFF && (attr & FILE_ATTRIBUTE_DIRECTORY))
-            {
-                char driveName[4] = { driveLetters[di][0], ':', '\0' };
-                FtpAppendListLine(driveName, true, 0);
-            }
+            const DD_StorageVolume* v = DD_Storage_At(di);
+            if (!DD_Storage_Ready(v)) continue;
+            // Display the same DOS drive letters as the file manager.
+            // MapFtpPath continues accepting saved HDD1-E/F/G/C aliases.
+            char driveName[3] = { v->letter, ':', 0 };
+            FtpAppendListLine(driveName, true, 0);
         }
         // Memory Units
         for (int mu = 0; mu < 8; ++mu)
@@ -532,11 +730,8 @@ static void FtpDoListing()
 // Recursively delete a directory and all its contents
 static bool FtpDeleteDir(const char* path)
 {
-    char pat[FTP_MAX_PATH + 4];
-    StrCopy(pat, sizeof(pat), path);
-    int pl = 0; while (pat[pl]) pl++;
-    if (pl > 0 && pat[pl - 1] != '\\') { pat[pl] = '\\'; pat[pl + 1] = '\0'; pl++; }
-    pat[pl] = '*'; pat[pl + 1] = '\0';
+    char pat[DD_PATH_PATTERN_MAX];
+    if (!DD_PathJoin(pat, sizeof(pat), path, "*")) return false;
 
     WIN32_FIND_DATA fd;
     HANDLE h = FindFirstFile(pat, &fd);
@@ -547,10 +742,10 @@ static bool FtpDeleteDir(const char* path)
 
             // Build full child path
             char child[FTP_MAX_PATH];
-            StrCopy(child, sizeof(child), path);
-            int cl = 0; while (child[cl]) cl++;
-            if (cl > 0 && child[cl - 1] != '\\') { child[cl] = '\\'; child[cl + 1] = '\0'; }
-            FtpServ_AppendStr(child, sizeof(child), fd.cFileName);
+            if (!DD_PathJoin(child, sizeof(child), path, fd.cFileName)) {
+                FindClose(h);
+                return false;
+            }
 
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
             {
@@ -571,11 +766,20 @@ static void FtpHandleCommand(char* cmd)
 {
     // Split verb and argument
     char verb[16] = {};
-    char arg[FTP_MAX_PATH] = {};
+    char arg[1024] = {};
     int i = 0;
     while (cmd[i] && cmd[i] != ' ' && i < 15) { verb[i] = cmd[i]; i++; }
     verb[i] = '\0';
-    if (cmd[i] == ' ') { i++; StrCopy(arg, sizeof(arg), cmd + i); }
+    if (cmd[i] == ' ') {
+        int ai = 0;
+        i++;
+        while (cmd[i + ai]) {
+            if (ai >= (int)sizeof(arg) - 1) { FtpReply(501, "Argument too long."); return; }
+            arg[ai] = cmd[i + ai];
+            ai++;
+        }
+        arg[ai] = '\0';
+    }
 
     // Strip surrounding quotes — some clients quote paths containing spaces
     // e.g. CWD "F:\Apps\Type D"
@@ -651,7 +855,9 @@ static void FtpHandleCommand(char* cmd)
         const char* param = isCdup ? ".." : arg;
 
         char newVirtual[FTP_MAX_PATH];
-        ResolveRelative(g_ftp.cwd, param, newVirtual, sizeof(newVirtual));
+        if (!ResolveRelative(g_ftp.cwd, param, newVirtual, sizeof(newVirtual))) {
+            FtpReply(553, "Path too long or invalid."); return;
+        }
 
         bool isFolder = false;
 
@@ -663,7 +869,9 @@ static void FtpHandleCommand(char* cmd)
         else
         {
             char ftpPath[FTP_MAX_PATH];
-            MapFtpPath(newVirtual, ftpPath, sizeof(ftpPath));
+            if (!MapFtpPath(newVirtual, ftpPath, sizeof(ftpPath))) {
+                FtpReply(553, "Path too long or invalid."); return;
+            }
 
             // Case 2: drive root — ftpPath is "F:" or "F:\"
             int fplen = 0; while (ftpPath[fplen]) fplen++;
@@ -736,9 +944,17 @@ static void FtpHandleCommand(char* cmd)
         if (!listVirtualRoot)
         {
             if (listArg[0] != '\0')
-                FtpResolvePath(listArg, listDir, sizeof(listDir));
+            {
+                if (!FtpResolvePath(listArg, listDir, sizeof(listDir))) {
+                    FtpReply(553, "Path too long or invalid."); return;
+                }
+            }
             else
-                MapFtpPath(g_ftp.cwd, listDir, sizeof(listDir));
+            {
+                if (!MapFtpPath(g_ftp.cwd, listDir, sizeof(listDir))) {
+                    FtpReply(553, "Path too long or invalid."); return;
+                }
+            }
         }
 
         // Store as pending then dispatch immediately if dataSock is already
@@ -759,7 +975,9 @@ static void FtpHandleCommand(char* cmd)
         }
 
         char fullPath[FTP_MAX_PATH];
-        FtpResolvePath(arg, fullPath, sizeof(fullPath));
+        if (!FtpResolvePath(arg, fullPath, sizeof(fullPath))) {
+            FtpReply(553, "Path too long or invalid."); return;
+        }
 
         HANDLE hf = CreateFile(fullPath, GENERIC_READ, FILE_SHARE_READ,
             NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -807,7 +1025,9 @@ static void FtpHandleCommand(char* cmd)
         }
 
         char fullPath[FTP_MAX_PATH];
-        FtpResolvePath(arg, fullPath, sizeof(fullPath));
+        if (!FtpResolvePath(arg, fullPath, sizeof(fullPath))) {
+            FtpReply(553, "Path too long or invalid."); return;
+        }
 
         // ALLO pre-check: if the client declared a size and the target volume
         // can't hold it, refuse now rather than filling the disk and failing
@@ -836,7 +1056,17 @@ static void FtpHandleCommand(char* cmd)
             hf = CreateFile(fullPath, GENERIC_WRITE, 0,
                 NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
             if (hf != INVALID_HANDLE_VALUE)
+            {
+#if DD_FTP_PREALLOC_STOR
+                if (!FtpStorSeekAbsolute(hf, g_ftp.restOffset))
+                {
+                    CloseHandle(hf);
+                    hf = INVALID_HANDLE_VALUE;
+                }
+#else
                 SetFilePointer(hf, (LONG)g_ftp.restOffset, NULL, FILE_BEGIN);
+#endif
+            }
         }
         else
         {
@@ -850,6 +1080,10 @@ static void FtpHandleCommand(char* cmd)
         }
 
         g_ftp.xferFile = hf;
+        s_storBuffered = 0; // reset even after abort/reconnect or REST resume
+#if DD_FTP_PREALLOC_STOR
+        FtpStorBeginAllocation(hf);
+#endif
         g_ftp.xferTotal = 0;   // unknown until complete
         g_ftp.xferDone = (g_ftp.restOffset > 0) ? g_ftp.restOffset : 0;
         g_ftp.restOffset = 0;   // consumed
@@ -869,10 +1103,7 @@ static void FtpHandleCommand(char* cmd)
     else if (verb[0] == 'Q' && verb[1] == 'U' && verb[2] == 'I' && verb[3] == 'T')
     {
         FtpReply(221, "Bye.");
-        if (g_ftp.xferFile != INVALID_HANDLE_VALUE)
-        {
-            CloseHandle(g_ftp.xferFile); g_ftp.xferFile = INVALID_HANDLE_VALUE;
-        }
+        FtpStorCloseFile(false);
         if (g_ftp.dataSock != INVALID_SOCKET) { closesocket(g_ftp.dataSock);   g_ftp.dataSock = INVALID_SOCKET; }
         if (g_ftp.dataListen != INVALID_SOCKET) { closesocket(g_ftp.dataListen); g_ftp.dataListen = INVALID_SOCKET; }
         closesocket(g_ftp.ctrlSock); g_ftp.ctrlSock = INVALID_SOCKET;
@@ -896,7 +1127,9 @@ static void FtpHandleCommand(char* cmd)
     {
         // Delete a file
         char fullPath[FTP_MAX_PATH];
-        FtpResolvePath(arg, fullPath, sizeof(fullPath));
+        if (!FtpResolvePath(arg, fullPath, sizeof(fullPath))) {
+            FtpReply(553, "Path too long or invalid."); return;
+        }
         if (DeleteFileA(fullPath))
             FtpReply(250, "File deleted.");
         else
@@ -907,9 +1140,13 @@ static void FtpHandleCommand(char* cmd)
     {
         // Create directory
         char newVirt[FTP_MAX_PATH];
-        ResolveRelative(g_ftp.cwd, arg, newVirt, sizeof(newVirt));
+        if (!ResolveRelative(g_ftp.cwd, arg, newVirt, sizeof(newVirt))) {
+            FtpReply(553, "Path too long or invalid."); return;
+        }
         char fullPath[FTP_MAX_PATH];
-        MapFtpPath(newVirt, fullPath, sizeof(fullPath));
+        if (!MapFtpPath(newVirt, fullPath, sizeof(fullPath))) {
+            FtpReply(553, "Path too long or invalid."); return;
+        }
         if (CreateDirectoryA(fullPath, NULL))
         {
             // RFC 959: 257 response quotes the virtual path
@@ -929,7 +1166,9 @@ static void FtpHandleCommand(char* cmd)
     {
         // Remove directory and all contents recursively
         char fullPath[FTP_MAX_PATH];
-        FtpResolvePath(arg, fullPath, sizeof(fullPath));
+        if (!FtpResolvePath(arg, fullPath, sizeof(fullPath))) {
+            FtpReply(553, "Path too long or invalid."); return;
+        }
         if (FtpDeleteDir(fullPath))
             FtpReply(250, "Directory removed.");
         else
@@ -939,7 +1178,10 @@ static void FtpHandleCommand(char* cmd)
     {
         // Rename from — verify source exists before storing
         char fullPath[FTP_MAX_PATH];
-        FtpResolvePath(arg, fullPath, sizeof(fullPath));
+        if (!FtpResolvePath(arg, fullPath, sizeof(fullPath))) {
+            g_ftp.gotRnfr = false;
+            FtpReply(553, "Path too long or invalid."); return;
+        }
 
         // Check as file first, then as directory
         DWORD attr = GetFileAttributesA(fullPath);
@@ -964,7 +1206,9 @@ static void FtpHandleCommand(char* cmd)
         g_ftp.gotRnfr = false;
 
         char fullPath[FTP_MAX_PATH];
-        FtpResolvePath(arg, fullPath, sizeof(fullPath));
+        if (!FtpResolvePath(arg, fullPath, sizeof(fullPath))) {
+            FtpReply(553, "Path too long or invalid."); return;
+        }
         if (MoveFileA(g_ftp.rnfrPath, fullPath))
             FtpReply(250, "Renamed.");
         else
@@ -1009,10 +1253,8 @@ static void FtpHandleCommand(char* cmd)
     else if (verb[0] == 'A' && verb[1] == 'B' && verb[2] == 'O' && verb[3] == 'R')
     {
         // Abort current transfer if any
-        if (g_ftp.xferFile != INVALID_HANDLE_VALUE)
-        {
-            CloseHandle(g_ftp.xferFile); g_ftp.xferFile = INVALID_HANDLE_VALUE;
-        }
+        s_storBuffered = 0; // queued bytes never belong to a subsequent STOR
+        FtpStorCloseFile(false);
         if (g_ftp.dataSock != INVALID_SOCKET)
         {
             closesocket(g_ftp.dataSock); g_ftp.dataSock = INVALID_SOCKET;
@@ -1031,7 +1273,9 @@ static void FtpHandleCommand(char* cmd)
     else if (verb[0] == 'S' && verb[1] == 'I' && verb[2] == 'Z' && verb[3] == 'E')
     {
         char fullPath[FTP_MAX_PATH];
-        FtpResolvePath(arg, fullPath, sizeof(fullPath));
+        if (!FtpResolvePath(arg, fullPath, sizeof(fullPath))) {
+            FtpReply(553, "Path too long or invalid."); return;
+        }
         WIN32_FILE_ATTRIBUTE_DATA fad;
         if (GetFileAttributesExA(fullPath, GetFileExInfoStandard, &fad) &&
             !(fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
@@ -1167,10 +1411,7 @@ void FtpServ_Tick()
         {
             // Hard send error on ctrl socket — treat as disconnect
             closesocket(g_ftp.ctrlSock); g_ftp.ctrlSock = INVALID_SOCKET;
-            if (g_ftp.xferFile != INVALID_HANDLE_VALUE)
-            {
-                CloseHandle(g_ftp.xferFile); g_ftp.xferFile = INVALID_HANDLE_VALUE;
-            }
+            FtpStorCloseFile(false);
             if (g_ftp.dataSock != INVALID_SOCKET) { closesocket(g_ftp.dataSock);   g_ftp.dataSock = INVALID_SOCKET; }
             if (g_ftp.dataListen != INVALID_SOCKET) { closesocket(g_ftp.dataListen); g_ftp.dataListen = INVALID_SOCKET; }
             g_ftp.authed = false; g_ftp.gotUser = false; g_ftp.gotRnfr = false;
@@ -1405,10 +1646,7 @@ void FtpServ_Tick()
     ctrl_disconnect:
         {
             // Client disconnected or hard socket error — full session teardown
-            if (g_ftp.xferFile != INVALID_HANDLE_VALUE)
-            {
-                CloseHandle(g_ftp.xferFile); g_ftp.xferFile = INVALID_HANDLE_VALUE;
-            }
+            FtpStorCloseFile(false);
             if (g_ftp.dataSock != INVALID_SOCKET) { closesocket(g_ftp.dataSock);   g_ftp.dataSock = INVALID_SOCKET; }
             if (g_ftp.dataListen != INVALID_SOCKET) { closesocket(g_ftp.dataListen); g_ftp.dataListen = INVALID_SOCKET; }
             closesocket(g_ftp.ctrlSock); g_ftp.ctrlSock = INVALID_SOCKET;
@@ -1439,7 +1677,7 @@ void FtpServ_Tick()
     // ---- Data transfer ---------------------------------------------------
     if (g_ftp.state == FTP_TRANSFER && g_ftp.dataSock != INVALID_SOCKET)
     {
-        static char ioBuf[65536];  // 64KB — matches retrBuf for symmetric up/down speed
+        // STOR uses the persistent 128 KiB staging buffer declared above.
 
         if (g_ftp.xferType == XFER_LIST)
         {
@@ -1544,39 +1782,75 @@ void FtpServ_Tick()
         }
         else if (g_ftp.xferType == XFER_STOR)
         {
-            // Time-bounded pump: keep receiving for up to 15ms per tick,
-            // same pattern as RETR, so uploads match download speed.
+            // Preserve partial blocks across service ticks; the dedicated
+            // worker can run between frames without waiting for D3D Present.
+            // The 15 ms budget is retained to keep stop/restart responsive.
             DWORD storStart = GetTickCount();
             while (GetTickCount() - storStart < 15)
             {
-                int n = recv(g_ftp.dataSock, ioBuf, sizeof(ioBuf), 0);
+#if DD_FTP_BATCHED_STOR
+                int n = recv(g_ftp.dataSock, s_storBuf + s_storBuffered,
+                    (int)sizeof(s_storBuf) - s_storBuffered, 0);
+#else
+                int n = recv(g_ftp.dataSock, s_storBuf,
+                    (int)sizeof(s_storBuf), 0);
+#endif
                 if (n > 0)
                 {
+#if DD_FTP_BATCHED_STOR
+                    s_storBuffered += n;
+                    if (s_storBuffered < (int)sizeof(s_storBuf))
+                        continue;  // accumulate into the next frame if needed
+                    if (!FtpStorCommitBuffered())
+#else
                     DWORD written = 0;
-                    if (!WriteFile(g_ftp.xferFile, ioBuf, (DWORD)n, &written, NULL) ||
+#if DD_FTP_PREALLOC_STOR
+                    bool spaceReady = FtpStorReserveForWrite((DWORD)n);
+#else
+                    bool spaceReady = true;
+#endif
+                    if (!spaceReady ||
+                        !WriteFile(g_ftp.xferFile, s_storBuf, (DWORD)n, &written, NULL) ||
                         written != (DWORD)n)
+#endif
                     {
+                        s_storBuffered = 0;
                         closesocket(g_ftp.dataSock); g_ftp.dataSock = INVALID_SOCKET;
-                        CloseHandle(g_ftp.xferFile); g_ftp.xferFile = INVALID_HANDLE_VALUE;
+                        FtpStorCloseFile(false);
                         FtpReply(452, "Write error - disk full?");
                         g_ftp.xferType = XFER_NONE;
                         g_ftp.state = FTP_CONNECTED;
                         return;
                     }
+#if !DD_FTP_BATCHED_STOR
                     g_ftp.xferDone += written;
+#endif
                     // continue draining while socket has data and time remains
                 }
                 else if (n == 0)
                 {
-                    // Client closed data connection = transfer complete
-                    FlushFileBuffers(g_ftp.xferFile);
+                    // EOF is the only time we commit the incomplete final block.
+                    // Do not report 226 until the buffered bytes are on disk.
+#if DD_FTP_BATCHED_STOR
+                    if (s_storBuffered && !FtpStorCommitBuffered())
+                    {
+                        s_storBuffered = 0;
+                        closesocket(g_ftp.dataSock); g_ftp.dataSock = INVALID_SOCKET;
+                        FtpStorCloseFile(false);
+                        FtpReply(452, "Write error - disk full?");
+                        g_ftp.xferType = XFER_NONE;
+                        g_ftp.state = FTP_CONNECTED;
+                        return;
+                    }
+#endif
+                    bool fileFinished = FtpStorCloseFile(true);
                     closesocket(g_ftp.dataSock); g_ftp.dataSock = INVALID_SOCKET;
                     if (g_ftp.dataListen != INVALID_SOCKET)
                     {
                         closesocket(g_ftp.dataListen); g_ftp.dataListen = INVALID_SOCKET;
                     }
-                    CloseHandle(g_ftp.xferFile); g_ftp.xferFile = INVALID_HANDLE_VALUE;
-                    FtpReply(226, "Transfer complete.");
+                    FtpReply(fileFinished ? 226 : 452,
+                        fileFinished ? "Transfer complete." : "File finalization failed.");
                     g_ftp.xferType = XFER_NONE;
                     g_ftp.state = FTP_CONNECTED;
                     goto stor_done;
@@ -1585,10 +1859,12 @@ void FtpServ_Tick()
                 {
                     int err = WSAGetLastError();
                     if (err == WSAEWOULDBLOCK)
-                        break;  // nothing queued, yield until next tick
-                    // Hard error — client aborted
+                        break; // leave partial block intact; retry next frame
+                    // Client aborted; discard uncommitted bytes so they cannot
+                    // leak into the next upload (REST sees the on-disk offset).
+                    s_storBuffered = 0;
                     closesocket(g_ftp.dataSock); g_ftp.dataSock = INVALID_SOCKET;
-                    CloseHandle(g_ftp.xferFile); g_ftp.xferFile = INVALID_HANDLE_VALUE;
+                    FtpStorCloseFile(false);
                     FtpReply(426, "Transfer aborted.");
                     g_ftp.xferType = XFER_NONE;
                     g_ftp.state = FTP_CONNECTED;
@@ -1601,57 +1877,197 @@ void FtpServ_Tick()
 }
 
 /* ============================================================================
-   DarkDash service wrappers. The dash is single-threaded, so the server is
-   frame-polled: Ftp_Tick() runs once per main-loop frame. These thin shims
-   keep the proven FtpServ_* engine intact while giving DarkDash a clean
-   service API and status for the Settings panel.
+   DarkDash service wrappers and opt-in FTP worker.
+
+   Important lifecycle contract: dd_net.cpp calls FtpServ_Stop() BEFORE
+   WSACleanup/XNetCleanup during Net_Restart(). We MUST join the worker before
+   closing a socket, file handle, or resetting the network stack. Only the
+   worker may invoke FtpServ_{Start,Tick,StopEngine} while threading is on.
    ============================================================================ */
 
-static int s_ftpWanted = 0;   /* 1 if the user has FTP enabled */
+static int s_ftpWanted = 0;
 
-void Ftp_Init(void) {
-    g_ftp.state = FTP_OFF;
-    s_ftpWanted = 0;
+#if DD_FTP_WORKER_THREAD
+/* The main thread creates and joins this handle; only the worker touches the
+   FTP engine. Snapshots are 32-bit, aligned and published via InterlockedExchange
+   so UI/status readers never inspect partially updated engine data. */
+static HANDLE s_workerHandle = NULL;
+static LONG s_workerStop = 0;
+static LONG s_ftpStatus = FTP_OFF;
+static LONG s_ftpDone = 0;
+static LONG s_ftpTotal = 0;
+static DWORD s_lastWorkerAttemptMs = 0;
+static char s_workerIP[20];
+
+static void FtpWorkerPublish()
+{
+    InterlockedExchange(&s_ftpDone, (LONG)g_ftp.xferDone);
+    InterlockedExchange(&s_ftpTotal, (LONG)g_ftp.xferTotal);
+    InterlockedExchange(&s_ftpStatus, (LONG)g_ftp.state);
 }
 
-/* Mark the service wanted/unwanted. Actual bind is deferred to Ftp_Tick once
-   the network has resolved (at boot DHCP isn't done yet, so we can't bind). */
-void Ftp_Want(int want) {
+static DWORD WINAPI FtpWorkerMain(LPVOID)
+{
+#if DD_FTP_USE_FILE_CACHE
+    /* Global Xbox file cache, not a private transfer buffer. Leave disabled
+       until on-hardware RAM and throughput profiling proves it useful. */
+    XSetFileCacheSize(4 * 1024 * 1024);
+#endif
+    FtpServ_Start(s_workerIP, true);
+    FtpWorkerPublish();
+    if (g_ftp.state != FTP_OFF)
+    {
+        while (InterlockedCompareExchange(&s_workerStop, 0, 0) == 0)
+        {
+            FtpServ_Tick();
+            FtpWorkerPublish();
+            /* Do not busy-spin on nonblocking WSAEWOULDBLOCK. Normal
+               priority plus Sleep gives the UI time on the single CPU. */
+            Sleep(g_ftp.state == FTP_LISTEN ? 5 : 1);
+        }
+    }
+    FtpServ_StopEngine();
+    FtpWorkerPublish();
+    return 0;
+}
+
+static void FtpWorkerStop()
+{
+    if (s_workerHandle != NULL)
+    {
+        InterlockedExchange(&s_workerStop, 1);
+        /* The worker owns ALL FTP sockets/file handles. Never tear down the
+           Xbox network stack or close sockets until it has finished. */
+        WaitForSingleObject(s_workerHandle, INFINITE);
+        CloseHandle(s_workerHandle);
+        s_workerHandle = NULL;
+    }
+    InterlockedExchange(&s_ftpStatus, FTP_OFF);
+    InterlockedExchange(&s_ftpDone, 0);
+    InterlockedExchange(&s_ftpTotal, 0);
+    s_lastWorkerAttemptMs = 0;
+}
+
+static void FtpWorkerStart(const char* ip)
+{
+    if (s_workerHandle != NULL || !ip || !*ip) return;
+    StrCopy(s_workerIP, sizeof(s_workerIP), ip);
+    InterlockedExchange(&s_workerStop, 0);
+    s_lastWorkerAttemptMs = GetTickCount();
+    s_workerHandle = CreateThread(NULL, 0, FtpWorkerMain, NULL, 0, NULL);
+    /* Normal priority by default; do not steal all CPU time from renderer.
+       On failure, Ftp_Tick retries after a bounded one-second interval. */
+}
+#endif
+
+/* Public stop entry point is also called directly by dd_net.cpp during
+   network restart. The original, synchronous behavior is preserved when the
+   threaded experiment is disabled. Keep the user's desired enabled state. */
+void FtpServ_Stop(void)
+{
+#if DD_FTP_WORKER_THREAD
+    FtpWorkerStop();
+#else
+    FtpServ_StopEngine();
+#endif
+}
+
+void Ftp_Init(void)
+{
+    g_ftp.state = FTP_OFF;
+    s_ftpWanted = 0;
+#if DD_FTP_WORKER_THREAD
+    s_workerHandle = NULL;
+    s_lastWorkerAttemptMs = 0;
+    InterlockedExchange(&s_workerStop, 0);
+    InterlockedExchange(&s_ftpStatus, FTP_OFF);
+    InterlockedExchange(&s_ftpDone, 0);
+    InterlockedExchange(&s_ftpTotal, 0);
+#endif
+}
+
+void Ftp_Want(int want)
+{
     s_ftpWanted = want ? 1 : 0;
     if (!s_ftpWanted) FtpServ_Stop();
 }
 
-void Ftp_Start(const char* ipStr, int ipOK) {
+void Ftp_Start(const char* ipStr, int ipOK)
+{
     s_ftpWanted = 1;
+#if DD_FTP_WORKER_THREAD
+    FtpServ_Stop();
+    if (ipOK) FtpWorkerStart(ipStr);
+#else
     FtpServ_Start(ipStr, ipOK != 0);
+#endif
 }
 
-void Ftp_Stop(void) {
+void Ftp_Stop(void)
+{
     s_ftpWanted = 0;
     FtpServ_Stop();
 }
 
-void Ftp_Tick(void) {
-    /* Deferred start: if wanted but not yet listening, bring it up as soon as
-       the network is ready. If the link drops while running, stop so we retry
-       cleanly when it returns. */
-    if (s_ftpWanted) {
-        if (g_ftp.state == FTP_OFF) {
-            if (Net_IsUp())
-                FtpServ_Start(Net_Ip(), 1);
-        }
+void Ftp_Tick(void)
+{
+#if DD_FTP_WORKER_THREAD
+    /* The main thread only manages lifecycle, never data sockets or files. */
+    if (s_workerHandle != NULL &&
+        WaitForSingleObject(s_workerHandle, 0) == WAIT_OBJECT_0)
+    {
+        CloseHandle(s_workerHandle);
+        s_workerHandle = NULL;
     }
+    if (!s_ftpWanted)
+    {
+        if (s_workerHandle != NULL) FtpServ_Stop();
+        return;
+    }
+    if (!Net_IsUp())
+    {
+        if (s_workerHandle != NULL) FtpServ_Stop();
+        return;
+    }
+    if (s_workerHandle == NULL)
+    {
+        DWORD now = GetTickCount();
+        if (s_lastWorkerAttemptMs == 0 ||
+            now - s_lastWorkerAttemptMs >= 1000)
+            FtpWorkerStart(Net_Ip());
+    }
+#else
+    /* Legacy frame-polled control path for exact A/B comparison. */
+    if (s_ftpWanted && g_ftp.state == FTP_OFF && Net_IsUp())
+        FtpServ_Start(Net_Ip(), true);
     if (g_ftp.state != FTP_OFF) FtpServ_Tick();
+#endif
 }
 
-int  Ftp_IsRunning(void) { return g_ftp.state != FTP_OFF; }
-int  Ftp_Wanted(void) { return s_ftpWanted; }
-
-/* 0 off, 1 listening, 2 connected, 3 transferring -- mirrors FtpState */
-int  Ftp_Status(void) { return (int)g_ftp.state; }
-
-/* transfer progress for the status panel (bytes); 0/0 when idle */
-void Ftp_Progress(unsigned long* done, unsigned long* total) {
+int Ftp_IsRunning(void)
+{
+#if DD_FTP_WORKER_THREAD
+    return InterlockedCompareExchange(&s_ftpStatus, 0, 0) != FTP_OFF;
+#else
+    return g_ftp.state != FTP_OFF;
+#endif
+}
+int Ftp_Wanted(void) { return s_ftpWanted; }
+int Ftp_Status(void)
+{
+#if DD_FTP_WORKER_THREAD
+    return (int)InterlockedCompareExchange(&s_ftpStatus, 0, 0);
+#else
+    return (int)g_ftp.state;
+#endif
+}
+void Ftp_Progress(unsigned long* done, unsigned long* total)
+{
+#if DD_FTP_WORKER_THREAD
+    if (done)  *done = (unsigned long)InterlockedCompareExchange(&s_ftpDone, 0, 0);
+    if (total) *total = (unsigned long)InterlockedCompareExchange(&s_ftpTotal, 0, 0);
+#else
     if (done)  *done = g_ftp.xferDone;
     if (total) *total = g_ftp.xferTotal;
+#endif
 }

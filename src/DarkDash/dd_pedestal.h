@@ -14,6 +14,10 @@
 void Pedestal_Draw(const Texture* art, const Texture* glow,
     DWORD ms, int ar, int ag, int ab);
 
+/* kick the short cover-art materialization pulse after a newly selected title
+   finishes decoding. Purely visual; no texture lifetime changes. */
+void Pedestal_Pulse(void);
+
 /* flat billboard quad, gently spinning, opaque -- the Settings category icon. */
 void Pedestal_DrawFlat(const Texture* icon,
     DWORD ms, int ar, int ag, int ab);

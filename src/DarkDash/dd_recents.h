@@ -22,6 +22,7 @@ extern "C" {
 #define RECENTS_PATH_MAX 272
 
     void        Recents_Init(void);                              /* load at boot */
+    int         Recents_PruneMissing(void);                      /* drop dead XBE paths; returns removed count */
     void        Recents_Add(const char* label, const char* xbePath);
     int         Recents_Count(void);
     const char* Recents_Name(int i);                             /* friendly label */

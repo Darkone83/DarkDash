@@ -67,6 +67,21 @@ typedef struct {
     float u, v;
 } FontIsoVert;
 
+/*    Atlas quality helpers                                                     */
+
+/* The existing DDF1 encoder writes straight-alpha white glyphs on transparent
+   black. When LINEAR filtering samples between an opaque white glyph and a
+   zero-alpha black neighbour, interpolated RGB darkens the antialiased edge.
+   Make only fully transparent RGB white (alpha stays zero). The DDF file and
+   its on-disk metrics stay unchanged; this runs on the loaded pixel buffer. */
+static void Font_FixTransparentRGB(unsigned char* pixels, DWORD nPixels) {
+    DWORD i;
+    for (i = 0; i < nPixels; ++i) {
+        unsigned char* p = pixels + (size_t)i * 4u;
+        if (p[3] == 0) p[0] = p[1] = p[2] = 255;
+    }
+}
+
 /*    Init / Shutdown                                                          */
 
 /* (re)compute glyph heights + max ascender from whatever s_metrics points at,
@@ -135,12 +150,21 @@ static int BuildAtlasTexture(IDirect3DDevice8* pDevice,
 
 /* Load the baked "Default" font (the always-present failsafe). */
 static int Font_LoadDefault(IDirect3DDevice8* pDevice) {
+    unsigned char* pixels = (unsigned char*)malloc(sizeof(g_fontAtlasData));
+    int loaded;
+    /* Keep the baked atlas immutable. Allocate a one-time copy solely for
+       edge cleanup. An allocation failure falls back to the original font. */
+    if (pixels) {
+        memcpy(pixels, g_fontAtlasData, sizeof(g_fontAtlasData));
+        Font_FixTransparentRGB(pixels, FONT_ATLAS_WIDTH * FONT_ATLAS_HEIGHT);
+    }
+    loaded = BuildAtlasTexture(pDevice, pixels ? pixels : g_fontAtlasData,
+        FONT_ATLAS_WIDTH, FONT_ATLAS_HEIGHT);
+    if (pixels) free(pixels);
+    if (!loaded) return 0;
     s_metrics[0] = g_glyphsSmall;
     s_metrics[1] = g_glyphsMedium;
     s_metrics[2] = g_glyphsLarge;
-    if (!BuildAtlasTexture(pDevice, g_fontAtlasData,
-        FONT_ATLAS_WIDTH, FONT_ATLAS_HEIGHT))
-        return 0;
     s_layoutScale[0] = s_layoutScale[1] = s_layoutScale[2] = 1.0f;
     s_usingCustom = 0;
     RecomputeMetrics();
@@ -183,8 +207,11 @@ int Font_LoadDDF(IDirect3DDevice8* pDevice, const char* path) {
         for (i = 0; i < 95; i++) {
             int rec[6];
             if (!ReadFile(h, rec, sizeof(rec), &got, NULL) || got != sizeof(rec)) goto done;
-            s_loadedMetrics[sz][i].x = rec[0];
-            s_loadedMetrics[sz][i].y = rec[1];
+            /* The bundled encoder draws into (w+2)x(h+2) images at +1,+1,
+               but stores the image's origin. Compensate ONLY in the runtime:
+               no DDF format/encoder change and existing font files still work. */
+            s_loadedMetrics[sz][i].x = rec[0] + 1;
+            s_loadedMetrics[sz][i].y = rec[1] + 1;
             s_loadedMetrics[sz][i].w = rec[2];
             s_loadedMetrics[sz][i].h = rec[3];
             s_loadedMetrics[sz][i].advance = rec[4];
@@ -197,6 +224,7 @@ int Font_LoadDDF(IDirect3DDevice8* pDevice, const char* path) {
     pixels = (unsigned char*)malloc(pxBytes);
     if (!pixels) goto done;
     if (!ReadFile(h, pixels, pxBytes, &got, NULL) || got != pxBytes) goto done;
+    Font_FixTransparentRGB(pixels, (DWORD)aw * (DWORD)ah);
 
     /* build the texture (swaps in only on success) */
     if (!BuildAtlasTexture(pDevice, pixels, aw, ah)) goto done;
@@ -302,6 +330,29 @@ int Font_LineHeight(int size) {
 
 /*    Drawing                                                                  */
 
+/* Batch only 32 glyphs (192 vertices) per draw to limit stack and keep C++98
+   / Xbox D3D8 DrawPrimitiveUP compatibility. A string of any length is flushed
+   in chunks. Both flat and isometric quads use the same triangle winding. */
+#define FONT_BATCH_GLYPHS 32
+#define FONT_BATCH_VERTS (FONT_BATCH_GLYPHS * 6)
+
+static void Font_FlushFlat(IDirect3DDevice8* d, FontVert* v, int glyphs) {
+    if (glyphs) d->DrawPrimitiveUP(D3DPT_TRIANGLELIST, (UINT)(glyphs * 2), v, sizeof(FontVert));
+}
+static void Font_FlushIso(IDirect3DDevice8* d, FontIsoVert* v, int glyphs) {
+    if (glyphs) d->DrawPrimitiveUP(D3DPT_TRIANGLELIST, (UINT)(glyphs * 2), v, sizeof(FontIsoVert));
+}
+
+/* Convert strip vertices [TL,TR,BL,BR] to triangles with identical winding. */
+static void Font_AppendFlat(FontVert* dst, const FontVert* q) {
+    dst[0] = q[0]; dst[1] = q[1]; dst[2] = q[2];
+    dst[3] = q[2]; dst[4] = q[1]; dst[5] = q[3];
+}
+static void Font_AppendIso(FontIsoVert* dst, const FontIsoVert* q) {
+    dst[0] = q[0]; dst[1] = q[1]; dst[2] = q[2];
+    dst[3] = q[2]; dst[4] = q[1]; dst[5] = q[3];
+}
+
 void Font_DrawText(IDirect3DDevice8* pDevice,
     float x, float y,
     const char* str,
@@ -310,6 +361,8 @@ void Font_DrawText(IDirect3DDevice8* pDevice,
     int max_w) {
     const GlyphMetrics* metrics;
     FontVert verts[4];
+    FontVert batch[FONT_BATCH_VERTS];
+    int glyphsInBatch = 0;
     float sx = UI_Sx(x);
     float sy = UI_Sy(y);
     float cur_x = sx;
@@ -337,11 +390,12 @@ void Font_DrawText(IDirect3DDevice8* pDevice,
     pDevice->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
     pDevice->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
     pDevice->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
-    /* Point filter + clamp address -- Xbox NV2A values from D3D8Types.h */
+    /* LINEAR filtering and white RGB under transparent atlas texels soften
+       glyph coverage without dark fringes; DDF v1 files need no re-encoding. */
     pDevice->SetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_CLAMP);
     pDevice->SetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_CLAMP);
-    pDevice->SetTextureStageState(0, D3DTSS_MINFILTER, D3DTEXF_POINT);
-    pDevice->SetTextureStageState(0, D3DTSS_MAGFILTER, D3DTEXF_POINT);
+    pDevice->SetTextureStageState(0, D3DTSS_MINFILTER, D3DTEXF_LINEAR);
+    pDevice->SetTextureStageState(0, D3DTSS_MAGFILTER, D3DTEXF_LINEAR);
     pDevice->SetTextureStageState(0, D3DTSS_MIPFILTER, D3DTEXF_NONE);
     pDevice->SetVertexShader(FONT_FVF);
 
@@ -370,10 +424,16 @@ void Font_DrawText(IDirect3DDevice8* pDevice,
         verts[2].x = gx;    verts[2].y = gy + gh; verts[2].z = 0; verts[2].rhw = 1; verts[2].colour = colour; verts[2].u = u0; verts[2].v = v1;
         verts[3].x = gx + gw; verts[3].y = gy + gh; verts[3].z = 0; verts[3].rhw = 1; verts[3].colour = colour; verts[3].u = u1; verts[3].v = v1;
 
-        pDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, verts, sizeof(FontVert));
+        Font_AppendFlat(batch + glyphsInBatch * 6, verts);
+        ++glyphsInBatch;
+        if (glyphsInBatch == FONT_BATCH_GLYPHS) {
+            Font_FlushFlat(pDevice, batch, glyphsInBatch);
+            glyphsInBatch = 0;
+        }
 
         cur_x += UI_ScaleX((float)gm->advance * scale);
     }
+    Font_FlushFlat(pDevice, batch, glyphsInBatch);
 
     /* Restore states */
     pDevice->SetTexture(0, NULL);
@@ -408,6 +468,8 @@ static void Font_DrawTextIsoCore(IDirect3DDevice8* pDevice,
     float vx, float vy, const char* str, int size, DWORD colour, float max_w) {
     const GlyphMetrics* metrics;
     FontIsoVert verts[4];
+    FontIsoVert batch[FONT_BATCH_VERTS];
+    int glyphsInBatch = 0;
     float cx = UI_VIRT_W * 0.5f;
     float cy = UI_VIRT_H * 0.5f;
     float cur_x = vx;
@@ -469,9 +531,15 @@ static void Font_DrawTextIsoCore(IDirect3DDevice8* pDevice,
         verts[2].x = wx0; verts[2].y = wy1; verts[2].z = 0; verts[2].colour = colour; verts[2].u = u0; verts[2].v = v1;
         verts[3].x = wx1; verts[3].y = wy1; verts[3].z = 0; verts[3].colour = colour; verts[3].u = u1; verts[3].v = v1;
 
-        pDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, verts, sizeof(FontIsoVert));
+        Font_AppendIso(batch + glyphsInBatch * 6, verts);
+        ++glyphsInBatch;
+        if (glyphsInBatch == FONT_BATCH_GLYPHS) {
+            Font_FlushIso(pDevice, batch, glyphsInBatch);
+            glyphsInBatch = 0;
+        }
         cur_x += (float)gm->advance * scale;
     }
+    Font_FlushIso(pDevice, batch, glyphsInBatch);
 
     pDevice->SetTexture(0, NULL);
     pDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);

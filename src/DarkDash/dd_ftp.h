@@ -24,6 +24,7 @@
    self-sufficient no matter where it's pulled in. */
 #include <xtl.h>
 #include <winsockx.h>
+#include "dd_path.h"
 
    /* ---- the underlying engine's state/context (kept from FtpServ) ---------- */
 
@@ -35,19 +36,19 @@ struct FtpCtx {
     SOCKET   listenSock, ctrlSock, dataListen, dataSock;
     WORD     dataPort;
     bool     authed, gotUser, atVirtualRoot, ctrlHalfClosed;
-    char     cwd[256];
+    char     cwd[DD_PATH_MAX];
     FtpXfer  xferType;
     char     xferName[64];
-    char     xferPath[256];
+    char     xferPath[DD_PATH_MAX];
     HANDLE   xferFile;
     DWORD    xferTotal, xferDone;
     bool     gotRnfr;
-    char     rnfrPath[256];
+    char     rnfrPath[DD_PATH_MAX];
     char     recvBuf[1024]; int recvLen;
     char     sendBuf[2048]; int sendLen, sendOff;
     char     retrBuf[65536]; int retrBufLen, retrBufOff;
     bool     listPending, listVirtualRoot;
-    char     listDir[256];
+    char     listDir[DD_PATH_MAX];
     bool     retrPending, storPending;
     char     listBuf[65536]; int listBufLen, listBufOff;
     DWORD    restOffset;        /* REST: byte offset to resume next RETR/STOR */

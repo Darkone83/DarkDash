@@ -2,14 +2,17 @@
     dd_paths.cpp -- see dd_paths.h.
 
     Four categories, each with up to DDPATHS_PER_CAT paths. Persisted as a
-    simple versioned blob in D:\data\paths.dat. C89 style, no CRT str*.
+    simple versioned blob in D:\data\paths.dat. Version 2 widens path slots to
+    DD_PATH_MAX; version-1 (120-byte path) files are migrated in place.
 ---------------------------------------------------------------------------*/
 #include <xtl.h>
 #include "dd_paths.h"
 
-#define DDPATHS_CATS    4
-#define DDPATHS_MAGIC   0x44504154UL   /* 'DPAT' */
-#define DDPATHS_VER     1
+#define DDPATHS_CATS          4
+#define DDPATHS_MAGIC         0x44504154UL   /* 'DPAT' */
+#define DDPATHS_VER           2
+#define DDPATHS_OLD_VER       1
+#define DDPATHS_OLD_PATH_MAX  120
 
 /* fixed category order; index <-> cacheId */
 static const char* const k_catKeys[DDPATHS_CATS] = { "apps", "games", "homebrew", "emu" };
@@ -25,18 +28,22 @@ typedef struct {
     CatPaths cat[DDPATHS_CATS];
 } PathsBlob;
 
+/* exact v1 on-disk layout, retained only for migration */
+typedef struct {
+    int  count;
+    char path[DDPATHS_PER_CAT][DDPATHS_OLD_PATH_MAX];
+} CatPathsV1;
+
+typedef struct {
+    DWORD      magic;
+    DWORD      version;
+    CatPathsV1 cat[DDPATHS_CATS];
+} PathsBlobV1;
+
 static PathsBlob s_p;
 static int       s_loaded = 0;
 
 /* ---- helpers ----------------------------------------------------------- */
-
-static int PLen(const char* s) { int n = 0; while (s && s[n]) n++; return n; }
-
-static void PCopy(char* dst, int cap, const char* src) {
-    int i = 0; if (cap <= 0) return;
-    while (src && src[i] && i < cap - 1) { dst[i] = src[i]; i++; }
-    dst[i] = 0;
-}
 
 static int PEqCI(const char* a, const char* b) {
     int i = 0;
@@ -68,12 +75,33 @@ static void ResetBlob(void) {
     }
 }
 
+static void SanitizeBlob(void) {
+    int i, j, out;
+    s_p.magic = DDPATHS_MAGIC;
+    s_p.version = DDPATHS_VER;
+    for (i = 0; i < DDPATHS_CATS; i++) {
+        if (s_p.cat[i].count < 0) s_p.cat[i].count = 0;
+        if (s_p.cat[i].count > DDPATHS_PER_CAT) s_p.cat[i].count = DDPATHS_PER_CAT;
+        out = 0;
+        for (j = 0; j < s_p.cat[i].count; j++) {
+            s_p.cat[i].path[j][DDPATHS_PATH_MAX - 1] = 0;
+            if (!DD_PathIsDosAbsolute(s_p.cat[i].path[j])) continue;
+            if (out != j) DD_PathCopy(s_p.cat[i].path[out], DDPATHS_PATH_MAX, s_p.cat[i].path[j]);
+            out++;
+        }
+        s_p.cat[i].count = out;
+        while (out < DDPATHS_PER_CAT) s_p.cat[i].path[out++][0] = 0;
+    }
+}
+
 /* ---- public ------------------------------------------------------------ */
 
 void Paths_Load(void) {
     HANDLE h;
-    DWORD  got = 0;
+    DWORD  got = 0, sz;
+    int    migrated = 0;
     PathsBlob tmp;
+    PathsBlobV1 old;
 
     ResetBlob();
     s_loaded = 1;
@@ -81,17 +109,39 @@ void Paths_Load(void) {
     h = CreateFileA("D:\\data\\paths.dat", GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return;            /* none yet -> empty */
-    if (ReadFile(h, &tmp, sizeof(tmp), &got, NULL) && got == sizeof(tmp) &&
-        tmp.magic == DDPATHS_MAGIC && tmp.version == DDPATHS_VER) {
-        /* clamp counts defensively before trusting the file */
-        int i;
-        for (i = 0; i < DDPATHS_CATS; i++) {
-            if (tmp.cat[i].count < 0) tmp.cat[i].count = 0;
-            if (tmp.cat[i].count > DDPATHS_PER_CAT) tmp.cat[i].count = DDPATHS_PER_CAT;
+
+    sz = GetFileSize(h, NULL);
+    if (sz == sizeof(PathsBlob)) {
+        if (ReadFile(h, &tmp, sizeof(tmp), &got, NULL) && got == sizeof(tmp) &&
+            tmp.magic == DDPATHS_MAGIC && tmp.version == DDPATHS_VER) {
+            s_p = tmp;
+            SanitizeBlob();
         }
-        s_p = tmp;
+    }
+    else if (sz == sizeof(PathsBlobV1)) {
+        if (ReadFile(h, &old, sizeof(old), &got, NULL) && got == sizeof(old) &&
+            old.magic == DDPATHS_MAGIC && old.version == DDPATHS_OLD_VER) {
+            int i, j, count;
+            ResetBlob();
+            for (i = 0; i < DDPATHS_CATS; i++) {
+                count = old.cat[i].count;
+                if (count < 0) count = 0;
+                if (count > DDPATHS_PER_CAT) count = DDPATHS_PER_CAT;
+                for (j = 0; j < count; j++) {
+                    old.cat[i].path[j][DDPATHS_OLD_PATH_MAX - 1] = 0;
+                    if (DD_PathIsDosAbsolute(old.cat[i].path[j]) &&
+                        DD_PathCopy(s_p.cat[i].path[s_p.cat[i].count], DDPATHS_PATH_MAX,
+                            old.cat[i].path[j]))
+                        s_p.cat[i].count++;
+                }
+            }
+            migrated = 1;
+        }
     }
     CloseHandle(h);
+
+    /* Best-effort one-time rewrite in the widened format. */
+    if (migrated) Paths_Save();
 }
 
 int Paths_Save(void) {
@@ -99,6 +149,7 @@ int Paths_Save(void) {
     DWORD  wr = 0;
     if (!s_loaded) { ResetBlob(); s_loaded = 1; }
 
+    SanitizeBlob();
     CreateDirectoryA("D:\\data", NULL);   /* ensure dir exists; ignore exists */
     h = CreateFileA("D:\\data\\paths.dat", GENERIC_WRITE, 0, NULL,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -129,15 +180,15 @@ int Paths_Add(const char* cacheId, const char* path) {
     if (!s_loaded) Paths_Load();
     ci = CatIndex(cacheId);
     if (ci < 0 || !path || !path[0]) return 0;
-    n = PLen(path);
-    if (n >= DDPATHS_PATH_MAX) return 0;
-    /* must look like a DOS path "X:\..." */
-    if (path[1] != ':') return 0;
+    n = DD_PathLen(path);
+    if (n <= 0 || n >= DDPATHS_PATH_MAX) return 0;
+    if (!DD_PathIsDosAbsolute(path)) return 0;
+
     /* no duplicates within the category */
     for (j = 0; j < s_p.cat[ci].count; j++)
         if (PEqCI(s_p.cat[ci].path[j], path)) return 0;
     if (s_p.cat[ci].count >= DDPATHS_PER_CAT) return 0;
-    PCopy(s_p.cat[ci].path[s_p.cat[ci].count], DDPATHS_PATH_MAX, path);
+    if (!DD_PathCopy(s_p.cat[ci].path[s_p.cat[ci].count], DDPATHS_PATH_MAX, path)) return 0;
     s_p.cat[ci].count++;
     return 1;
 }
@@ -148,7 +199,7 @@ void Paths_Remove(const char* cacheId, int i) {
     ci = CatIndex(cacheId);
     if (ci < 0 || i < 0 || i >= s_p.cat[ci].count) return;
     for (j = i; j < s_p.cat[ci].count - 1; j++)
-        PCopy(s_p.cat[ci].path[j], DDPATHS_PATH_MAX, s_p.cat[ci].path[j + 1]);
+        DD_PathCopy(s_p.cat[ci].path[j], DDPATHS_PATH_MAX, s_p.cat[ci].path[j + 1]);
     s_p.cat[ci].count--;
     s_p.cat[ci].path[s_p.cat[ci].count][0] = 0;
 }

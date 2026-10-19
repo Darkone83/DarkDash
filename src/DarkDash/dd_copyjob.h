@@ -21,12 +21,14 @@
 #ifndef DD_COPYJOB_H
 #define DD_COPYJOB_H
 
+#include "dd_path.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define COPYJOB_NAME_MAX 64
-#define COPYJOB_PATH_MAX 256
+#define COPYJOB_PATH_MAX DD_PATH_MAX
 
     /* one top-level item to copy/move */
     typedef struct {

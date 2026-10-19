@@ -34,10 +34,12 @@
     <ClCompile Include="dd_ftp.cpp" />
     <ClCompile Include="dd_gfx.cpp" />
     <ClCompile Include="dd_hidden.cpp" />
+    <ClCompile Include="dd_hints.cpp" />
     <ClCompile Include="dd_id3.cpp" />
     <ClCompile Include="dd_iso.cpp" />
     <ClCompile Include="dd_isoinstall.cpp" />
     <ClCompile Include="dd_isoui.cpp" />
+    <ClCompile Include="dd_jukebox.cpp" />
     <ClCompile Include="dd_launcher.cpp" />
     <ClCompile Include="dd_lcd.cpp" />
     <ClCompile Include="dd_mount.cpp" />
@@ -58,6 +60,7 @@
     <ClCompile Include="dd_smbsvc.cpp" />
     <ClCompile Include="dd_smbus.cpp" />
     <ClCompile Include="dd_stbi.c" />
+    <ClCompile Include="dd_storage.cpp" />
     <ClCompile Include="dd_swing.cpp" />
     <ClCompile Include="dd_synopsis.cpp" />
     <ClCompile Include="dd_sysinfo.cpp" />
@@ -113,10 +116,12 @@
     <ClInclude Include="dd_fx.h" />
     <ClInclude Include="dd_gfx.h" />
     <ClInclude Include="dd_hidden.h" />
+    <ClInclude Include="dd_hints.h" />
     <ClInclude Include="dd_id3.h" />
     <ClInclude Include="dd_iso.h" />
     <ClInclude Include="dd_isoinstall.h" />
     <ClInclude Include="dd_isoui.h" />
+    <ClInclude Include="dd_jukebox.h" />
     <ClInclude Include="dd_launcher.h" />
     <ClInclude Include="dd_lcd.h" />
     <ClInclude Include="dd_mount.h" />
@@ -124,6 +129,7 @@
     <ClInclude Include="dd_ntp.h" />
     <ClInclude Include="dd_osk.h" />
     <ClInclude Include="dd_oxfp.h" />
+    <ClInclude Include="dd_path.h" />
     <ClInclude Include="dd_paths.h" />
     <ClInclude Include="dd_pedestal.h" />
     <ClInclude Include="dd_plasma.h" />
@@ -137,6 +143,7 @@
     <ClInclude Include="dd_smbsvc.h" />
     <ClInclude Include="dd_smbus.h" />
     <ClInclude Include="dd_stbi.h" />
+    <ClInclude Include="dd_storage.h" />
     <ClInclude Include="dd_swing.h" />
     <ClInclude Include="dd_synopsis.h" />
     <ClInclude Include="dd_sysinfo.h" />

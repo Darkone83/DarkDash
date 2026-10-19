@@ -21,8 +21,9 @@
 #define DD_FILEOPS_H
 
 #include <xtl.h>
+#include "dd_path.h"
 
-#define FILEOPS_PATH_MAX  256
+#define FILEOPS_PATH_MAX  DD_PATH_MAX
 #define FILEOPS_COPY_BUF  (64 * 1024)   /* 64KB chunk, matches XbDiag */
 
 #ifdef __cplusplus

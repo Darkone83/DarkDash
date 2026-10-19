@@ -16,6 +16,7 @@
 #include "dd_theme.h"
 #include "dd_texture.h"
 #include "font.h"
+#include "dd_hints.h"
 #include "input.h"
 #include "dd_audio.h"
 #include "dd_browse.h"
@@ -262,8 +263,10 @@ static void Panel(IDirect3DDevice8* d, float* inL, float* inR, float* inT, float
 
     UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(180, br / 3, bgg / 3, bb / 3));
     frame = Theme_Asset("frame_menu_v");
+    UI_DrawPanelDepthMasked(frame, fx, fy, fw, fh, 255, 0.0f, 0.0f, 0.0f, 0.0f);
     if (frame) UI_DrawSprite(frame, fx, fy, fw, fh, 0xFFFFFFFF, 0);
     else       UI_FillRect(fx, fy, fw, fh, UI_ARGB(235, br, bgg, bb));
+    UI_DrawPanelLightingMasked(frame, fx, fy, fw, fh, 255, 0.0f, 0.0f, 0.0f, 0.0f);
 
     *inL = fx + 32.0f; *inR = fx + fw - 32.0f;
     *inT = fy + 34.0f; *inB = fy + fh - 26.0f;
@@ -304,12 +307,12 @@ void IsoUi_Draw(IDirect3DDevice8* d) {
     if (s_state == ST_PICK) {
         Font_DrawTextCentered(d, inL, inT, inR - inL, "Select an ISO", FONT_SIZE_MEDIUM, glow);
         DrawList(d, inL, inT, (const char*)s_isoNames, s_isoCount, s_isoSel, text, glow, dim, ISOUI_NAME_MAX);
-        Font_DrawText(d, inL, inB - 4.0f, "A  INSTALL      B  CANCEL", FONT_SIZE_SMALL, dim, 0);
+        DD_Hints_Draw(d, inL, inB - 8.0f, inR - inL, 20.0f, "A INSTALL  B CANCEL", dim);
     }
     else if (s_state == ST_ROOT) {
         Font_DrawTextCentered(d, inL, inT, inR - inL, "Install to", FONT_SIZE_MEDIUM, glow);
         DrawList(d, inL, inT, (const char*)s_roots, s_rootCount, s_rootSel, text, glow, dim, ISOUI_PATH_MAX);
-        Font_DrawText(d, inL, inB - 4.0f, "A  SELECT      B  BACK", FONT_SIZE_SMALL, dim, 0);
+        DD_Hints_Draw(d, inL, inB - 8.0f, inR - inL, 20.0f, "A SELECT  B BACK", dim);
     }
     else if (s_state == ST_BUSY) {
         Font_DrawTextCentered(d, inL, (inT + inB) * 0.5f - 8.0f, inR - inL,
@@ -319,6 +322,7 @@ void IsoUi_Draw(IDirect3DDevice8* d) {
         DWORD c = s_resultOk ? glow : Theme_Color("warn", 0xFFFF6040);
         Font_DrawTextCentered(d, inL, (inT + inB) * 0.5f - 16.0f, inR - inL,
             ResultText(), FONT_SIZE_MEDIUM, c);
-        Font_DrawTextCentered(d, inL, inB - 4.0f, inR - inL, "A  OK", FONT_SIZE_SMALL, dim);
+        DD_Hints_Draw(d, inL + (inR - inL - DD_Hints_Measure("A OK")) * 0.5f,
+            inB - 8.0f, inR - inL, 20.0f, "A OK", dim);
     }
 }

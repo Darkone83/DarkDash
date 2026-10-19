@@ -1,168 +1,192 @@
 # DarkDash Tools
 
-Two small desktop apps for making DarkDash content:
+Two desktop tools help you customize DarkDash:
 
-- **Theme Builder** (`theme_builder.py`) — build, theme, and validate a complete
-  theme folder from start to finish.
-- **Font Maker** (`ddf_encoder.py`) — turn a TTF/OTF font into a DarkDash font.
+- **Theme Studio** (`theme_builder.py`) — create themes, edit existing theme folders, preview artwork, choose colors and 3D lighting, and validate assets.
+- **Font Maker** (`ddf_encoder.py`) — convert TTF/OTF fonts to the DarkDash `.ddf` format.
 
-Both are Python apps with a simple window-based interface.
+## Requirements and launching
 
-## Requirements
+- Python 3 on Windows (or another OS with a supported desktop environment).
+- **PySide6** for the Theme Studio graphical interface.
+- **Pillow** for importing/converting/resizing artwork and inspecting image dimensions; also required by the Font Maker to rasterize fonts.
 
-- **Python 3** (with Tkinter, which ships with most Python installs).
-- **Pillow** — the image library. Install it with:
+Install the dependencies from a terminal:
 
-  ```
-  pip install pillow
-  ```
-
-The Theme Builder uses Pillow to convert your art to PNG, resize it, and check
-sizes. Without Pillow it can still copy art that is *already* PNG, but it can't
-convert other formats or resize. The Font Maker needs Pillow to rasterize the
-font. If Pillow is missing, the apps will tell you when you launch them.
-
-To run either tool, double-click it (if `.py`/`.pyw` files open with Python on
-your system) or run it from a terminal:
-
+```powershell
+py -m pip install PySide6 pillow
 ```
-python theme_builder.py
-python ddf_encoder.py
+
+Launch the tools:
+
+```powershell
+py theme_builder.py
+py ddf_encoder.py
 ```
+
+On systems where `python` is the configured command, substitute `python` for `py`. The Theme Studio's GUI needs PySide6; Tkinter is no longer used by that app. Without Pillow, the builder can only copy existing PNG files without conversion or dimension checking. The Font Maker still uses its existing interface and workflow.
 
 ---
 
-# Theme Builder
+# Theme Studio
 
-A DarkDash theme is just a folder: a `theme.ini` file (the settings) and an
-`assets` folder (the artwork). The Theme Builder creates that whole structure for
-you — pick where to build it and a name, assign an image to each art slot, set
-the colors, glow, and background, and it writes everything out correctly, ready
-to copy to your Xbox.
+Theme Studio has a dark, tabbed PySide6 interface. It creates themes and can **open an existing theme folder** without discarding unrelated theme settings.
 
-You don't have to make folders or pre-name files by hand anymore. Point the
-builder at the images you've got — in almost any common format — and it converts,
-renames, and (optionally) resizes them into the right slots.
+## Quick start: create a theme
 
-## How to use it
+1. Open `theme_builder.py`, click **New**, then **Build Location** and choose a parent directory (for example, your Desktop).
+2. Enter a **Theme name** and optional **Author**. The target path is displayed above the tabs.
+3. Under **Artwork & Assets**, select a named artwork slot, choose **Choose Image**, and preview the image. Only import the artwork you want to replace; unassigned slots may use dashboard fallbacks.
+4. Under **Colors & Effects**, select palette colors, enable or disable glow, and set its color and intensity.
+5. Under **3D Stage**, select the material style and customize lighting, reflections, beam, arc, movement, and pulse values.
+6. Click **Build Theme**. Read the report at the bottom, then use **Validate** to inspect the finished folder.
+7. Copy the finished theme folder to the dashboard's `themes\` directory on your Xbox, and select it in **Settings → Theme**.
 
-1. Launch the Theme Builder.
-2. **Build Location...** — pick the folder you want the theme built *inside* (for
-   example your Desktop). The builder creates a new sub-folder there.
-3. Enter a **Name** (and optional **Author**). The builder shows the exact folder
-   it will create as you type.
-4. For each art **slot**, click **Choose...** and pick your image. PNG, JPG, BMP,
-   GIF, and TGA all work — the builder converts to PNG for you.
-5. Set the **palette** colors, the **glow**, and (optionally) a painted
-   **background**. Each color has a **...** button that opens a color picker, or
-   you can type a hex value.
-6. Click **Build Theme** (or press **Ctrl+B**). The builder creates the folder,
-   imports your art into the correctly-named slots, and writes `theme.ini`. The
-   report box shows what it did and flags anything missing.
-7. Copy the new theme folder to your Xbox under `themes\`, then pick it in
-   **Settings → Theme**.
+The tool copies chosen artwork into recognized PNG filenames. Enable **Resize imports to reference size** only when desired: resizing may distort the source aspect ratio, and reference dimensions are not strict requirements.
 
-If you'd rather size your art exactly yourself, leave **Resize imported art** off
-and supply images already at the recommended sizes — the builder keeps them
-pixel-for-pixel. Turn resizing on to let it scale whatever you give it (handy,
-but it may distort the aspect ratio).
+## Edit an existing theme
+
+1. Click **Open Theme** and select the folder containing `theme.ini`.
+2. Update colors, lighting, or artwork assignments. Existing images appear in the asset browser and can be previewed without reimporting them.
+3. Click **Save Settings** to save INI settings without rebuilding or copying artwork. Use **Build Theme** when you want to import selected images into that folder.
+4. Click **Validate** to check assets.
+
+**Existing configuration is preserved.** Known edited keys are updated, but the tool retains other sections, comments, layout definitions, custom keys, and the configured asset directory. You do not need to remove or regenerate earlier theme information to use the new controls. Saving does not automatically upgrade or replace all existing artwork.
+
+## Tabs and controls
+
+### Artwork & Assets
+
+The asset browser organizes named slots into **Icons**, **Decorative frames**, **Stage**, and **Panels and plaques**. Select an entry to preview the artwork and see its actual pixel size. It supports PNG, JPG/JPEG, BMP, GIF, and TGA imports through Pillow, converting selected files to PNG while preserving transparency when available.
+
+- **Choose Image:** assign replacement artwork to the selected slot.
+- **Clear Assignment:** clear a pending import for that slot; it does **not** delete an image already in the theme folder.
+- **Use painted background when available:** enable the optional background image in the theme.
+- **Resize imports:** optionally scale imported files to their reference dimensions. Leave it off for manually prepared art.
+
+The preview shows the image itself; **it is not a live emulation of DarkDash's Xbox renderer** or its final layers, lighting, animation, and perspective.
+
+### Colors & Effects
+
+Use six-digit hexadecimal (`RRGGBB`) values or the **Pick** buttons:
+
+| Color | Purpose |
+| --- | --- |
+| Accent | Primary interface highlight |
+| Accent Dim | Reduced or unfocused accent |
+| Glow | Theme highlight/glow tint |
+| Text | Primary text |
+| Text Dim | Secondary text |
+| BG | Base background color |
+
+The **Glow** controls also provide an enable toggle, separate glow color, and intensity from 0–100.
+
+### 3D Stage
+
+Choose a **Material style**:
+
+| Style | Visual character |
+| --- | --- |
+| Liquid | Animated plasma-like material |
+| Hologram | Brighter emission and lighter reflective treatment |
+| Metal | Stronger reflections and more restrained emission/motion |
+
+**Lighting colors** cover Ambient light, Main light, Orb emission, Platform beam, and Energy arcs. Leaving an optional color blank allows it to inherit the theme's normal color settings where supported.
+
+**Light, reflection and motion** includes Ambient strength, Main light strength, Emission strength, Reflections, Beam strength, Arc intensity, Motion, Pulse, and Reflection sharpness. Most strength controls range from 0–200; Reflection sharpness ranges from 2–96.
+
+Use **Use Material Defaults** to reset the 3D Stage controls to the chosen material's defaults. This does not erase your theme's other settings. Plasma/music-reactive behavior remains a dashboard feature, not a separate theme-builder plugin.
 
 ## Theme folder layout
 
-The builder produces this for you:
+A normal generated theme resembles:
 
+```text
+MyTheme/
+  theme.ini
+  assets/
+    bar_header.png
+    bar_footer.png
+    frame_menu_v.png
+    orb_hero.png
+    platform_round.png
+    ...other optional named PNG assets...
+    bg.png             (optional painted background)
+    raw/               (optional per-game icon overrides)
 ```
-MyTheme\
-    theme.ini
-    assets\
-        bar_header.png
-        bar_footer.png
-        frame_menu_v.png
-        orb_hero.png
-        platform_round.png
-        overlay_selection_glow.png   (optional)
-        bg.png                       (optional)
-        raw\                         (optional per-game icon overrides)
+
+The artwork filenames are recognized names; Theme Studio imports artwork into those slots. Themes may also use a custom `asset_dir` already specified in `theme.ini`; the editor respects it. The `raw/` directory is created for optional icon overrides, but new themes do not require contents in it.
+
+## Named artwork reference sizes
+
+The following values reflect the supplied Default theme artwork and are provided as **reference sizes**, not mandatory limits. The dashboard has fallbacks for missing optional named assets.
+
+| Asset filename | Reference W × H |
+| --- | ---: |
+| `bar_header.png` | 315 × 44 |
+| `bar_footer.png` | 462 × 56 |
+| `frame_menu_v.png` | 308 × 430 |
+| `frame_menu_h.png` | 486 × 189 |
+| `frame_menu_h_selected.png` | 491 × 190 |
+| `frame_card_blank.png` | 174 × 247 |
+| `frame_card_small.png` | 202 × 103 |
+| `frame_featured.png` | 449 × 204 |
+| `frame_library.png` | 455 × 201 |
+| `frame_media.png` | 338 × 187 |
+| `frame_network.png` | 388 × 193 |
+| `frame_nowplaying.png` | 355 × 142 |
+| `frame_recent.png` | 366 × 154 |
+| `frame_status.png` | 268 × 185 |
+| `frame_storage.png` | 285 × 194 |
+| `card_recent.png` | 261 × 186 |
+| `orb_hero.png` | 388 × 334 |
+| `orb_small.png` | 176 × 184 |
+| `orb_glow.png` | 272 × 234 |
+| `globe.png` | 256 × 251 |
+| `platform_round.png` | 336 × 190 |
+| `platform_long.png` | 452 × 144 |
+| `tab_h_normal.png` | 323 × 59 |
+| `tab_h_selected.png` | 323 × 64 |
+| `tab_v_normal.png` | 266 × 279 |
+| `tab_v_selected.png` | 266 × 279 |
+| `overlay_selection_glow.png` | 423 × 109 |
+| `panel_loading.png` | 286 × 94 |
+| `plaque_datetime.png` | 178 × 83 |
+| `plaque_freespace.png` | 218 × 84 |
+| `plaque_info.png` | 239 × 92 |
+| `plaque_signedin.png` | 222 × 89 |
+| `plaque_toast.png` | 291 × 80 |
+| `tile_cover_small_blank.png` | 164 × 247 |
+| `tile_cover_medium_blank.png` | 200 × 269 |
+| `tile_feature_blank.png` | 354 × 277 |
+| `module_media.png` | 243 × 199 |
+| `module_status.png` | 232 × 196 |
+| `module_storage.png` | 258 × 206 |
+| `icon_games.png` | 104 × 115 |
+| `icon_apps.png` | 105 × 114 |
+| `icon_media.png` | 112 × 113 |
+| `icon_network.png` | 113 × 113 |
+| `icon_saves.png` | 114 × 114 |
+| `icon_settings.png` | 115 × 113 |
+| `bg.png` (optional painted background) | 640 × 480 |
+
+When importing transparent frames or glow artwork, use a clean alpha channel. Avoid baking live text, date/time values, or selectable labels into images: DarkDash draws dynamic content itself.
+
+## Build, save, and validation
+
+- **Build Theme:** creates or updates the target folder, imports chosen images, and saves `theme.ini`. Unassigned existing assets are kept.
+- **Save Settings:** writes INI edits only; does not copy new images or replace existing assets.
+- **Validate:** checks the named asset slots, image readability and reference dimensions where Pillow is available. Missing optional artwork is reported but is not by itself a validation failure.
+
+For command-line asset validation without opening the GUI:
+
+```powershell
+py theme_builder.py "C:\Themes\MyTheme"
 ```
 
-The slot filenames are fixed — DarkDash loads each piece of art by name — which
-is why the builder renames whatever you import to the slot name. You don't list
-assets in `theme.ini`; the engine finds them by filename.
+This prints a validation report and returns a failure exit code for a real validation error. It does not need the PySide6 window to be launched.
 
-## Artwork
-
-All artwork ends up as **PNG** with transparency. These are the recommended
-pixel sizes:
-
-| File | Size (W x H) | Required? | What it is |
-| --- | --- | --- | --- |
-| `bar_header.png` | **300 x 40** | yes | The top status bar frame |
-| `bar_footer.png` | **624 x 32** | yes | The bottom button-hint bar |
-| `frame_menu_v.png` | **272 x 384** | yes | The tall menu/list panel frame |
-| `orb_hero.png` | **272 x 234** | yes | The centerpiece "orb" on the main menu |
-| `platform_round.png` | **256 x 120** | yes | The pedestal base under the orb |
-| `overlay_selection_glow.png` | **220 x 40** | no | The glow behind the selected row |
-| `bg.png` | **640 x 480** | no | Optional full-screen painted background |
-
-Tips:
-- Keep transparency where you want the background to show through (the frames and
-  the orb sit over the dashboard's glow).
-- Sizes are *recommended*. Supply art at these sizes and leave resizing off for
-  pixel-perfect results, or let the builder resize on import.
-- `bg.png` is optional — include it only for a full painted background; leave it
-  out to keep the default animated glow.
-- Artwork only — the builder changes the look, not the layout.
-
-## Colors (the palette)
-
-Colors are 6-digit hex (RRGGBB), the same as a web color — type them, or use the
-**...** color picker next to each one.
-
-| Key | What it tints |
-| --- | --- |
-| `accent` | Main highlight color |
-| `accent_dim` | A darker version of the accent |
-| `glow` | Selected-item glow / highlights |
-| `text` | Normal text |
-| `text_dim` | Secondary / faded text |
-| `bg` | Base background color |
-
-## Glow
-
-The **Glow** block controls the selection glow:
-
-- **Enabled** — on or off.
-- **Color** — the glow color (RRGGBB), with its own color picker. It can differ
-  from the palette.
-- **Intensity** — a 0–100 slider for how strong the glow is.
-
-## Background
-
-- **Off** — use the dashboard's default animated glow.
-- **Use painted background** — writes your `bg.png` into the theme and uses it as
-  a full-screen painted background. (Choosing a `bg` image turns this on for you.)
-
-## Per-game icons
-
-The builder also creates an `assets\raw\` folder for optional per-game icon
-overrides. It starts empty; drop icon art in there if you want specific titles to
-use custom icons. Leave it empty and DarkDash uses its normal icons.
-
-## Build, save, and validate
-
-- **Build Theme** (Ctrl+B) — create/refresh the folder, import art, write
-  `theme.ini`.
-- **Save theme.ini** (Ctrl+S) — rewrite just `theme.ini` (palette / glow /
-  background) without touching your imported art. Handy for tweaking colors on a
-  theme you've already built.
-- **Validate** — check a built theme's slots: which are present, whether each is
-  the recommended size, and whether any required slot is missing.
-
-You can also validate from a terminal without opening the window:
-
-```
-python theme_builder.py path\to\MyTheme
-```
+**Compatibility note:** The theme builder edits the existing `theme.ini` format. New 3D lighting values are optional for older themes. In-game user-adjustable effects percentages are dashboard preferences, not values that Theme Studio needs to overwrite.
 
 ---
 

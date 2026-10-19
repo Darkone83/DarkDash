@@ -11,6 +11,17 @@ static IDirect3DDevice8* s_device = NULL;
 static int                s_width = 640;
 static int                s_height = 480;
 static char               s_videoMode[8] = "480i";   /* set during Gfx_Init */
+static int                s_msaaSamples = 0; /* actual device setting (0 or 2) */
+
+/* Build-time quality policy: 2x MSAA at SD resolutions, non-MSAA at 720p.
+   Full-screen MSAA adds render/depth memory pressure at 720p on 64MB Xboxes.
+   Set to 0 to disable the experiment without altering persistent settings. */
+#ifndef DD_GFX_SD_MSAA_SAMPLES
+#define DD_GFX_SD_MSAA_SAMPLES 2
+#endif
+#ifndef DD_GFX_HD_MSAA_SAMPLES
+#define DD_GFX_HD_MSAA_SAMPLES 0
+#endif
 
 static void GfxSetMode(const char* m) {
     int i = 0;
@@ -19,6 +30,32 @@ static void GfxSetMode(const char* m) {
 }
 
 const char* Gfx_VideoModeStr(void) { return s_videoMode; }
+int Gfx_MsaaSamples(void) { return s_msaaSamples; }
+
+/* Retry at the SAME resolution first so an unsupported multisampling mode
+   never silently downgrades 480p/720p to 480i. */
+static HRESULT CreateDeviceWithMsaaFallback(D3DPRESENT_PARAMETERS* pp) {
+    HRESULT hr;
+    int samples = (pp->BackBufferWidth > 640) ?
+        DD_GFX_HD_MSAA_SAMPLES : DD_GFX_SD_MSAA_SAMPLES;
+    s_msaaSamples = 0;
+
+    if (samples == 2) {
+        pp->MultiSampleType = D3DMULTISAMPLE_2_SAMPLES;
+        hr = s_d3d->CreateDevice(0, D3DDEVTYPE_HAL, NULL,
+            D3DCREATE_HARDWARE_VERTEXPROCESSING, pp, &s_device);
+        if (SUCCEEDED(hr)) {
+            s_msaaSamples = 2;
+            return hr;
+        }
+        if (s_device) { s_device->Release(); s_device = NULL; }
+    }
+
+    pp->MultiSampleType = D3DMULTISAMPLE_NONE;
+    hr = s_d3d->CreateDevice(0, D3DDEVTYPE_HAL, NULL,
+        D3DCREATE_HARDWARE_VERTEXPROCESSING, pp, &s_device);
+    return hr;
+}
 
 int Gfx_Init(void) {
     D3DPRESENT_PARAMETERS pp;
@@ -94,8 +131,7 @@ int Gfx_Init(void) {
     pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
     pp.FullScreen_PresentationInterval = D3DPRESENT_INTERVAL_ONE;
 
-    hr = s_d3d->CreateDevice(0, D3DDEVTYPE_HAL, NULL,
-        D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &s_device);
+    hr = CreateDeviceWithMsaaFallback(&pp);
 
     /* Safe-mode fallback: if the preferred mode is rejected for any reason,
        retry with the most conservative mode every Xbox can produce -- 640x480
@@ -116,6 +152,9 @@ int Gfx_Init(void) {
             pp.FullScreen_RefreshRateInHz = 60;
             GfxSetMode("480i");
         }
+        /* Safe mode is deliberately non-MSAA regardless of policy. */
+        pp.MultiSampleType = D3DMULTISAMPLE_NONE;
+        s_msaaSamples = 0;
         hr = s_d3d->CreateDevice(0, D3DDEVTYPE_HAL, NULL,
             D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &s_device);
     }
@@ -135,6 +174,7 @@ int Gfx_Init(void) {
 }
 
 void Gfx_Shutdown(void) {
+    s_msaaSamples = 0;
     if (s_device) { s_device->Release(); s_device = NULL; }
     if (s_d3d) { s_d3d->Release();    s_d3d = NULL; }
 }

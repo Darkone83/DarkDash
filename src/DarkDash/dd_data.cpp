@@ -2,9 +2,11 @@
     dd_data.cpp -- persistent settings blob (see dd_data.h).
 
     Format on disk: [DD_DataHeader][DD_Settings], little-endian, fixed size.
-    A magic + version guards against stale/foreign files; any mismatch falls
-    back to defaults rather than trusting garbage. Writes go through a temp
-    file + replace so a yanked-power mid-write can't leave a half blob.
+    A magic + version guards against stale/foreign files. Older same-version
+    blobs with a shorter DD_Settings prefix are migrated forward by reading the
+    fields they contain over current defaults, so newly appended preferences do
+    not wipe existing user choices. Writes go straight to the target because
+    MoveFile/replace is unreliable on the Xbox filesystem.
 ---------------------------------------------------------------------------*/
 #include <xtl.h>
 #include <string.h>
@@ -41,6 +43,11 @@ static void SetDefaults(void) {
     s_set.fontName[0] = '\0';                /* baked Default failsafe */
     s_set.themeName[0] = '\0';               /* default theme */
     s_set.fxFlags = DD_FX_DEFAULT;       /* all character effects on */
+    s_set.lightingPct = 100;
+    s_set.shadowPct = 100;
+    s_set.reflectionPct = 100;
+    s_set.atmospherePct = 100;
+    s_set.parallaxPct = 100;
     s_set.screensaverMin = 10;               /* idle screensaver after 10 min */
 }
 
@@ -52,6 +59,28 @@ DD_Settings* Data_Get(void) {
 int Data_FxOn(int bit) {
     if (!s_loaded) { SetDefaults(); s_loaded = 1; }
     return (s_set.fxFlags & bit) ? 1 : 0;
+}
+
+int Data_EffectPercent(int effect) {
+    int value = 100;
+    DD_Settings* st = Data_Get();
+    switch (effect) {
+    case DD_EFFECT_LIGHTING: value = st->lightingPct; break;
+    case DD_EFFECT_SHADOW: value = st->shadowPct; break;
+    case DD_EFFECT_REFLECTION: value = st->reflectionPct; break;
+    case DD_EFFECT_ATMOSPHERE: value = st->atmospherePct; break;
+    case DD_EFFECT_PARALLAX: value = st->parallaxPct; break;
+    }
+    if (value < 0) value = 0;
+    if (value > 200) value = 200;
+    return value;
+}
+
+int Data_EffectScale(int effect, int alpha) {
+    int value = alpha * Data_EffectPercent(effect) / 100;
+    if (value < 0) return 0;
+    if (value > 255) return 255;
+    return value;
 }
 
 int Data_Load(void) {
@@ -68,12 +97,15 @@ int Data_Load(void) {
 
     if (!ReadFile(h, &hdr, sizeof(hdr), &got, NULL) || got != sizeof(hdr) ||
         hdr.magic != DD_DATA_MAGIC || hdr.version != DD_DATA_VER ||
-        hdr.size != (DWORD)sizeof(DD_Settings)) {
+        hdr.size == 0 || hdr.size > (DWORD)sizeof(DD_Settings)) {
         CloseHandle(h);
         return 0;                              /* foreign/old -> defaults */
     }
 
-    if (!ReadFile(h, &s_set, sizeof(s_set), &got, NULL) || got != sizeof(s_set)) {
+    /* SetDefaults() already populated the full current struct. Reading only the
+       older prefix preserves all known user fields while leaving newly-added
+       tail fields at their modern defaults. */
+    if (!ReadFile(h, &s_set, hdr.size, &got, NULL) || got != hdr.size) {
         CloseHandle(h);
         SetDefaults();                         /* truncated -> defaults */
         return 0;
@@ -86,9 +118,20 @@ int Data_Load(void) {
     if (s_set.fanPercent < 0)   s_set.fanPercent = 0;
     if (s_set.fanPercent > 100) s_set.fanPercent = 100;
     if (s_set.ftpPort < 1 || s_set.ftpPort > 65535) s_set.ftpPort = 21;
+    /* A shorter migrated blob can end part-way through a string field. Always
+       terminate persisted strings before any UI/service code consumes them. */
+    s_set.musicPath[DD_MUSIC_PATH_MAX - 1] = '\0';
+    s_set.ftpUser[DD_FTP_CRED_MAX - 1] = '\0';
+    s_set.ftpPass[DD_FTP_CRED_MAX - 1] = '\0';
+    s_set.fontName[sizeof(s_set.fontName) - 1] = '\0';
+    s_set.themeName[sizeof(s_set.themeName) - 1] = '\0';
     if (s_set.ftpUser[0] == '\0') lstrcpynA(s_set.ftpUser, "xbox", DD_FTP_CRED_MAX);
     if (s_set.ftpPass[0] == '\0') lstrcpynA(s_set.ftpPass, "xbox", DD_FTP_CRED_MAX);
-    s_set.musicPath[DD_MUSIC_PATH_MAX - 1] = '\0';
+    if (s_set.lightingPct < 0 || s_set.lightingPct > 200) s_set.lightingPct = 100;
+    if (s_set.shadowPct < 0 || s_set.shadowPct > 200) s_set.shadowPct = 100;
+    if (s_set.reflectionPct < 0 || s_set.reflectionPct > 200) s_set.reflectionPct = 100;
+    if (s_set.atmospherePct < 0 || s_set.atmospherePct > 200) s_set.atmospherePct = 100;
+    if (s_set.parallaxPct < 0 || s_set.parallaxPct > 200) s_set.parallaxPct = 100;
     if (s_set.musicMode < DD_MUSIC_NORMAL || s_set.musicMode > DD_MUSIC_SHUFFLE)
         s_set.musicMode = DD_MUSIC_NORMAL;
     /* fxFlags carries a DD_FX_SET sentinel that Data_Save always sets. If it's

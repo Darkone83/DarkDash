@@ -17,10 +17,12 @@
 #include "dd_theme.h"
 #include "dd_texture.h"
 #include "font.h"
+#include "dd_hints.h"
 #include "input.h"
 #include "dd_audio.h"
 #include "dd_data.h"
 #include "dd_sysinfo.h"
+#include "dd_storage.h"
 #include "dd_eeprom.h"
 #include "dd_time.h"
 #include "dd_ntp.h"
@@ -165,6 +167,17 @@ static int NearestPalette(int r, int g, int b) {
 static int s_fxRow = 0;    /* cursor within the Effects sub-menu   */
 static const int k_fxBits[6] = { DD_FX_SCANLINES, DD_FX_SELECT, DD_FX_IDLE, DD_FX_EDGE, DD_FX_PLASMA, DD_FX_ARCS };
 static const char* const k_fxNames[6] = { "Scanlines", "Selection FX", "Idle Motion", "Edge Flash", "Plasma Orb", "Frame Arcs" };
+static const char* const k_fxPctNames[5] = { "Lighting", "Shadows", "Reflections", "Atmosphere", "Parallax" };
+static int* FxPercentField(DD_Settings* st, int row) {
+    switch (row) {
+    case 6: return &st->lightingPct;
+    case 7: return &st->shadowPct;
+    case 8: return &st->reflectionPct;
+    case 9: return &st->atmospherePct;
+    case 10: return &st->parallaxPct;
+    }
+    return NULL;
+}
 
 /* Theme panel: discovered theme folder names + cursor + apply message */
 #define THEMES_DIR "D:\\themes"
@@ -417,6 +430,16 @@ int Settings_ShuffleNowPlayingPath(const char** path) {
     return 1;
 }
 
+/* Clear background-only Now Playing bookkeeping while an external music owner
+   (the Jukebox) temporarily uses dd_audio. Playback itself is faded/stopped by
+   that owner; this only prevents LCD/X-View from reporting the old Shuffle
+   track until Settings_StartMusic rebuilds state on return. */
+void Settings_SuspendMusicState(void) {
+    s_npStart = 0;
+    s_curTrackStart = 0;
+    s_curTrackPath[0] = 0;
+}
+
 /* scan D:\fonts for *.ddf; index 0 is always "Default" (baked failsafe), then
    each file with its ".ddf" extension stripped off. */
 static void ScanFonts(void) {
@@ -442,17 +465,29 @@ static void ScanFonts(void) {
     }
 }
 
+/* Clamp a scrolling list to its visible window without changing its cursor.
+   In particular, the music picker can contain MUSIC_MAX + 2 rows, while
+   the tilted frame only holds nine at a readable pitch. */
+static int Settings_ListTop(int count, int cursor, int visible) {
+    int top;
+    if (count <= visible || visible <= 0) return 0;
+    if (cursor < 0) cursor = 0;
+    if (cursor >= count) cursor = count - 1;
+    top = cursor - visible + 1;
+    if (top < 0) top = 0;
+    if (top > count - visible) top = count - visible;
+    return top;
+}
+
 /* shared chrome: backdrop + header + footer (same on every screen) */
 static void Chrome(IDirect3DDevice8* d, const char* title, const char* foothint) {
     DWORD accent = Theme_Color("accent", 0xFF7FE000);
     DWORD text = Theme_Color("text", 0xFFD8F8C0);
     const Texture* hdr = Theme_Asset("bar_header");
-    const Texture* foot = Theme_Asset("bar_footer");
     Backdrop_Draw();
     if (hdr) UI_DrawSprite(hdr, 8.0f, 8.0f, 300.0f, 40.0f, 0xFFFFFFFF, 0);
     Font_DrawText(d, 26.0f, 14.0f, title, FONT_SIZE_LARGE, accent, 0);
-    if (foot) UI_DrawSprite(foot, 8.0f, 442.0f, 624.0f, 32.0f, 0xFFFFFFFF, 0);
-    Font_DrawText(d, 24.0f, 449.0f, foothint, FONT_SIZE_SMALL, text, 0);
+    DD_Hints_Footer(d, 442.0f, 32.0f, 24.0f, 594.0f, foothint, text);
 }
 
 /* the pedestal + spinning category icon (left), same as the launcher cube */
@@ -535,9 +570,9 @@ static void DrawConsole(IDirect3DDevice8* d, const char* const* rows, int count,
         int disabled = (disabledMask & (1u << i)) ? 1 : 0;
         DWORD c;
         float ry;
-        if (isAction)        c = text;        /* pinned action: always live */
-        else if (disabled)        c = dim;         /* greyed: not selectable      */
-        else if (i == selRow)     c = glow;
+        if (disabled)             c = dim;        /* disabled state wins */
+        else if (i == selRow)     c = glow;       /* including pinned Apply */
+        else if (isAction)        c = text;
         else if (i >= selectable) c = dim;
         else                      c = text;
         if (isAction) {
@@ -1347,14 +1382,31 @@ static void UpdateAccessories(WORD pressed) {
 static void UpdateVideo(WORD pressed) {
     DD_Settings* st = Data_Get();
 
-    /* ---- Effects sub-menu: toggle the four effect flags ---- */
+    /* Existing six effect toggles, five global visual multipliers and Reset. */
     if (s_fxSub) {
-        if (pressed & BTN_DPAD_DOWN) { if (s_fxRow < 5) { s_fxRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+        if (pressed & BTN_DPAD_DOWN) { if (s_fxRow < 11) { s_fxRow++; Audio_PlaySfx(SFX_NAV_DOWN); } }
         if (pressed & BTN_DPAD_UP) { if (s_fxRow > 0) { s_fxRow--; Audio_PlaySfx(SFX_NAV_UP); } }
         if (pressed & (BTN_DPAD_LEFT | BTN_DPAD_RIGHT | BTN_A)) {
-            st->fxFlags ^= k_fxBits[s_fxRow];      /* flip the bit (all-off is valid + persists) */
-            Data_Save();
-            Audio_PlaySfx(SFX_ALT);
+            if (s_fxRow < 6) {
+                st->fxFlags ^= k_fxBits[s_fxRow];
+                Data_Save(); Audio_PlaySfx(SFX_ALT);
+            }
+            else if (s_fxRow < 11) {
+                int* value = FxPercentField(st, s_fxRow);
+                if (value) {
+                    int old = *value;
+                    int delta = (pressed & BTN_DPAD_LEFT) ? -10 : 10;
+                    *value += delta;
+                    if (*value < 0) *value = 0;
+                    if (*value > 200) *value = 200;
+                    if (*value != old) { Data_Save(); Audio_PlaySfx(SFX_ALT); }
+                }
+            }
+            else if (pressed & BTN_A) {
+                st->lightingPct = st->shadowPct = st->reflectionPct = 100;
+                st->atmospherePct = st->parallaxPct = 100;
+                Data_Save(); Audio_PlaySfx(SFX_SELECT);
+            }
         }
         if (pressed & BTN_B) { s_fxSub = 0; Select_Reset(); Audio_PlaySfx(SFX_BACK); }
         return;
@@ -1521,13 +1573,17 @@ static void RenderAbout(IDirect3DDevice8* d) {
     int   vx = 90, vy = 70, vw = 460, vh = 330;
     float scrollPx, contentH;
     int   nLines = 0, li;
-    char  lines[24][72];
+    char  lines[40][72];
     char  num[16], freeStr[40];
     D3DVIEWPORT8 vpOld, vpClip;
 
     Chrome(d, "ABOUT", "B BACK");
+    UI_DrawPanelDepthMasked(frame, (float)(vx - 18), (float)(vy - 14),
+        (float)(vw + 36), (float)(vh + 28), 255, 0.0f, 0.0f, 0.0f, 0.0f);
     if (frame) UI_DrawSprite(frame, (float)(vx - 18), (float)(vy - 14),
         (float)(vw + 36), (float)(vh + 28), 0xFFFFFFFF, 0);
+    UI_DrawPanelLightingMasked(frame, (float)(vx - 18), (float)(vy - 14),
+        (float)(vw + 36), (float)(vh + 28), 255, 0.0f, 0.0f, 0.0f, 0.0f);
 
     strcpy(lines[nLines++], "DarkDash");
     lines[nLines][0] = 0; strcat(lines[nLines], "Version   "); strcat(lines[nLines++], DARKDASH_VERSION);
@@ -1572,14 +1628,17 @@ static void RenderAbout(IDirect3DDevice8* d) {
     strcpy(lines[nLines++], "");
     /* partitions: free / total. Only list drives that are actually mounted. */
     {
-        static const char* const k_part[] = { "C:\\", "E:\\", "F:\\", "G:\\", "X:\\", "Y:\\", "Z:\\", 0 };
         int pi;
-        for (pi = 0; k_part[pi]; pi++) {
-            Sys_DiskUsageStr(k_part[pi], freeStr, sizeof(freeStr));
+        for (pi = 0; pi < DD_Storage_Count() && nLines < 38; pi++) {
+            const DD_StorageVolume* v = DD_Storage_At(pi);
+            char root[4], label[32];
+            if (!DD_Storage_Ready(v)) continue;
+            root[0] = v->letter; root[1] = ':'; root[2] = '\\'; root[3] = 0;
+            Sys_DiskUsageStr(root, freeStr, sizeof(freeStr));
             if (freeStr[0] && freeStr[0] != '-') {
-                char* p = lines[nLines];
-                p[0] = k_part[pi][0]; p[1] = ':'; p[2] = ' '; p[3] = ' '; p[4] = ' '; p[5] = ' ';
-                p[6] = ' '; p[7] = ' '; p[8] = ' '; p[9] = ' '; p[10] = 0;
+                DD_Storage_Label(v, label, sizeof(label));
+                strcpy(lines[nLines], label);
+                strcat(lines[nLines], "  ");
                 strcat(lines[nLines++], freeStr);
             }
         }
@@ -1623,21 +1682,24 @@ static void RenderAudio(IDirect3DDevice8* d) {
         float menuX = 352.0f, menuY = 48.0f, rowY0 = 90.0f, rowDY = 34.0f;
         int pickCount = 2 + s_mp3Count;              /* None + Shuffle + files */
         int i, vis = (pickCount < 9) ? pickCount : 9;
+        int top = Settings_ListTop(pickCount, s_mp3Cursor, vis);
         Chrome(d, "SELECT MUSIC", "A USE   X BUILT-IN   B BACK");
         DrawPedestal(d);
         Iso_Begin();
         if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
         {
-            float gy = rowY0 + rowDY * (float)s_mp3Cursor - 6.0f;
+            float gy = rowY0 + rowDY * (float)(s_mp3Cursor - top) - 6.0f;
             Iso_FillRect(menuX + 16.0f, gy, 214.0f, 30.0f, UI_ARGB(110, ar, ag, ab), 1);
             for (i = 0; i < vis; i++) {
-                DWORD c = (i == s_mp3Cursor) ? glow : text;
-                const char* label = (i == 0) ? "None" : (i == 1) ? "Shuffle" : s_mp3[i - 2];
-                Font_DrawTextIso(d, menuX + 26.0f, rowY0 + rowDY * (float)i + 2.0f, label, FONT_SIZE_SMALL, c);
+                int idx = top + i;
+                DWORD c = (idx == s_mp3Cursor) ? glow : text;
+                const char* label = (idx == 0) ? "None" : (idx == 1) ? "Shuffle" : s_mp3[idx - 2];
+                Font_DrawTextIsoClip(d, menuX + 26.0f, rowY0 + rowDY * (float)i + 2.0f,
+                    label, FONT_SIZE_SMALL, c, 210.0f);
             }
             if (s_mp3Count == 0)
-                Font_DrawTextIso(d, menuX + 26.0f, rowY0 + rowDY * (float)vis + 8.0f,
-                    "(no .mp3 files)", FONT_SIZE_SMALL, dim);
+                Font_DrawTextIsoClip(d, menuX + 26.0f, rowY0 + rowDY * (float)vis + 8.0f,
+                    "(no .mp3 files)", FONT_SIZE_SMALL, dim, 210.0f);
         }
         Iso_End();
         return;
@@ -1676,7 +1738,10 @@ static void RenderAudio(IDirect3DDevice8* d) {
     strcpy(dtsRow, "DTS       "); strcat(dtsRow, adts ? "On" : "Off");
     rows[2] = outRow; rows[3] = ac3Row; rows[4] = dtsRow;
 
-    Chrome(d, "AUDIO", "L/R ADJUST   A PICK   B BACK");
+    /* Only offer controls that act on the highlighted row. */
+    Chrome(d, "AUDIO", (s_row == 1) ? "A PICK   B BACK" :
+        (s_row == 3 || s_row == 4) ? "A TOGGLE   B BACK" :
+        "L/R ADJUST   B BACK");
     DrawPedestal(d);
     DrawConsole(d, rows, 5, s_row, 5, 0);
     if (s_audioMsg) {
@@ -1712,7 +1777,8 @@ static void RenderFan(IDirect3DDevice8* d) {
         nRows = 3; selectable = 2;
     }
 
-    Chrome(d, "FAN", "L/R ADJUST   B BACK");
+    Chrome(d, "FAN", (s_row == 0) ? "A TOGGLE   L/R CHANGE   B BACK" :
+        "L/R SPEED   B BACK");
     DrawPedestal(d);
     DrawConsole(d, rows, nRows, s_row, selectable, 0);
 }
@@ -1736,25 +1802,34 @@ static void RenderVideo(IDirect3DDevice8* d) {
     char aspRow[40], resRow[40], curRow[40], ssRow[40], num[8];
     const char* rows[6];
 
-    /* ---- Effects sub-menu: four On/Off toggles ---- */
+    /* ---- Effects sub-menu: toggles + live global visual intensity ---- */
     if (s_fxSub) {
-        char fxRows[6][40];
-        const char* rp[6];
+        char fxRows[12][48];
+        const char* rp[12];
         int i;
         for (i = 0; i < 6; i++) {
             int onoff = (st->fxFlags & k_fxBits[i]) ? 1 : 0;
             strcpy(fxRows[i], k_fxNames[i]);
-            /* pad to a column, then On/Off */
-            while ((int)strlen(fxRows[i]) < 14) strcat(fxRows[i], " ");
+            while ((int)strlen(fxRows[i]) < 15) strcat(fxRows[i], " ");
             strcat(fxRows[i], onoff ? "On" : "Off");
             rp[i] = fxRows[i];
         }
-        Chrome(d, "EFFECTS", "A TOGGLE   B BACK");
+        for (i = 6; i < 11; i++) {
+            char num[16];
+            int* value = FxPercentField(st, i);
+            strcpy(fxRows[i], k_fxPctNames[i - 6]);
+            while ((int)strlen(fxRows[i]) < 15) strcat(fxRows[i], " ");
+            IntToText(value ? *value : 100, num);
+            strcat(fxRows[i], num); strcat(fxRows[i], "%");
+            rp[i] = fxRows[i];
+        }
+        strcpy(fxRows[11], "Reset Visuals"); rp[11] = fxRows[11];
+        Chrome(d, "EFFECTS", "A TOGGLE/RESET   LEFT/RIGHT ADJUST   B BACK");
         DrawPedestal(d);
-        DrawConsole(d, rp, 6, s_fxRow, 6, 0);
+        DrawConsole(d, rp, 12, s_fxRow, 12, 0);
         {
             DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
-            Font_DrawText(d, 60.0f, 410.0f, "Customize the dashboard effects",
+            Font_DrawText(d, 60.0f, 410.0f, "Lighting and materials use active theme colors",
                 FONT_SIZE_SMALL, dim, 0);
         }
         return;
@@ -1795,7 +1870,8 @@ static void RenderVideo(IDirect3DDevice8* d) {
     rows[0] = aspRow; rows[1] = resRow; rows[2] = ssRow;
     rows[3] = "Calibrate Screen"; rows[4] = "Effects"; rows[5] = curRow;
 
-    Chrome(d, "VIDEO", "L/R CHANGE   A SELECT   B BACK");
+    Chrome(d, "VIDEO", (s_row <= 2) ? "L/R CHANGE   B BACK" :
+        (s_row == 3) ? "A CALIBRATE   B BACK" : "A EFFECTS   B BACK");
     DrawPedestal(d);
     DrawConsole(d, rows, 6, s_row, 5, 0);   /* rows 0-4 selectable; Output (5) read-only */
 
@@ -1842,7 +1918,8 @@ static void RenderNetwork(IDirect3DDevice8* d) {
     }
     rows[n++] = "Apply";
 
-    Chrome(d, "NETWORK", "L/R MODE   A EDIT/APPLY   B BACK");
+    Chrome(d, "NETWORK", (s_row == 0) ? "L/R MODE   B BACK" :
+        (s_row == NetRowCount() - 1) ? "A APPLY   B BACK" : "A EDIT   B BACK");
     DrawPedestal(d);
     {
         /* Static / DHCP+DNS: the logical cursor maps 1:1 to array rows (all
@@ -1894,7 +1971,8 @@ static void RenderFtp(IDirect3DDevice8* d) {
     rows[0] = svcRow; rows[1] = portRow; rows[2] = userRow; rows[3] = passRow;
     rows[4] = "Apply";
 
-    Chrome(d, "FTP", "A EDIT/TOGGLE   B BACK");
+    Chrome(d, "FTP", (s_row == 0) ? "A TOGGLE   B BACK" :
+        (s_row == 4) ? "A APPLY   B BACK" : "A EDIT   B BACK");
     DrawPedestal(d);
     DrawConsole(d, rows, 5, s_row, 5, 1);   /* Apply pinned to frame bottom */
 
@@ -1955,7 +2033,10 @@ static void RenderClock(IDirect3DDevice8* d) {
     rows[0] = tRow; rows[1] = moRow; rows[2] = dRow; rows[3] = yRow;
     rows[4] = ntpRow; rows[5] = tzRow; rows[6] = "Sync Now"; rows[7] = "Apply";
 
-    Chrome(d, "CLOCK", "L/R ADJUST   A SWITCH/APPLY   B BACK");
+    Chrome(d, "CLOCK", (s_row == 7) ? "A APPLY   B BACK" :
+        (s_row == 6) ? "A SYNC   B BACK" :
+        (s_row == 0) ? "A FIELD   L/R ADJUST   B BACK" :
+        (s_row == 4) ? "A TOGGLE   B BACK" : "L/R ADJUST   B BACK");
     DrawPedestal(d);
     DrawConsole(d, rows, 8, s_row, 8, 1);   /* Apply pinned to frame bottom */
 
@@ -2004,12 +2085,6 @@ static void RenderUpdate(IDirect3DDevice8* d) {
     /* slim status bar, centered on screen (like the bottom bar) */
     float bx = 112.0f, by = 180.0f, bw = 416.0f, bh = 32.0f;
 
-    Chrome(d, "UPDATE", "");
-
-    /* installed version (top) -- centered across the full screen width */
-    line[0] = 0; lstrcatA(line, "Installed: "); lstrcatA(line, Upd_LocalVersion());
-    Font_DrawTextCentered(d, 0.0f, 84.0f, 640.0f, line, FONT_SIZE_SMALL, dim);
-
     /* three simple states: checking / update found / no update found
        (plus the in-progress + done cases) */
     switch (st) {
@@ -2019,9 +2094,14 @@ static void RenderUpdate(IDirect3DDevice8* d) {
     case UPD_DOWNLOADING: status = "Downloading update";   sc = glow;   hint = ""; break;
     case UPD_EXTRACTING:  status = "Extracting update";    sc = glow;   hint = ""; break;
     case UPD_DONE:        status = "Update complete";      sc = accent; hint = "A RELAUNCH"; break;
-    case UPD_ERROR:       status = "No update found";      sc = dim;    hint = "A RE-CHECK   B BACK"; break;
+    case UPD_ERROR:       status = "Update failed";        sc = dim;    hint = "A RE-CHECK   B BACK"; break;
     default:              status = "Press A to check";     sc = text;   hint = "A CHECK   B BACK"; break;
     }
+    Chrome(d, "UPDATE", hint);  /* one themed footer, consistent with other panels */
+
+    /* installed version (top) -- centered across the full screen width */
+    line[0] = 0; lstrcatA(line, "Installed: "); lstrcatA(line, Upd_LocalVersion());
+    Font_DrawTextCentered(d, 0.0f, 84.0f, 640.0f, line, FONT_SIZE_SMALL, dim);
 
     /* slim bar holds the status line, text centered on the bar's span */
     if (bar) UI_DrawSprite(bar, bx, by, bw, bh, 0xFFFFFFFF, 0);
@@ -2040,12 +2120,6 @@ static void RenderUpdate(IDirect3DDevice8* d) {
         UpdProgBar(d, bx + 16.0f, by + 53.0f, bw - 32.0f, 14.0f, pct);
     }
 
-    /* footer hint -- centered across the full bottom bar */
-    {
-        const Texture* foot = Theme_Asset("bar_footer");
-        if (foot) UI_DrawSprite(foot, 8.0f, 442.0f, 624.0f, 32.0f, 0xFFFFFFFF, 0);
-        if (hint[0]) Font_DrawTextCentered(d, 8.0f, 449.0f, 624.0f, hint, FONT_SIZE_SMALL, text);
-    }
 }
 
 /*---- render: Theme ---------------------------------------------------------*/
@@ -2079,8 +2153,8 @@ static void RenderTheme(IDirect3DDevice8* d) {
             Iso_FillRect(menuX + 18.0f, rowY0 + rowDY * (float)i - 4.0f, 210.0f, 26.0f,
                 UI_ARGB(90, ar, ag, ab), 1);
         c = (idx == s_themeCursor) ? glow : (idx == 0 ? accent : text);
-        Font_DrawTextIso(d, menuX + 28.0f, rowY0 + rowDY * (float)i,
-            nm, FONT_SIZE_SMALL, c);
+        Font_DrawTextIsoClip(d, menuX + 28.0f, rowY0 + rowDY * (float)i,
+            nm, FONT_SIZE_SMALL, c, 212.0f);
     }
     Iso_End();
 
@@ -2123,8 +2197,8 @@ static void RenderFont(IDirect3DDevice8* d) {
             Iso_FillRect(menuX + 18.0f, rowY0 + rowDY * (float)i - 4.0f, 210.0f, 26.0f,
                 UI_ARGB(90, ar, ag, ab), 1);
         c = (idx == s_fontCursor) ? glow : (idx == 0 ? accent : text);
-        Font_DrawTextIso(d, menuX + 28.0f, rowY0 + rowDY * (float)i,
-            nm, FONT_SIZE_SMALL, c);
+        Font_DrawTextIsoClip(d, menuX + 28.0f, rowY0 + rowDY * (float)i,
+            nm, FONT_SIZE_SMALL, c, 212.0f);
     }
     Iso_End();
 

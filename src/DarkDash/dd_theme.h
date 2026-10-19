@@ -34,6 +34,11 @@ extern "C" {
        Returns NULL if not found. Texture lifetime is owned by the theme. */
     const Texture* Theme_Asset(const char* name);
 
+    /* Approved visual role: [assets] ui.menu.frame=... etc. Existing named
+       assets remain the fallback; unknown roles return NULL. Does not read
+       layout or navigation directives. Texture ownership stays with theme. */
+    const Texture* Theme_RoleAsset(const char* role);
+
     /* Resolve a raw asset/icon file (e.g. "s2_020.png") to a full path, preferring
        the ACTIVE theme's assets\raw folder and falling back to the default theme
        if the active theme doesn't ship that file. Writes the chosen path into out.
@@ -58,11 +63,42 @@ extern "C" {
     DWORD Theme_GlowColor(void);       /* ARGB; defaults to palette.glow */
     int   Theme_GlowIntensity(void);   /* 0..100, default 100            */
 
+    /* A3: optional [stage.lighting] controls, parsed once on Theme_Load.
+       All fields have backward-compatible defaults derived from [palette].
+       Material changes how the EXISTING plasma geometry is shaded; no extra
+       meshes, assets or new UI/navigation rules are required.
+       Intensities use percent (0..200), motion/pulse (0..200). */
+    enum { DD_STAGE_LIQUID = 0, DD_STAGE_HOLOGRAM = 1, DD_STAGE_METAL = 2 };
+    typedef struct ThemeStageLighting {
+        DWORD ambient;           /* raw ambient RGB (default 303030) */
+        DWORD key;               /* directional key light (default FFFFFF) */
+        DWORD emissive;          /* orb emissive tint (default accent) */
+        DWORD beam;              /* pedestal shaft tint (default accent) */
+        DWORD arcs;              /* arc tint (default auto plasma highlight) */
+        int material;            /* liquid (legacy), hologram, metal */
+        int ambientLevel;        /* 0..200 percent */
+        int keyLevel;            /* 0..200 percent */
+        int emissiveLevel;       /* 0..200 percent */
+        int specularLevel;       /* 0..200 percent */
+        int beamLevel;           /* 0..200 percent */
+        int arcLevel;            /* 0..200 percent */
+        int motionLevel;        /* 0..200 percent */
+        int pulseLevel;         /* 0..200 percent */
+        int specularPower;      /* 2..96 */
+        int arcsExplicit;       /* 1 only if [stage.lighting] arcs supplied */
+    } ThemeStageLighting;
+    const ThemeStageLighting* Theme_StageLighting(void);
+
     /*---- optional painted background -------------------------------------------
        From [background]: if module=static and image=<file> loads, returns its
        texture (drawn full-screen behind everything); else NULL -> caller uses the
        solid palette.bg + procedural bloom. */
     const Texture* Theme_BackgroundImage(void);
+
+    /* Optional legacy [background] parallax (0.0 = fixed; 1.0 = maximum).
+       Invalid/missing values are treated as zero. The existing INI format
+       and all stage/region declarations are preserved. */
+    float Theme_BackgroundParallax(void);
 
 #ifdef __cplusplus
 }

@@ -13,12 +13,13 @@
 #include "dd_browse.h"
 #include "dd_osk.h"
 #include "dd_custom.h"
+#include "dd_path.h"
 
 enum { CA_FOLDER = 0, CA_NAME };
 
 static int  s_open = 0;
 static int  s_state = CA_FOLDER;
-static char s_path[256];
+static char s_path[DD_PATH_MAX];
 
 void CustomAdd_Open(void) {
     s_open = 1;

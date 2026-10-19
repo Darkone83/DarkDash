@@ -17,6 +17,7 @@
 #include "dd_theme.h"
 #include "dd_texture.h"
 #include "font.h"
+#include "dd_hints.h"
 #include "input.h"
 #include "dd_audio.h"
 #include "dd_backdrop.h"
@@ -27,6 +28,8 @@
 #include "dd_copyjob.h"
 #include "dd_osk.h"
 #include "dd_mount.h"
+#include "dd_storage.h"
+#include "dd_select.h"
 #include "FileMan.h"
 
 #define FM_PATH_MAX     256
@@ -53,6 +56,7 @@ typedef struct {
 
 static Pane s_pane[2];        /* 0 = source (left), 1 = dest (right) */
 static int  s_active = 0;     /* which pane has focus */
+static int  s_haveSession = 0;/* preserve pane paths/cursors while DarkDash runs */
 
 /* ---- stage-2 modes / overlays / dialogs -------------------------------- */
 
@@ -125,21 +129,17 @@ static void AddEntry(Pane* p, const char* name, int isDir, int isDrive,
 static void SortPane(Pane* p);   /* fwd: order drive list by label */
 
 static void LoadDriveList(Pane* p) {
-    static const char* k_hdd[] = { "C", "E", "F", "G", "X", "Y", "Z", 0 };
     int mu, di;
     p->count = 0; p->cursor = 0; p->scroll = 0;
     p->path[0] = 0;
 
-    for (di = 0; k_hdd[di]; di++) {
-        char root[8];
-        DWORD attr;
-        root[0] = k_hdd[di][0]; root[1] = ':'; root[2] = '\\'; root[3] = 0;
-        attr = GetFileAttributesA(root);
-        if (attr != 0xFFFFFFFF && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
-            char label[8];
-            label[0] = k_hdd[di][0]; label[1] = ':'; label[2] = 0;
-            AddEntry(p, label, 1, 1, root, 0);
-        }
+    for (di = 0; di < DD_Storage_Count(); di++) {
+        const DD_StorageVolume* v = DD_Storage_At(di);
+        char root[4], label[32];
+        if (!DD_Storage_Ready(v)) continue;
+        root[0] = v->letter; root[1] = ':'; root[2] = '\\'; root[3] = 0;
+        DD_Storage_Label(v, label, sizeof(label));
+        AddEntry(p, label, 1, 1, root, 0);
     }
     for (mu = 0; mu < 8; mu++) {
         int port = mu / 2, slot = mu % 2;
@@ -345,7 +345,8 @@ static void ReloadPane(Pane* p) {
     int cur = p->cursor, scr = p->scroll;
     char path[FM_PATH_MAX];
     FmCopy(path, sizeof(path), p->path);
-    LoadDirectory(p, path);            /* clears cursor/scroll */
+    if (path[0]) LoadDirectory(p, path);  /* clears cursor/scroll */
+    else         LoadDriveList(p);        /* virtual root: refresh mounted drives */
     if (cur >= p->count) cur = p->count - 1;
     if (cur < 0) cur = 0;
     p->cursor = cur;
@@ -427,12 +428,35 @@ static int RunClearCache(void) {
 /* ---- lifecycle --------------------------------------------------------- */
 
 void FileMan_Enter(void) {
-    Mu_MountAll();                         /* ensure drives + MUs are bound */
-    LoadDriveList(&s_pane[0]);
-    LoadDriveList(&s_pane[1]);
-    s_active = 0;
+    Mu_MountAll();                         /* ensure HDD0 + MUs are bound */
+    DD_Storage_RefreshSecondary();         /* expose HDD1 drive letters at entry */
+    if (!s_haveSession) {
+        LoadDriveList(&s_pane[0]);
+        LoadDriveList(&s_pane[1]);
+        s_active = 0;
+        s_haveSession = 1;
+    }
+    else {
+        int i;
+        /* Refresh contents while keeping each pane's current folder and cursor.
+           If a remembered folder disappeared (disc/MU removed, FTP rename, etc.)
+           fall back to the drive list instead of reopening a dead path. */
+        for (i = 0; i < 2; i++) {
+            Pane* p = &s_pane[i];
+            if (p->path[0]) {
+                DWORD attr = GetFileAttributesA(p->path);
+                if (attr != 0xFFFFFFFF && (attr & FILE_ATTRIBUTE_DIRECTORY)) ReloadPane(p);
+                else LoadDriveList(p);
+            }
+            else {
+                ReloadPane(p);       /* virtual drive root; keep highlighted drive */
+            }
+        }
+        if (s_active < 0 || s_active > 1) s_active = 0;
+    }
     s_mode = FM_BROWSE;
     s_msg[0] = 0;
+    Select_Reset();          /* active pane highlight starts on its current row */
 }
 
 int FileMan_Update(WORD pressed, WORD held) {
@@ -695,9 +719,12 @@ static void DrawPane(IDirect3DDevice8* d, const Pane* p, int isActive,
             isActive ? accent : dim, (int)(fw - 20.0f));
     }
 
+    /* Flat pane elevation, shared with every other framed screen. */
+    UI_DrawPanelDepthMasked(frame, px, fy, fw, fh, isActive ? 255 : 155, 0.0f, 0.0f, 0.0f, 0.0f);
     /* frame (flat; dim if not active) */
     if (frame) UI_DrawSprite(frame, px, fy, fw, fh,
         isActive ? 0xFFFFFFFF : UI_ARGB(140, 255, 255, 255), 0);
+    UI_DrawPanelLightingMasked(frame, px, fy, fw, fh, isActive ? 255 : 155, 0.0f, 0.0f, 0.0f, 0.0f);
 
     /* rows. Hard bottom limit: rows must stay above the free-space/scroll
        readout band at the frame foot. fitRows already accounts for this, but we
@@ -715,9 +742,14 @@ static void DrawPane(IDirect3DDevice8* d, const Pane* p, int isActive,
 
             if (ry + rowDY > rowBottomLimit) break;   /* would spill the band -> stop */
 
-            if (isActive && idx == p->cursor)
-                UI_FillRect(px + 18.0f, ry + hlY, fw - 36.0f, hlH,
+            if (isActive && idx == p->cursor) {
+                float sy = ry + hlY;
+                /* context includes the pane so LT/RT focus changes snap across
+                   columns, while movement within one pane springs smoothly. */
+                Select_Begin(0x3000 + s_active, sy);
+                Select_DrawGlowFlat(px + 18.0f, sy, fw - 36.0f, hlH,
                     UI_ARGB(70, ar, ag, ab));
+            }
             if (e->marked)
                 UI_FillRect(px + 18.0f, ry + hlY, 4.0f, hlH, mark);
 
@@ -755,11 +787,15 @@ static void DrawPane(IDirect3DDevice8* d, const Pane* p, int isActive,
 
 /* draw a themed, centered framed box (reuses the menu frame) */
 static void DrawFramedBox(IDirect3DDevice8* d, float x, float y, float w, float h) {
-    const Texture* frame = Theme_Asset("frame_menu_v");
+    const Texture* frame = Theme_Asset("frame_menu_h");
+    if (!frame) frame = Theme_Asset("frame_menu_v");
     /* dim the scene behind the dialog */
     UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(150, 0, 0, 0));
-    if (frame) UI_DrawSprite(frame, x, y, w, h, 0xFFFFFFFF, 0);
+    UI_DrawPanelDepthMasked(frame, x, y, w, h, 255, 24.0f, 20.0f, 24.0f, 20.0f);
+    if (frame) UI_DrawNineSlice(frame, x, y, w, h,
+        24.0f, 20.0f, 24.0f, 20.0f, 0xFFFFFFFF, 0);
     else       UI_FillRect(x, y, w, h, UI_ARGB(235, 18, 22, 18));
+    UI_DrawPanelLightingMasked(frame, x, y, w, h, 255, 24.0f, 20.0f, 24.0f, 20.0f);
 }
 
 void FileMan_Render(void) {
@@ -771,7 +807,6 @@ void FileMan_Render(void) {
     int   ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
     const Texture* hdr = Theme_Asset("bar_header");
     const Texture* frame = Theme_Asset("frame_menu_v");
-    const Texture* foot = Theme_Asset("bar_footer");
     const char* footHint;
 
     Backdrop_Draw();
@@ -818,13 +853,13 @@ void FileMan_Render(void) {
             FmCopy(line, sizeof(line), "this item");
         }
         Font_DrawText(d, bx + 20.0f, by + 52.0f, line, FONT_SIZE_SMALL, text, 0);
-        Font_DrawText(d, bx + 20.0f, by + 80.0f, "A = yes    B = no", FONT_SIZE_SMALL, dim, 0);
+        DD_Hints_Draw(d, bx + 20.0f, by + 78.0f, bw - 40.0f, 20.0f, "A YES  B NO", dim);
     }
     else if (s_mode == FM_CONFIRM_EXIT) {
         float bx = 200.0f, by = 200.0f, bw = 240.0f, bh = 96.0f;
         DrawFramedBox(d, bx, by, bw, bh);
         Font_DrawText(d, bx + 20.0f, by + 22.0f, "Exit file manager?", FONT_SIZE_MEDIUM, accent, 0);
-        Font_DrawText(d, bx + 20.0f, by + 58.0f, "A = yes    B = no", FONT_SIZE_SMALL, dim, 0);
+        DD_Hints_Draw(d, bx + 20.0f, by + 56.0f, bw - 40.0f, 20.0f, "A YES  B NO", dim);
     }
     else if (s_mode == FM_CONFIRM_CACHE) {
         float bx = 176.0f, by = 188.0f, bw = 288.0f, bh = 122.0f;
@@ -832,7 +867,7 @@ void FileMan_Render(void) {
         Font_DrawText(d, bx + 20.0f, by + 18.0f, "Clear cache?", FONT_SIZE_MEDIUM, accent, 0);
         Font_DrawText(d, bx + 20.0f, by + 48.0f, "Wipes X: Y: Z: cache partitions", FONT_SIZE_SMALL, text, (int)(bw - 40.0f));
         Font_DrawText(d, bx + 20.0f, by + 68.0f, "(saves are unaffected)", FONT_SIZE_SMALL, dim, (int)(bw - 40.0f));
-        Font_DrawText(d, bx + 20.0f, by + 92.0f, "A = yes    B = no", FONT_SIZE_SMALL, dim, 0);
+        DD_Hints_Draw(d, bx + 20.0f, by + 90.0f, bw - 40.0f, 20.0f, "A YES  B NO", dim);
     }
     else if (s_mode == FM_COPYING) {
         float bx = 160.0f, by = 180.0f, bw = 320.0f, bh = 130.0f;
@@ -888,9 +923,7 @@ void FileMan_Render(void) {
     case FM_COPYING:      footHint = "B CANCEL"; break;
     default:              footHint = "A ENTER  X UP  Y MARK  LT/RT PANE  BLACK OPS  B BACK"; break;
     }
-    if (foot) UI_DrawSprite(foot, 8.0f, 452.0f, 624.0f, 24.0f, 0xFFFFFFFF, 0);
-    if (footHint[0])
-        Font_DrawText(d, 31.0f, 452.0f, footHint, FONT_SIZE_SMALL, text, 610);
+    DD_Hints_Footer(d, 452.0f, 24.0f, 31.0f, 580.0f, footHint, text);
 
     /* text/config editor overlay sits above everything (incl. its own footer) */
     Edit_Draw(d);

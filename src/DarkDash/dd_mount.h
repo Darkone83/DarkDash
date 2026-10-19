@@ -4,8 +4,8 @@
     The kernel only auto-mounts D: (the running title's directory). Anything
     that touches C/E/F/G/X/Y/Z must symlink the letter to its partition device
     first. Call Mount_HddPartitions() once at boot before scanning drives.
-    Idempotent -- safe to call again (already-mounted just returns an error
-    code we ignore).
+    Safe to call again: primary symbolic links are replaced as before.
+    Secondary HDD aliases are mounted separately at boot by dd_storage.
 ---------------------------------------------------------------------------*/
 #ifndef DD_MOUNT_H
 #define DD_MOUNT_H

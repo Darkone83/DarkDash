@@ -10,59 +10,18 @@
 #include <xtl.h>
 #include "xboxinternals.h"
 #include "dd_mount.h"
+#include "dd_storage.h"
+#include "dd_path.h"
 
 /* STRING (kernel counted-string) and the Io*SymbolicLink externs now come from
    xboxinternals.h. Local alias keeps the existing call sites readable. */
 typedef STRING XBOX_STRING;
 
-struct DriveMap { const char* letter; const char* device; };
-
-static const DriveMap k_drives[] = {
-    { "C", "\\Device\\Harddisk0\\Partition2" },
-    { "E", "\\Device\\Harddisk0\\Partition1" },
-    { "F", "\\Device\\Harddisk0\\Partition6" },
-    { "G", "\\Device\\Harddisk0\\Partition7" },
-    { "X", "\\Device\\Harddisk0\\Partition3" },
-    { "Y", "\\Device\\Harddisk0\\Partition4" },
-    { "Z", "\\Device\\Harddisk0\\Partition5" }
-};
-
-/* Bind every entry in k_drives[]. C/E/F/G are the user partitions; X/Y/Z are
-   the game-cache partitions. We mount them all (the faithful XbDiag behaviour) --
-   they're real volumes the user may legitimately browse, and an absent one
-   (e.g. F:/G: on a stock drive) just symlinks to a device that isn't there, so
-   FindFirstFile fails harmlessly and the scan skips it. */
-#define DD_MOUNT_COUNT  ((int)(sizeof(k_drives) / sizeof(k_drives[0])))
-
+/* Primary bindings are now owned by dd_storage.cpp. This wrapper retains the
+   existing public API used by main.cpp and the MU module. Secondary aliases
+   are activated separately by dd_storage after primary-mount boot probing. */
 void Mount_HddPartitions(void) {
-    char linkBuf[8];
-    int  i, devLen;
-
-    for (i = 0; i < DD_MOUNT_COUNT; ++i) {
-        const char* dev = k_drives[i].device;
-
-        /* "\??\X:" -- 6 chars, plus NUL */
-        linkBuf[0] = '\\'; linkBuf[1] = '?'; linkBuf[2] = '?'; linkBuf[3] = '\\';
-        linkBuf[4] = k_drives[i].letter[0];
-        linkBuf[5] = ':';  linkBuf[6] = '\0';
-
-        devLen = 0; while (dev[devLen]) devLen++;
-
-        {
-            XBOX_STRING sLink = { 6, 7, linkBuf };
-            XBOX_STRING sDev = { (USHORT)devLen, (USHORT)(devLen + 1), (char*)dev };
-            /* Delete any existing mapping first, then create ours. Cerbios and
-               other loaders may leave E:/F:/G: pointing at the wrong device (or
-               unmapped), and a bare IoCreateSymbolicLink on an already-bound
-               letter returns 0xC0000035 and is ignored -- so without the delete
-               the stale/missing mapping wins and only C: (which the kernel binds
-               for us) ever resolves. Deleting first makes our known-good
-               partition map authoritative. A delete on an unbound letter just
-               fails harmlessly. */
-            IoDeleteSymbolicLink(&sLink);
-            IoCreateSymbolicLink(&sLink, &sDev);
-        }
-    }
+    DD_Storage_MountPrimary();
 }
 
 /*---------------------------------------------------------------------------
@@ -120,11 +79,14 @@ int Mount_LaunchXbe(const char* dosPath) {
     char        drive;
     const char* device = NULL;
     int         i, len, lastBs, j, k;
-    char        devPath[300];
-    char        launchPath[64];
+    char        devPath[DD_PATH_MAX + 64];
+    char        launchPath[DD_PATH_MAX];
     char        linkBuf[8];
 
     if (!dosPath || !dosPath[0]) return 1;
+    len = DD_PathLen(dosPath);
+    if (len <= 3 || len >= DD_PATH_MAX || !DD_PathIsDosAbsolute(dosPath)) return 3;
+
     drive = (dosPath[0] >= 'a' && dosPath[0] <= 'z')
         ? (char)(dosPath[0] - 32) : dosPath[0];
 
@@ -138,20 +100,26 @@ int Mount_LaunchXbe(const char* dosPath) {
         device = "\\Device\\Cdrom0";
     }
     else {
-        for (i = 0; i < 7; ++i)
-            if (k_drives[i].letter[0] == drive) { device = k_drives[i].device; break; }
+        device = DD_Storage_LaunchDevice(drive);
     }
     if (!device) return 2;
 
-    len = 0; while (dosPath[len]) len++;
     lastBs = -1;
     for (i = 0; i < len; ++i) if (dosPath[i] == '\\') lastBs = i;
-    if (lastBs < 2) return 3;               /* need at least "X:\file" */
+    if (lastBs < 2 || lastBs >= len - 1) return 3; /* need at least "X:\file" */
 
-    /* devPath = partition device + the directory part after "X:" (indices 2..lastBs) */
+    /* devPath = device prefix + directory part after "X:". Refuse a path that
+       does not fit rather than mounting a silently truncated directory. */
     j = 0;
-    while (device[j] && j < (int)sizeof(devPath) - 1) { devPath[j] = device[j]; j++; }
-    for (k = 2; k < lastBs && j < (int)sizeof(devPath) - 1; ++k) devPath[j++] = dosPath[k];
+    while (device[j]) {
+        if (j >= (int)sizeof(devPath) - 1) return 3;
+        devPath[j] = device[j];
+        j++;
+    }
+    for (k = 2; k < lastBs; ++k) {
+        if (j >= (int)sizeof(devPath) - 1) return 3;
+        devPath[j++] = dosPath[k];
+    }
     devPath[j] = '\0';
 
     /* remap "\??\D:" -> devPath */
@@ -162,16 +130,31 @@ int Mount_LaunchXbe(const char* dosPath) {
         XBOX_STRING sLink = { 6, 7, linkBuf };
         XBOX_STRING sDev = { (USHORT)devLen, (USHORT)(devLen + 1), devPath };
         IoDeleteSymbolicLink(&sLink);
-        if (IoCreateSymbolicLink(&sLink, &sDev) != 0) return 4;
+        if (IoCreateSymbolicLink(&sLink, &sDev) != 0) {
+            /* D: was removed before the failed remap; put DarkDash back on its
+               own asset directory before returning to the caller. */
+            Mount_SelfToD();
+            return 4;
+        }
     }
 
     /* build "D:\<filename>" from the part after the last backslash */
+    /* A FATX leaf should already be small, but keep this exact: never turn an
+       overlong launch request into a different/truncated filename. */
+    if ((len - (lastBs + 1)) + 3 >= (int)sizeof(launchPath)) {
+        Mount_SelfToD();
+        return 3;
+    }
     k = 0;
     launchPath[k++] = 'D'; launchPath[k++] = ':'; launchPath[k++] = '\\';
-    for (i = lastBs + 1; dosPath[i] && k < (int)sizeof(launchPath) - 1; ++i)
+    for (i = lastBs + 1; dosPath[i]; ++i)
         launchPath[k++] = dosPath[i];
     launchPath[k] = '\0';
 
     XLaunchNewImage(launchPath, NULL);
-    return 5;                               /* only reached if the launch failed */
+
+    /* A successful launch never returns. If it does, immediately restore the
+       dashboard's asset mount before the caller resumes rendering. */
+    Mount_SelfToD();
+    return 5;
 }

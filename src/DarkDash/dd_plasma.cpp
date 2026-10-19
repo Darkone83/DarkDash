@@ -150,6 +150,16 @@ static DWORD hsv2rgb(float h, float s, float v) {
     return ((DWORD)r << 16) | ((DWORD)g << 8) | (DWORD)b;
 }
 /* clamp + pack helpers */
+static int clampbyte(int x) { return x > 255 ? 255 : (x < 0 ? 0 : x); }
+static DWORD scale_rgb(DWORD c, int pct) {
+    return ((DWORD)clampbyte((int)((c >> 16) & 255) * pct / 100) << 16) |
+        ((DWORD)clampbyte((int)((c >> 8) & 255) * pct / 100) << 8) |
+        (DWORD)clampbyte((int)(c & 255) * pct / 100);
+}
+static float colf(DWORD c, int shift) { return (float)((c >> shift) & 255) / 255.0f; }
+static DWORD color_alpha(DWORD color, int alpha) {
+    return ((DWORD)clampbyte(alpha) << 24) | (color & 0x00FFFFFF);
+}
 static DWORD clampcol(int r, int g, int b) {
     if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255;
     if (r < 0) r = 0; if (g < 0) g = 0; if (b < 0) b = 0;
@@ -199,21 +209,27 @@ void Plasma_Draw(float vx, float vy, float vw, float vh, DWORD accent, DWORD glo
     D3DXMATRIX   view, proj, ident;
     D3DXVECTOR3  eye, at, up;
     D3DLIGHT8    light; D3DMATERIAL8 mat; AVert beam[6];
+    const ThemeStageLighting* ls = Theme_StageLighting();
+    float motionF, pulseF, blobAlpha;
     float t, cosA, sinA, cosT, sinT, scale, breathe, lump, lf, hf;
     float l0x, l0y, l0z, l1x, l1y, l1z, l2x, l2y, l2z;
-    float ex = 0, ey = 0, ez = 0, escAmp = 0, br, bg, bb;
+    float ex = 0, ey = 0, ez = 0, escAmp = 0;
     int   n, i, j, v, apexA, t1, t2, t3; DWORD ms, apexC, topC, ecycle, ephase;
 
     (void)glow;
     if (!d) return;
+    motionF = (float)ls->motionLevel * 0.01f;
+    pulseF = (float)ls->pulseLevel * 0.01f;
+    blobAlpha = ls->material == DD_STAGE_METAL ? 200.0f :
+        (ls->material == DD_STAGE_HOLOGRAM ? 84.0f : (float)PL_ALPHA);
     plasma_init(); plasma_palette(accent);
 
-    ms = GetTickCount(); t = (float)ms;
-    t1 = (int)(ms / 22); t2 = (int)(ms / 31); t3 = (int)(ms / 41);
+    ms = GetTickCount(); t = (float)ms * motionF;
+    t1 = (int)(t / 22); t2 = (int)(t / 31); t3 = (int)(t / 41);
     cosA = (float)cos(t * 0.00038f); sinA = (float)sin(t * 0.00038f);
     cosT = (float)cos(PL_TILT);      sinT = (float)sin(PL_TILT);
-    scale = PL_RADIUS * (1.0f + PL_PULSE * (float)sin(t * 0.0016f));
-    breathe = PL_BREATHE * (float)sin(t * 0.0011f);
+    scale = PL_RADIUS * (1.0f + PL_PULSE * pulseF * (float)sin(t * 0.0016f));
+    breathe = PL_BREATHE * pulseF * (float)sin(t * 0.0011f);
 
     /* music reactivity, split by band: BASS swells/lumps the body, TREBLE feeds
        the sparks (arcs). Both ease back to the calm baseline when quiet. */
@@ -225,8 +241,8 @@ void Plasma_Draw(float vx, float vy, float vw, float vh, DWORD accent, DWORD glo
         hiS += ((float)hi / 255.0f - hiS) * PL_REACT_SMOOTH_HI;
         lf = loS; hf = hiS;
     }
-    scale *= (1.0f + PL_REACT_PULSE * lf);
-    lump = PL_LUMP * (1.0f + PL_REACT_LUMP * lf);
+    scale *= (1.0f + PL_REACT_PULSE * pulseF * lf);
+    lump = PL_LUMP * (0.35f + 0.65f * motionF) * (1.0f + PL_REACT_LUMP * lf);
 
     l0x = (float)sin(t * 0.00060f); l0y = (float)cos(t * 0.00048f); l0z = (float)sin(t * 0.00072f); norm3(&l0x, &l0y, &l0z);
     l1x = (float)cos(t * 0.00052f); l1y = (float)sin(t * 0.00067f); l1z = (float)cos(t * 0.00041f); norm3(&l1x, &l1y, &l1z);
@@ -275,7 +291,7 @@ void Plasma_Draw(float vx, float vy, float vw, float vh, DWORD accent, DWORD glo
         pv = s_sin[(ii * 19 + t1) & PL_MASK] + s_sin[(jj * 26 + t2) & PL_MASK]
             + s_sin[((ii + jj) * 11 + t3) & PL_MASK];
         ci = (pv + 765) * 255 / 1530; if (ci < 0) ci = 0; else if (ci > 255) ci = 255;
-        s_col[n] = ((DWORD)PL_ALPHA << 24) | ((DWORD)s_pal[ci][0] << 16) | ((DWORD)s_pal[ci][1] << 8) | (DWORD)s_pal[ci][2];
+        s_col[n] = ((DWORD)(int)blobAlpha << 24) | ((DWORD)s_pal[ci][0] << 16) | ((DWORD)s_pal[ci][1] << 8) | (DWORD)s_pal[ci][2];
     }
 
     /* ---- recompute smooth normals from the deformed surface ---- */
@@ -318,7 +334,7 @@ void Plasma_Draw(float vx, float vy, float vw, float vh, DWORD accent, DWORD glo
     /* ---- the pedestal: themed platform sprite (same placement the launcher and
        egg use), drawn in 2D BEFORE switching to the 3D sub-viewport ---- */
     {
-        const Texture* basep = Theme_Asset("platform_round");
+        const Texture* basep = Theme_RoleAsset("stage.platform");
         if (basep) UI_DrawSprite(basep, 70.0f, 270.0f, 220.0f, 116.0f, 0xFFFFFFFF, 0);
     }
     (void)vx; (void)vy; (void)vw; (void)vh;   /* blob uses the pedestal's placement */
@@ -336,11 +352,10 @@ void Plasma_Draw(float vx, float vy, float vw, float vh, DWORD accent, DWORD glo
     d->SetTransform(D3DTS_PROJECTION, (D3DMATRIX*)&proj);
     d->SetTransform(D3DTS_WORLD, (D3DMATRIX*)&ident);
 
-    br = (float)((accent >> 16) & 0xFF) / 255.0f; bg = (float)((accent >> 8) & 0xFF) / 255.0f; bb = (float)(accent & 0xFF) / 255.0f;
-
     /* ---- pedestal light shaft (additive, unlit) ---- */
-    apexA = 150 + (int)((ms >> 4) & 63);
-    apexC = ((DWORD)apexA << 24) | (accent & 0x00FFFFFF); topC = (accent & 0x00FFFFFF);
+    apexA = (150 + (int)((ms >> 4) & 63)) * ls->beamLevel / 100;
+    apexC = color_alpha(ls->beam, apexA);
+    topC = color_alpha(ls->beam, 0);
     beam[0].x = 0; beam[0].y = -1.85f; beam[0].z = 0; beam[0].c = apexC;
     beam[1].x = -0.9f; beam[1].y = -0.95f; beam[1].z = 0; beam[1].c = topC;
     beam[2].x = 0.9f; beam[2].y = -0.95f; beam[2].z = 0; beam[2].c = topC;
@@ -364,18 +379,22 @@ void Plasma_Draw(float vx, float vy, float vw, float vh, DWORD accent, DWORD glo
     /* ---- the lit flubber: vertex colour feeds diffuse, material gives the sheen ---- */
     memset(&light, 0, sizeof(light));
     light.Type = D3DLIGHT_DIRECTIONAL;
-    light.Diffuse.r = light.Diffuse.g = light.Diffuse.b = 1.0f;
+    light.Diffuse.r = colf(ls->key, 16) * (float)ls->keyLevel / 100.0f;
+    light.Diffuse.g = colf(ls->key, 8) * (float)ls->keyLevel / 100.0f;
+    light.Diffuse.b = colf(ls->key, 0) * (float)ls->keyLevel / 100.0f;
     light.Specular.r = light.Specular.g = light.Specular.b = 1.0f;
     light.Direction.x = 0.40f; light.Direction.y = -0.55f; light.Direction.z = 0.73f;
     d->SetLight(0, &light); d->LightEnable(0, TRUE);
 
     memset(&mat, 0, sizeof(mat));
-    mat.Specular.r = mat.Specular.g = mat.Specular.b = 1.0f;
-    mat.Emissive.r = br * 0.14f; mat.Emissive.g = bg * 0.14f; mat.Emissive.b = bb * 0.14f;
-    mat.Power = PL_SPECPOW;
+    mat.Specular.r = mat.Specular.g = mat.Specular.b = (float)ls->specularLevel / 100.0f;
+    mat.Emissive.r = colf(ls->emissive, 16) * 0.14f * (float)ls->emissiveLevel / 100.0f;
+    mat.Emissive.g = colf(ls->emissive, 8) * 0.14f * (float)ls->emissiveLevel / 100.0f;
+    mat.Emissive.b = colf(ls->emissive, 0) * 0.14f * (float)ls->emissiveLevel / 100.0f;
+    mat.Power = (float)ls->specularPower;
     d->SetMaterial(&mat);
 
-    d->SetRenderState(D3DRS_AMBIENT, 0x00303030);
+    d->SetRenderState(D3DRS_AMBIENT, scale_rgb(ls->ambient, ls->ambientLevel));
     d->SetRenderState(D3DRS_LIGHTING, TRUE);
     d->SetRenderState(D3DRS_SPECULARENABLE, TRUE);
     d->SetRenderState(D3DRS_LOCALVIEWER, TRUE);
@@ -453,13 +472,14 @@ void Plasma_Draw(float vx, float vy, float vw, float vh, DWORD accent, DWORD glo
             s_arcB[g2] = (int)(prng() % (unsigned long)SPH_GRID);
         }
     }
-    {
-        int gr = (int)((s_accent >> 16) & 0xFF), gg = (int)((s_accent >> 8) & 0xFF), gb = (int)(s_accent & 0xFF);
-        float ab = 0.18f + 1.10f * hf;          /* treble sparks the arcs */
+    if (ls->arcLevel > 0) {
+        DWORD arcRgb = ls->arcsExplicit ? ls->arcs : s_accent;
+        int gr = (int)((arcRgb >> 16) & 0xFF), gg = (int)((arcRgb >> 8) & 0xFF), gb = (int)(arcRgb & 0xFF);
+        float ab = (0.18f + 1.10f * hf) * (float)ls->arcLevel / 100.0f;
         DWORD hot = 0xFF000000u
-            | ((DWORD)(int)(((gr + 255) / 2) * ab) << 16)
-            | ((DWORD)(int)(((gg + 255) / 2) * ab) << 8)
-            | (DWORD)(int)(((gb + 255) / 2) * ab);
+            | ((DWORD)clampbyte((int)(((gr + 255) / 2) * ab)) << 16)
+            | ((DWORD)clampbyte((int)(((gg + 255) / 2) * ab)) << 8)
+            | (DWORD)clampbyte((int)(((gb + 255) / 2) * ab));
         int g2, k, pass;
         for (g2 = 0; g2 < PL_ARCS; g2++) {
             int a = s_arcA[g2], b = s_arcB[g2];
@@ -481,6 +501,10 @@ void Plasma_Draw(float vx, float vy, float vw, float vh, DWORD accent, DWORD glo
     }
 
     /* ---- restore 2D-friendly state ---- */
+    d->LightEnable(0, FALSE);
+    d->SetRenderState(D3DRS_LIGHTING, FALSE);
+    d->SetRenderState(D3DRS_SPECULARENABLE, FALSE);
+    d->SetRenderState(D3DRS_COLORVERTEX, FALSE);
     d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
     d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
     d->SetRenderState(D3DRS_ZENABLE, FALSE);

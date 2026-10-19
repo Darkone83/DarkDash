@@ -420,7 +420,9 @@ void Edit_Draw(IDirect3DDevice8* d) {
     frame = Theme_Asset("frame_menu_v");
 
     UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(170, 0, 0, 0));
+    UI_DrawPanelDepthMasked(frame, ED_FX, ED_FY, ED_FW, ED_FH, 255, 0.0f, 0.0f, 0.0f, 0.0f);
     if (frame) UI_DrawSprite(frame, ED_FX, ED_FY, ED_FW, ED_FH, 0xFFFFFFFF, 0);
+    UI_DrawPanelLightingMasked(frame, ED_FX, ED_FY, ED_FW, ED_FH, 255, 0.0f, 0.0f, 0.0f, 0.0f);
 
     /* title bar: filename + dirty marker */
     {
@@ -497,7 +499,9 @@ void Edit_Draw(IDirect3DDevice8* d) {
         float bw = 320.0f, bh = 96.0f;
         float bx = 320.0f - bw * 0.5f, by = 240.0f - bh * 0.5f;
         UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(140, 0, 0, 0));
+        UI_DrawPanelDepth(bx, by, bw, bh, 255);
         UI_FillRect(bx, by, bw, bh, UI_ARGB(235, 12, 22, 12));
+        UI_DrawPanelLighting(bx, by, bw, bh, 255);
         Font_DrawTextCentered(d, 320.0f, by + 20.0f, bw, "Save changes before exit?", FONT_SIZE_SMALL, text);
         Font_DrawTextCentered(d, 320.0f, by + 54.0f, bw, "A = Save   B = Discard   BACK = Cancel", FONT_SIZE_SMALL, dim);
     }

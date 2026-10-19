@@ -15,10 +15,11 @@
 ---------------------------------------------------------------------------*/
 #include <xtl.h>
 #include "dd_launcher.h"   /* LauncherConfig */
+#include "dd_path.h"
 
 #define CUSTOM_MAX        16    /* max custom categories            */
 #define CUSTOM_NAME_MAX   32    /* display title                    */
-#define CUSTOM_PATH_MAX   120   /* scan folder (matches dd_paths)   */
+#define CUSTOM_PATH_MAX   DD_PATH_MAX   /* shared DOS path capacity       */
 #define CUSTOM_ID_MAX     16    /* "cust" + decimal counter + NUL   */
 
 #ifdef __cplusplus

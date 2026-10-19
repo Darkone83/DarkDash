@@ -23,12 +23,15 @@
 #include "dd_plasma.h"
 #include "dd_texture.h"
 #include "font.h"
+#include "dd_hints.h"
 #include "input.h"
 #include "dd_audio.h"
+#include "dd_jukebox.h"
 #include "dd_data.h"
 #include "dd_backdrop.h"
 #include "dd_swing.h"
 #include "dd_mount.h"
+#include "dd_storage.h"
 #include "dd_disc.h"
 #include "dd_egg.h"
 #include "dd_calib.h"
@@ -62,6 +65,117 @@
 #include "FileMan.h"
 #include "Settings.h"
 
+/* A4 environmental depth is shared across every menu and dialog.
+   DD_A4_DEPTH lives in dd_ui.h (or a project-wide compiler definition),
+   so one switch consistently controls every translation unit. */
+
+   /* P4 diagnostic overlay. Compile with DD_PERF_HUD=1 to profile on-console.
+      0 compiles out ALL new timing/rendering work. No settings or input changes. */
+#ifndef DD_PERF_HUD
+#define DD_PERF_HUD 0
+#endif
+#if DD_PERF_HUD
+#include <stdio.h>
+
+      /* GetTickCount has 1-ms granularity: these numbers are diagnostics, not GPU
+         timer queries. Render measures CPU-side draw submission; Present includes
+         any VBlank wait. FTP cost is inclusive of any synchronous disk I/O. */
+typedef struct {
+    DWORD frames, elapsedMs, avgFrameMs10, peakFrameMs;
+    DWORD spikeCount, avgFtpMs10, peakFtpMs;
+    DWORD avgRenderMs10, peakRenderMs, avgPresentMs10, peakPresentMs;
+    DWORD fps10;
+} DD_PerfSnapshot;
+
+static DD_PerfSnapshot s_perfSnapshot;
+static DWORD s_perfWindowAt = 0;
+static DWORD s_perfLastFrameAt = 0;
+static DWORD s_perfFrames = 0;
+static DWORD s_perfFrameTotal = 0, s_perfFramePeak = 0, s_perfSpikes = 0;
+static DWORD s_perfFtpTotal = 0, s_perfFtpPeak = 0;
+static DWORD s_perfDrawTotal = 0, s_perfDrawPeak = 0;
+static DWORD s_perfPresentTotal = 0, s_perfPresentPeak = 0;
+
+/* Only record complete frame intervals; an occasional slow asset decode is
+   still visible as a spike but a large clock gap cannot overflow the sums. */
+static void Perf_BeginLoop(void) {
+    DWORD now = GetTickCount();
+    if (!s_perfWindowAt) s_perfWindowAt = now;
+    if (s_perfLastFrameAt) {
+        DWORD dt = now - s_perfLastFrameAt;
+        if (dt < 2000u) {
+            s_perfFrameTotal += dt;
+            if (dt > s_perfFramePeak) s_perfFramePeak = dt;
+            if (dt > ((Gfx_VideoModeStr()[0] == '5') ? 25u : 20u)) ++s_perfSpikes;
+            ++s_perfFrames;
+        }
+    }
+    s_perfLastFrameAt = now;
+    if ((DWORD)(now - s_perfWindowAt) >= 1000u && s_perfFrames) {
+        DWORD elapsed = now - s_perfWindowAt;
+        s_perfSnapshot.frames = s_perfFrames;
+        s_perfSnapshot.elapsedMs = elapsed;
+        s_perfSnapshot.fps10 = (s_perfFrames * 10000u) / elapsed;
+        s_perfSnapshot.avgFrameMs10 = (s_perfFrameTotal * 10u) / s_perfFrames;
+        s_perfSnapshot.peakFrameMs = s_perfFramePeak;
+        s_perfSnapshot.spikeCount = s_perfSpikes;
+        s_perfSnapshot.avgFtpMs10 = (s_perfFtpTotal * 10u) / s_perfFrames;
+        s_perfSnapshot.peakFtpMs = s_perfFtpPeak;
+        s_perfSnapshot.avgRenderMs10 = (s_perfDrawTotal * 10u) / s_perfFrames;
+        s_perfSnapshot.peakRenderMs = s_perfDrawPeak;
+        s_perfSnapshot.avgPresentMs10 = (s_perfPresentTotal * 10u) / s_perfFrames;
+        s_perfSnapshot.peakPresentMs = s_perfPresentPeak;
+        s_perfFrames = 0;
+        s_perfFrameTotal = s_perfFramePeak = s_perfSpikes = 0;
+        s_perfFtpTotal = s_perfFtpPeak = 0;
+        s_perfDrawTotal = s_perfDrawPeak = 0;
+        s_perfPresentTotal = s_perfPresentPeak = 0;
+        s_perfWindowAt = now;
+    }
+}
+
+static void Perf_RecordCost(DWORD cost, DWORD* total, DWORD* peak) {
+    /* Ignore extreme pauses when summing so arithmetic stays bounded. */
+    if (cost > 2000u) cost = 2000u;
+    *total += cost;
+    if (cost > *peak) *peak = cost;
+}
+
+static void Perf_DrawHud(void) {
+    char line[112];
+    IDirect3DDevice8* d = Gfx_Device();
+    const DWORD txt = UI_ARGB(255, 238, 249, 240);
+    DWORD s = s_perfSnapshot.fps10;
+    if (!d || !s_perfSnapshot.frames) return;
+    UI_FillRect(8.0f, 54.0f, 296.0f, 114.0f, UI_ARGB(208, 10, 13, 18));
+    _snprintf(line, sizeof(line) - 1, "PERF %s %dx%d  MSAA %dx", Gfx_VideoModeStr(),
+        Gfx_Width(), Gfx_Height(), Gfx_MsaaSamples());
+    line[sizeof(line) - 1] = 0;
+    Font_DrawText(d, 14.0f, 58.0f, line, FONT_SIZE_SMALL, txt, 284);
+    _snprintf(line, sizeof(line) - 1, "FPS %lu.%lu  frame %lu.%lums peak %lums  >budget %lu",
+        (unsigned long)(s / 10u), (unsigned long)(s % 10u),
+        (unsigned long)(s_perfSnapshot.avgFrameMs10 / 10u),
+        (unsigned long)(s_perfSnapshot.avgFrameMs10 % 10u),
+        (unsigned long)s_perfSnapshot.peakFrameMs,
+        (unsigned long)s_perfSnapshot.spikeCount);
+    line[sizeof(line) - 1] = 0;
+    Font_DrawText(d, 14.0f, 82.0f, line, FONT_SIZE_SMALL, txt, 284);
+    _snprintf(line, sizeof(line) - 1, "FTP %lu.%lums / %lums peak",
+        (unsigned long)(s_perfSnapshot.avgFtpMs10 / 10u),
+        (unsigned long)(s_perfSnapshot.avgFtpMs10 % 10u),
+        (unsigned long)s_perfSnapshot.peakFtpMs);
+    line[sizeof(line) - 1] = 0;
+    Font_DrawText(d, 14.0f, 104.0f, line, FONT_SIZE_SMALL, txt, 284);
+    _snprintf(line, sizeof(line) - 1, "DRAW %lu.%lums / %lums peak  PRESENT %lums peak",
+        (unsigned long)(s_perfSnapshot.avgRenderMs10 / 10u),
+        (unsigned long)(s_perfSnapshot.avgRenderMs10 % 10u),
+        (unsigned long)s_perfSnapshot.peakRenderMs,
+        (unsigned long)s_perfSnapshot.peakPresentMs);
+    line[sizeof(line) - 1] = 0;
+    Font_DrawText(d, 14.0f, 126.0f, line, FONT_SIZE_SMALL, txt, 284);
+}
+#endif /* DD_PERF_HUD */
+
 #define DARKDASH_THEMES_DIR "D:\\themes"
 #define DARKDASH_THEME_ROOT "D:\\themes\\default"
 
@@ -76,6 +190,9 @@
 #define TRANS_MS 400            /* = RECT_OUT_MS + SWING_OUT_MS: screen cuts when
                                    the door reaches edge-on (start of dwell), so
                                    the cut hides behind the flat/invisible panel */
+#define REVEAL_MS       180u    /* tiny target-screen settle after the concealed cut */
+#define MODAL_OPEN_MS   150u    /* Recents / Power slide+fade in */
+#define MODAL_CLOSE_MS   90u    /* close faster than open so input still feels instant */
 
                                    /* idle animation: after this long with no input, the orb occasionally glitches
                                       on its own. Each burst lasts IDLE_GLITCH_MS; the gap between bursts is
@@ -139,7 +256,7 @@ static void MenuRebuild(void) { s_mrowCount = BuildMenuRows(s_mrows); }
 /* ambient bloom now lives in dd_backdrop (shared across all screens) */
 
 /* --- header status ticker: temp / fan / IP / free space ---------------- */
-static char  s_status[192] = "DARKDASH";
+static char  s_status[288] = "DARKDASH";
 static DWORD s_lastStatus = 0;
 static int   s_ntpDone = 0;    /* one-shot internet time sync at boot */
 static DWORD s_lastDiscPoll = 0; /* dedicated cadence for optical-disc detection */
@@ -179,14 +296,18 @@ static void BuildStatus(void) {
     StrAppend(s_status, sizeof(s_status), Net_Ip());
     StrAppend(s_status, sizeof(s_status), "    ");
     {
-        static const char* const drv[3] = { "E:\\", "F:\\", "G:\\" };
-        static const char* const lbl[3] = { "E: ",  "F: ",  "G: " };
         int di;
-        for (di = 0; di < 3; di++) {
-            char disk[16];
-            Sys_DiskFreeStr(drv[di], disk, sizeof(disk));
-            if (disk[0] == 0 || disk[0] == '-') continue;   /* drive not present */
-            StrAppend(s_status, sizeof(s_status), lbl[di]);
+        for (di = 0; di < DD_Storage_Count(); di++) {
+            const DD_StorageVolume* v = DD_Storage_At(di);
+            char root[4], label[32], disk[16];
+            if (!v || (v->partition != 1 && v->partition != 6 && v->partition != 7)) continue;
+            if (!DD_Storage_Ready(v)) continue;
+            root[0] = v->letter; root[1] = ':'; root[2] = '\\'; root[3] = 0;
+            Sys_DiskFreeStr(root, disk, sizeof(disk));
+            if (disk[0] == 0 || disk[0] == '-') continue;
+            DD_Storage_Label(v, label, sizeof(label));
+            StrAppend(s_status, sizeof(s_status), label);
+            StrAppend(s_status, sizeof(s_status), " ");
             StrAppend(s_status, sizeof(s_status), disk);
             StrAppend(s_status, sizeof(s_status), " FREE   ");
         }
@@ -234,22 +355,91 @@ static void DrawStatusScroller(IDirect3DDevice8* d) {
 
 /* Small "recently launched" overlay (Y on the main menu). Names only, no art;
    uses the themed menu frame, same treatment as the FileMan operation popups. */
-static void DrawRecents(int selRow) {
+   /* motion helpers for lightweight overlays / screen arrival. These deliberately
+      use only a handful of 2D fills/sprites: visible polish with negligible NV2A
+      cost compared with the normal dashboard render. */
+static float EaseOut01(DWORD elapsed, DWORD duration) {
+    float t, inv;
+    if (duration == 0 || elapsed >= duration) return 1.0f;
+    t = (float)elapsed / (float)duration;
+    inv = 1.0f - t;
+    return 1.0f - inv * inv;
+}
+
+static DWORD MulColorAlpha(DWORD c, int opacity) {
+    int a = (int)((c >> 24) & 0xFF);
+    if (opacity < 0) opacity = 0;
+    if (opacity > 255) opacity = 255;
+    a = a * opacity / 255;
+    return (c & 0x00FFFFFFu) | ((DWORD)a << 24);
+}
+
+static float ModalProgress(DWORD openAt, int closing, DWORD closeAt) {
+    DWORD now = GetTickCount();
+    if (closing) {
+        float p = EaseOut01(now - closeAt, MODAL_CLOSE_MS);
+        return 1.0f - p;
+    }
+    return EaseOut01(now - openAt, MODAL_OPEN_MS);
+}
+
+static void DrawScreenReveal(DWORD revealAt) {
+    DWORD now, e;
+    float p, inv, x;
+    int darkA, beamA;
+    DWORD accent;
+    int ar, ag, ab;
+    if (!revealAt) return;
+    now = GetTickCount();
+    e = now - revealAt;
+    if (e >= REVEAL_MS) return;
+    p = (float)e / (float)REVEAL_MS;
+    inv = 1.0f - p;
+    darkA = (int)(72.0f * inv);
+    UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(darkA, 0, 0, 0));
+
+    /* a quick accent scan makes the hidden door-cut read as an intentional
+       reveal instead of a hard scene replacement. */
+    accent = Theme_Color("accent", 0xFF7FE000);
+    ar = (int)((accent >> 16) & 0xFF);
+    ag = (int)((accent >> 8) & 0xFF);
+    ab = (int)(accent & 0xFF);
+    x = -64.0f + p * 768.0f;
+    beamA = (int)(95.0f * inv);
+    UI_FillRect(x, 0.0f, 6.0f, 480.0f, UI_ARGB(beamA, ar, ag, ab));
+    UI_FillRect(x - 18.0f, 0.0f, 18.0f, 480.0f, UI_ARGB(beamA / 3, ar, ag, ab));
+}
+
+static void DrawRecents(int selRow, DWORD openAt, int closing, DWORD closeAt) {
     IDirect3DDevice8* d = Gfx_Device();
     DWORD accent = Theme_Color("accent", 0xFF7FE000);
     DWORD text = Theme_Color("text", 0xFFD8F8C0);
     DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
     DWORD glow = Theme_Color("glow", 0xFFAEFF3C);
     int   ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
-    const Texture* frame = Theme_Asset("frame_menu_v");
+    /* Use an authored recent-activity panel, not the vertical menu art
+       stretched onto a floating dialog. Fall back for older themes. */
+    const Texture* frame = Theme_Asset("frame_recent");
     float bx = 200.0f, by = 120.0f, bw = 240.0f, bh = 240.0f;
+    if (!frame) frame = Theme_RoleAsset("ui.menu.frame");
     int   rc = Recents_Count();
-    int   i;
+    int   i, opacity;
+    float mp = ModalProgress(openAt, closing, closeAt);
 
-    /* dim the scene, then the themed frame panel (matches FileMan dialogs) */
-    UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(150, 0, 0, 0));
-    if (frame) UI_DrawSprite(frame, bx, by, bw, bh, 0xFFFFFFFF, 0);
-    else       UI_FillRect(bx, by, bw, bh, UI_ARGB(235, 18, 22, 18));
+    by += (1.0f - mp) * 10.0f;
+    opacity = (int)(255.0f * mp);
+    accent = MulColorAlpha(accent, opacity);
+    text = MulColorAlpha(text, opacity);
+    dim = MulColorAlpha(dim, opacity);
+    glow = MulColorAlpha(glow, opacity);
+
+    /* dim ramps with the panel; it never steals a full frame on open/close. */
+    UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB((int)(150.0f * mp), 0, 0, 0));
+    UI_DrawPanelDepthMasked(frame, bx, by, bw, bh, opacity, 24.0f, 22.0f, 24.0f, 22.0f);
+    if (frame) UI_DrawNineSlice(frame, bx, by, bw, bh,
+        24.0f, 22.0f, 24.0f, 22.0f, UI_ARGB(opacity, 255, 255, 255), 0);
+    else       UI_FillRect(bx, by, bw, bh, UI_ARGB((int)(235.0f * mp), 18, 22, 18));
+    UI_DrawPanelLightingMasked(frame, bx, by, bw, bh, opacity, 24.0f, 22.0f, 24.0f, 22.0f);
 
     Font_DrawText(d, bx + 20.0f, by + 16.0f, "RECENT", FONT_SIZE_SMALL, accent, 0);
 
@@ -259,42 +449,62 @@ static void DrawRecents(int selRow) {
     else {
         for (i = 0; i < rc; i++) {
             float ry = by + 48.0f + (float)i * 30.0f;
-            if (i == selRow)
-                UI_FillRect(bx + 12.0f, ry - 2.0f, bw - 24.0f, 26.0f, UI_ARGB(90, ar, ag, ab));
+            if (i == selRow) {
+                Select_BeginModal(0x6101, selRow);
+                Select_DrawModalBoxFlat(bx + 12.0f, ry - 2.0f, bw - 24.0f, 26.0f,
+                    UI_ARGB(100 * opacity / 255, ar, ag, ab));
+            }
             Font_DrawText(d, bx + 22.0f, ry, Recents_Name(i), FONT_SIZE_SMALL,
                 (i == selRow) ? glow : text, (int)(bw - 44.0f));
         }
     }
-    Font_DrawText(d, bx + 20.0f, by + bh - 30.0f, "A LAUNCH   Y/B CLOSE", FONT_SIZE_SMALL, dim, 0);
+    DD_Hints_Draw(d, bx + 20.0f, by + bh - 33.0f,
+        bw - 40.0f, 21.0f, "A LAUNCH  B CLOSE", dim);
 }
 
 /* Power menu overlay (WHITE tap on the main menu). Themed frame, same treatment
    as the recents overlay. Three options: Restart / Reboot / Shutdown. */
-static void DrawPowerMenu(int selRow) {
+static void DrawPowerMenu(int selRow, DWORD openAt, int closing, DWORD closeAt) {
     IDirect3DDevice8* d = Gfx_Device();
     DWORD accent = Theme_Color("accent", 0xFF7FE000);
     DWORD text = Theme_Color("text", 0xFFD8F8C0);
     DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
     DWORD glow = Theme_Color("glow", 0xFFAEFF3C);
     int   ar = (int)((accent >> 16) & 0xFF), ag = (int)((accent >> 8) & 0xFF), ab = (int)(accent & 0xFF);
-    const Texture* frame = Theme_Asset("frame_menu_v");
+    const Texture* frame = Theme_Asset("frame_menu_h");
     static const char* const k_pow[3] = { "Restart", "Reboot", "Shutdown" };
     float bx = 232.0f, by = 150.0f, bw = 176.0f, bh = 158.0f;
-    int   i;
+    int   i, opacity;
+    float mp = ModalProgress(openAt, closing, closeAt);
+    if (!frame) frame = Theme_RoleAsset("ui.menu.frame");
 
-    UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB(150, 0, 0, 0));
-    if (frame) UI_DrawSprite(frame, bx, by, bw, bh, 0xFFFFFFFF, 0);
-    else       UI_FillRect(bx, by, bw, bh, UI_ARGB(235, 18, 22, 18));
+    by += (1.0f - mp) * 10.0f;
+    opacity = (int)(255.0f * mp);
+    accent = MulColorAlpha(accent, opacity);
+    text = MulColorAlpha(text, opacity);
+    dim = MulColorAlpha(dim, opacity);
+    glow = MulColorAlpha(glow, opacity);
+
+    UI_FillRect(0.0f, 0.0f, 640.0f, 480.0f, UI_ARGB((int)(150.0f * mp), 0, 0, 0));
+    UI_DrawPanelDepthMasked(frame, bx, by, bw, bh, opacity, 24.0f, 22.0f, 24.0f, 22.0f);
+    if (frame) UI_DrawNineSlice(frame, bx, by, bw, bh,
+        24.0f, 22.0f, 24.0f, 22.0f, UI_ARGB(opacity, 255, 255, 255), 0);
+    else       UI_FillRect(bx, by, bw, bh, UI_ARGB((int)(235.0f * mp), 18, 22, 18));
+    UI_DrawPanelLightingMasked(frame, bx, by, bw, bh, opacity, 24.0f, 22.0f, 24.0f, 22.0f);
 
     Font_DrawText(d, bx + 20.0f, by + 16.0f, "POWER", FONT_SIZE_SMALL, accent, 0);
     for (i = 0; i < 3; i++) {
         float ry = by + 46.0f + (float)i * 28.0f;
-        if (i == selRow)
-            UI_FillRect(bx + 12.0f, ry - 2.0f, bw - 24.0f, 24.0f, UI_ARGB(90, ar, ag, ab));
+        if (i == selRow) {
+            Select_BeginModal(0x6102, selRow);
+            Select_DrawModalBoxFlat(bx + 12.0f, ry - 2.0f, bw - 24.0f, 24.0f,
+                UI_ARGB(100 * opacity / 255, ar, ag, ab));
+        }
         Font_DrawText(d, bx + 22.0f, ry, k_pow[i], FONT_SIZE_SMALL,
             (i == selRow) ? glow : text, 0);
     }
-    Font_DrawText(d, bx + 20.0f, by + bh - 26.0f, "A SELECT   B CLOSE", FONT_SIZE_SMALL, dim, 0);
+    DD_Hints_Draw(d, bx + 20.0f, by + bh - 27.0f,
+        bw - 40.0f, 20.0f, "A OK  B CLOSE", dim);
 }
 
 static void DrawSplash(int sel, int glowAlpha, int glitch) {
@@ -303,12 +513,11 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
     DWORD dim = Theme_Color("text_dim", 0xFF7FA060);
     DWORD text = Theme_Color("text", 0xFFD8F8C0);
     DWORD glow = Theme_GlowColor();      /* [glow] color, falls back to palette.glow */
-    int   glowOn = Theme_GlowEnabled();
-    int   glowI = Theme_GlowIntensity();  /* 0..100 */
-    const Texture* orb = Theme_Asset("orb_hero");
-    const Texture* hdr = Theme_Asset("bar_header");
-    const Texture* menu = Theme_Asset("frame_menu_v");
-    const Texture* foot = Theme_Asset("bar_footer");
+    const Texture* orb = Theme_RoleAsset("stage.orb.body");
+    const Texture* orbGlow = Theme_RoleAsset("stage.orb.glow");
+    const ThemeStageLighting* stageLight = Theme_StageLighting();
+    const Texture* hdr = Theme_RoleAsset("ui.header.frame");
+    const Texture* menu = Theme_RoleAsset("ui.menu.frame");
     int   ar = (int)((accent >> 16) & 0xFF);
     int   ag = (int)((accent >> 8) & 0xFF);
     int   ab = (int)(accent & 0xFF);
@@ -330,7 +539,17 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
     }
 
     /* --- ambient theme lighting: shared green bloom (same on every screen) --- */
-    Backdrop_Draw();
+    {
+        /* The environment eases toward the selected visible row. This moves
+           ONLY background/light layers; icons, text and plasma stay stable. */
+        float focus = (float)(sel - s_menuScroll) / (float)(MENU_VIS - 1);
+#if DD_A4_DEPTH
+        Backdrop_DrawHome(focus);
+#else
+        (void)focus;
+        Backdrop_Draw();
+#endif
+    }
 
     /* --- orb: FLAT (baked iso). Normal = breathe pulse; during a screen
        transition it glitches with a chromatic RGB split + jitter + flicker.
@@ -380,8 +599,18 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
         }
         else {
             UI_DrawSprite(orb, 44.0f, 168.0f, 272.0f, 234.0f, 0xFFFFFFFF, 0);
-            UI_DrawSprite(orb, 44.0f, 168.0f, 272.0f, 234.0f,
-                UI_ARGB(glowAlpha, 255, 255, 255), 1);
+            /* Optional separate emissive mask. Without it, retain the old
+               full-orb glow for legacy theme compatibility. */
+            if (orbGlow) {
+                int oa = glowAlpha * stageLight->emissiveLevel / 100;
+                if (oa > 180) oa = 180;
+                if (oa > 0) UI_DrawSprite(orbGlow, 44.0f, 168.0f, 272.0f, 234.0f,
+                    ((DWORD)oa << 24) | (stageLight->emissive & 0x00FFFFFF), 1);
+            }
+            else {
+                UI_DrawSprite(orb, 44.0f, 168.0f, 272.0f, 234.0f,
+                    UI_ARGB(glowAlpha, 255, 255, 255), 1);
+            }
             /* rare specular shimmer: the orb briefly catches light every ~38s.
                Re-draw the orb additively with the glow tint, ramping up then
                down (~900ms) -- respects the orb's shape (it IS the orb sprite)
@@ -425,19 +654,21 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
     }
 
     /* --- flat top-left header bar: frame + live status ticker --- */
-    if (hdr) UI_DrawSprite(hdr, 8.0f, 8.0f, 300.0f, 40.0f, 0xFFFFFFFF, 0);
+    if (hdr) UI_DrawNineSlice(hdr, 8.0f, 8.0f, 300.0f, 40.0f,
+        22.0f, 10.0f, 22.0f, 10.0f, 0xFFFFFFFF, 0);
     DrawStatusScroller(d);
 
     /* --- disc popup (top-right): shown only when a game disc is present --- */
     {
         const DiscState* ds = Disc_Get();
         if (ds->present && ds->isXboxGame) {
-            const Texture* dbar = Theme_Asset("bar_header");
+            const Texture* dbar = Theme_RoleAsset("ui.header.frame");
             float bx = 380.0f, by = 8.0f, bw = 252.0f, bh = 40.0f;
             float gh = (float)Font_GlyphHeight(FONT_SIZE_SMALL);
             float ty = by + (bh - gh) * 0.5f;        /* vertically centre in the bar */
             if (ty < by + 2.0f) ty = by + 2.0f;
-            if (dbar) UI_DrawSprite(dbar, bx, by, bw, bh, 0xFFFFFFFF, 0);
+            if (dbar) UI_DrawNineSlice(dbar, bx, by, bw, bh,
+                22.0f, 10.0f, 22.0f, 10.0f, 0xFFFFFFFF, 0);
             /* single line to match the one-line header frame: action label in the
                accent glow, then the title (clipped to the bar width). */
             Font_DrawText(d, bx + 12.0f, ty, "START:", FONT_SIZE_SMALL, glow, 0);
@@ -469,6 +700,23 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
             TRACED("ds.arcs", "<");
         }
         if (menu) Iso_DrawPanel(menu, menuX, menuY, 272.0f, 384.0f, 0xFFFFFFFF, 0);
+        /* Common translucent selection box: the authored selection PNG can
+           contain hard opaque borders that obscure menu text when shrunk and
+           additively blended.  The same alpha-blended geometry is now used by
+           the launcher, settings, file manager and save manager.  Keep the
+           highlight off the swing capture and let Swing_RectAlpha fade it. */
+        if (!turning && rectA > 0 &&
+            sel >= s_menuScroll && sel < s_menuScroll + MENU_VIS) {
+            float gy = rowY0 + rowDY * (float)(sel - s_menuScroll) - 6.0f;
+            int ha = 100 * rectA / 255;
+            Select_Begin(0x1000, gy);
+            if (ha > 0) {
+                TRACED("ds.glow", ">");
+                Select_DrawGlow(menuX + 18.0f, gy, 210.0f, 36.0f,
+                    UI_ARGB(ha, ar, ag, ab));
+                TRACED("ds.glow", "<");
+            }
+        }
         for (i = 0; i < MENU_VIS && (s_menuScroll + i) < s_mrowCount; i++) {
             int ri = s_menuScroll + i;
             DWORD c = (ri == sel) ? glow : text;
@@ -482,37 +730,19 @@ static void DrawSplash(int sel, int glowAlpha, int glitch) {
             Swing_CaptureEnd();
             Swing_DrawCaptured(menuX, menuY, 272.0f, 384.0f);
         }
-        else if (rectA > 0 && glowOn) {
-            /* not turning (at rest, or a rect-fade phase): draw the highlight
-               flat over the console at its current fade level. Honors the
-               theme [glow] block (enable + intensity + dedicated color).
-               The Y eases toward the selected row with a pop + chromatic tick. */
-            float gy = rowY0 + rowDY * (float)(sel - s_menuScroll) - 6.0f;
-            int   ha = (70 + glowAlpha) * rectA / 255;
-            ha = ha * glowI / 100;
-            Iso_Begin();
-            Select_Begin(0x1000, gy);
-            if (ha > 0) {
-                TRACED("ds.glow", ">");
-                Select_DrawGlow(menuX + 18.0f, gy, 210.0f, 36.0f,
-                    UI_ARGB(ha, gr, gg, gb));
-                TRACED("ds.glow", "<");
-            }
-            Iso_End();
-        }
     }
 
     /* --- footer status bar: FLAT --- */
-    if (foot) UI_DrawSprite(foot, 8.0f, 442.0f, 624.0f, 32.0f, 0xFFFFFFFF, 0);
     {
-        /* vertically center the hint in the 442..474 bar using the *measured*
-           glyph height, so a tall custom font doesn't clip at the bottom */
-        float barTop = 442.0f, barH = 32.0f;
-        float gh = (float)Font_GlyphHeight(FONT_SIZE_SMALL);
-        float ty = barTop + (barH - gh) * 0.5f;
-        if (ty < barTop + 2.0f) ty = barTop + 2.0f;
-        Font_DrawText(d, 24.0f, ty,
-            "A SELECT   B BACK   START MENU   X ADD CATEGORY", FONT_SIZE_SMALL, text, 0);
+        int customSel = (sel >= 0 && sel < s_mrowCount && s_mrows[sel].kind == MROW_CAT_CUSTOM);
+        const char* hint = customSel
+            ? "A SELECT  L3 JUKEBOX  R3 REMOVE  Y RECENTS  X ADD CATEGORY"
+            : "A SELECT  L3 JUKEBOX  Y RECENTS  WHITE POWER  START DISC  X ADD";
+        if (DD_Hints_Measure(hint) > 590.0f)
+            hint = customSel
+            ? "A SELECT  L3 JUKEBOX  R3 REMOVE  Y RECENTS"
+            : "A SELECT  L3 JUKEBOX  Y RECENTS  WHITE POWER";
+        DD_Hints_Footer(d, 442.0f, 32.0f, 24.0f, 590.0f, hint, text);
     }
 }
 
@@ -531,8 +761,13 @@ void __cdecl main(void) {
     DWORD idleSeed = GetTickCount() | 1;
     int   recOpen = 0;          /* recents overlay (Y on main menu) */
     int   recSel = 0;
+    DWORD recOpenAt = 0, recCloseAt = 0;
+    int   recClosing = 0;
     int   powOpen = 0;          /* power menu overlay (WHITE tap) */
     int   powSel = 0;
+    DWORD powOpenAt = 0, powCloseAt = 0;
+    int   powClosing = 0;
+    DWORD revealAt = 0;         /* target-screen reveal after the hidden cut */
     int   saverOn = 0;          /* screensaver active */
     DWORD whiteDownMs = 0;      /* when WHITE went down (0 = not down) */
     int   whiteMoved = 0;      /* DPAD touched during this WHITE hold? */
@@ -553,7 +788,9 @@ void __cdecl main(void) {
     Calib_Apply();           /* apply saved overscan insets (zero if uncalibrated) */
     Font_Init(Gfx_Device());
     InitInput();
-    Mount_HddPartitions();   /* map C/E/F/G before anything scans them (X/Y/Z cache skipped) */
+    Mount_HddPartitions();   /* unchanged HDD0 mappings; X/Y/Z cache included */
+    DD_Storage_ProbeSecondary(); /* CerBIOS HDD1 object discovery */
+    DD_Storage_MountSecondary(); /* only accessible roots; no alias overwrite */
 
     /* apply the saved custom font, if any. Font_Init already loaded the baked
        Default, so a missing/bad file just leaves Default in place. */
@@ -584,6 +821,7 @@ void __cdecl main(void) {
     Backdrop_Init();
     Fx_Init();               /* CRT scanline texture + overlay effects */
     Audio_Init();
+    Jukebox_Init();           /* persistent root/playlists; audio stays owned by BGM until L3 */
     Settings_StartMusic(1);   /* honor the saved choice: built-in / custom / None / Shuffle */
 
     /* FTP service: mark it wanted if enabled -- it will bring itself up once
@@ -635,6 +873,10 @@ void __cdecl main(void) {
         int  whiteReleased;
         DWORD t, el;
         int phase, tri, glowA, tuning, glitch;
+#if DD_PERF_HUD
+        DWORD perfBegin, perfDrawBegin, perfPresentBegin;
+        Perf_BeginLoop();
+#endif
 
         PumpInput();
         btn = GetButtons();
@@ -653,10 +895,28 @@ void __cdecl main(void) {
             }
         }
 
+#if DD_PERF_HUD
+        perfBegin = GetTickCount();
+#endif
         Ftp_Tick();   /* service the FTP server every frame (single-threaded) */
+#if DD_PERF_HUD
+        Perf_RecordCost(GetTickCount() - perfBegin, &s_perfFtpTotal, &s_perfFtpPeak);
+#endif
         TypeD_Tick(); /* broadcast Type-D status (background, rate-limited)       */
         Udp_DiscoTick(); /* discover XBOX-RGB / OXFP for accessory menu gating    */
         TypeDArt_BootResumeTick(); /* once discovered, drop last session's held art */
+        /* Boot-time NTP is a true frame-pumped state machine: DNS and UDP are
+           polled without Sleep/select timeouts, so a dead time server cannot
+           stall input, FTP, rendering, or accessory service. */
+        if (!s_ntpDone && Ntp_AsyncBusy()) {
+            if (!Time_NtpEnabled()) {
+                Ntp_AsyncCancel();            /* respect a runtime preference change */
+            }
+            else {
+                int nr = Ntp_AsyncPoll();
+                if (nr != 0) s_ntpDone = 1;   /* success or all servers exhausted */
+            }
+        }
         pressed = (WORD)(btn & ~prev);
         whiteReleased = ((prev & BTN_WHITE) && !(btn & BTN_WHITE)) ? 1 : 0;
         prev = btn;
@@ -683,13 +943,22 @@ void __cdecl main(void) {
         if (whiteReleased) {   /* WHITE released this frame */
             DWORD held = GetTickCount() - whiteDownMs;
             if (whiteDownMs && held < 400 && !whiteMoved &&
-                screen == SCR_MAIN && trans == 0 && !recOpen && !powOpen && !CustomAdd_IsOpen()) {
-                powSel = 0; powOpen = 1; Audio_PlaySfx(SFX_SELECT);
+                screen == SCR_MAIN && trans == 0 && !Jukebox_IsOpen() &&
+                !recOpen && !powOpen && !CustomAdd_IsOpen()) {
+                powSel = 0; powOpen = 1; powClosing = 0; powOpenAt = GetTickCount(); Audio_PlaySfx(SFX_SELECT);
             }
             whiteDownMs = 0;
         }
         if (trans != 0) {
             /* transition animating -- swallow menu input until it settles */
+        }
+        else if (screen == SCR_MAIN && Jukebox_IsOpen()) {
+            /* Jukebox owns all main-screen input while open. This must precede
+               WHITE tuning/power handling because WHITE is Next Track here. */
+            if (Jukebox_Update(pressed, btn)) {
+                lastInputMs = GetTickCount();
+                Fx_FlashEdge();
+            }
         }
         else if (screen == SCR_LAUNCH) {
             if (Launcher_Update(pressed, btn)) {     /* B -> back to main */
@@ -731,10 +1000,10 @@ void __cdecl main(void) {
                 if (car == 1) MenuRebuild();   /* category added -> show it now */
             }
             else if (powOpen) {
-                /* power menu owns input while open */
-                if (pressed & BTN_DPAD_DOWN) { if (powSel < 2) { powSel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
-                if (pressed & BTN_DPAD_UP) { if (powSel > 0) { powSel--; Audio_PlaySfx(SFX_NAV_UP); } }
-                if (pressed & BTN_A) {
+                /* power menu owns input while open; closing frames swallow input. */
+                if (!powClosing && (pressed & BTN_DPAD_DOWN)) { if (powSel < 2) { powSel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+                if (!powClosing && (pressed & BTN_DPAD_UP)) { if (powSel > 0) { powSel--; Audio_PlaySfx(SFX_NAV_UP); } }
+                if (!powClosing && (pressed & BTN_A)) {
                     Audio_PlaySfx(SFX_SELECT);
                     /* tidy shutdown of services before we hand off / power down */
                     Ftp_Stop();
@@ -752,14 +1021,14 @@ void __cdecl main(void) {
                     /* if a relaunch somehow returns, just close the menu */
                     powOpen = 0;
                 }
-                if (pressed & BTN_B) { powOpen = 0; Audio_PlaySfx(SFX_BACK); }
+                if (!powClosing && (pressed & BTN_B)) { powClosing = 1; powCloseAt = GetTickCount(); Audio_PlaySfx(SFX_BACK); }
             }
             else if (recOpen) {
-                /* recents overlay owns input while open */
+                /* recents overlay owns input while open; closing frames swallow input. */
                 int rc = Recents_Count();
-                if (pressed & BTN_DPAD_DOWN) { if (recSel < rc - 1) { recSel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
-                if (pressed & BTN_DPAD_UP) { if (recSel > 0) { recSel--; Audio_PlaySfx(SFX_NAV_UP); } }
-                if ((pressed & BTN_A) && rc > 0) {
+                if (!recClosing && (pressed & BTN_DPAD_DOWN)) { if (recSel < rc - 1) { recSel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
+                if (!recClosing && (pressed & BTN_DPAD_UP)) { if (recSel > 0) { recSel--; Audio_PlaySfx(SFX_NAV_UP); } }
+                if (!recClosing && (pressed & BTN_A) && rc > 0) {
                     const char* path = Recents_Path(recSel);
                     Audio_PlaySfx(SFX_SELECT);
                     if (path && path[0]) {
@@ -769,9 +1038,36 @@ void __cdecl main(void) {
                     }
                     recOpen = 0;
                 }
-                if (pressed & (BTN_B | BTN_Y)) { recOpen = 0; Audio_PlaySfx(SFX_BACK); }
+                if (!recClosing && (pressed & (BTN_B | BTN_Y))) { recClosing = 1; recCloseAt = GetTickCount(); Audio_PlaySfx(SFX_BACK); }
             }
             else {
+                /* L3 opens the lightweight Jukebox in-place over the main scene.
+                   Swallow this frame's other presses so L3+A cannot also launch
+                   the selected menu row. */
+                if (pressed & BTN_LTHUMB) {
+                    Jukebox_Enter();
+                    Audio_PlaySfx(SFX_ALT);
+                    pressed = 0;
+                    lastInputMs = GetTickCount();
+                }
+
+                /* R3 on a custom row removes only the persisted menu/category
+                   entry. The category's source folder and files are untouched. */
+                if ((pressed & BTN_RTHUMB) && sel >= 0 && sel < s_mrowCount &&
+                    s_mrows[sel].kind == MROW_CAT_CUSTOM) {
+                    if (Custom_Remove(s_mrows[sel].idx)) {
+                        MenuRebuild();
+                        if (sel >= s_mrowCount) sel = s_mrowCount - 1;
+                        if (sel < 0) sel = 0;
+                        if (s_menuScroll > sel) s_menuScroll = sel;
+                        if (s_menuScroll > s_mrowCount - MENU_VIS)
+                            s_menuScroll = s_mrowCount - MENU_VIS;
+                        if (s_menuScroll < 0) s_menuScroll = 0;
+                        Audio_PlaySfx(SFX_BACK);
+                    }
+                    pressed = 0;
+                }
+
                 if (pressed & BTN_DPAD_DOWN) { if (sel < s_mrowCount - 1) { sel++; Audio_PlaySfx(SFX_NAV_DOWN); } }
                 if (pressed & BTN_DPAD_UP) { if (sel > 0) { sel--; Audio_PlaySfx(SFX_NAV_UP); } }
                 if (sel < s_menuScroll) s_menuScroll = sel;
@@ -813,8 +1109,9 @@ void __cdecl main(void) {
                     }
                 }
                 if (pressed & BTN_Y) {               /* open the recents overlay */
+                    Recents_PruneMissing();           /* don't offer moved/deleted titles */
                     recSel = 0;
-                    recOpen = 1;
+                    recOpen = 1; recClosing = 0; recOpenAt = GetTickCount();
                     Audio_PlaySfx(SFX_SELECT);
                 }
                 /* easter egg: Black+RT toggles the spinning Darkone83 logo on the
@@ -830,6 +1127,14 @@ void __cdecl main(void) {
 
         if ((btn & BTN_LTRIG) && (btn & BTN_RTRIG) && (btn & BTN_BACK))
             running = 0;
+
+        /* let modal close motion finish before dropping the overlay state. */
+        if (powOpen && powClosing && GetTickCount() - powCloseAt >= MODAL_CLOSE_MS) {
+            powOpen = 0; powClosing = 0;
+        }
+        if (recOpen && recClosing && GetTickCount() - recCloseAt >= MODAL_CLOSE_MS) {
+            recOpen = 0; recClosing = 0;
+        }
 
         /* integer breathe pulse (no float->int; avoids Ftoi on MSVC2003) */
         t = GetTickCount();
@@ -868,13 +1173,11 @@ void __cdecl main(void) {
             Net_Poll();
             BuildStatus();
 
-            /* one-shot internet time sync: fire once DHCP has resolved an
-               address, if the user enabled it. Give up after a grace window so
-               we don't keep retrying a dead/timeserver-less network forever. */
+            /* one-shot internet time sync: once DHCP is ready, START the async
+               attempt. Ntp_AsyncPoll above advances it every frame. */
             if (!s_ntpDone && Time_NtpEnabled()) {
                 if (Net_IsUp()) {
-                    Ntp_Sync();        /* best-effort; failure is silent at boot */
-                    s_ntpDone = 1;
+                    if (!Ntp_AsyncBusy() && !Ntp_AsyncBegin()) s_ntpDone = 1;
                 }
                 else if (t > 30000) { /* ~30s and still no link/lease -> stop */
                     s_ntpDone = 1;
@@ -893,13 +1196,15 @@ void __cdecl main(void) {
                 else if (transTarget == SCR_FILEMAN) FileMan_Enter();
                 else if (transTarget == SCR_SETTINGS) Settings_Enter();
                 else if (transTarget == SCR_SAVEMGR) SaveMgr_Enter();
+                revealAt = t;                          /* soften the concealed cut */
+                Fx_FlashEdge();                         /* arrival pulse, if edge FX enabled */
                 trans = 0; glitch = 0;
             }
         }
         else if (trans == 2) {          /* glitch IN, settling on main */
             el = t - transStart;
             glitch = 100 - (int)(el * 100 / TRANS_MS);
-            if (el >= TRANS_MS) { trans = 0; glitch = 0; }
+            if (el >= TRANS_MS) { trans = 0; glitch = 0; Fx_FlashEdge(); }
         }
         if (glitch < 0)   glitch = 0;
         if (glitch > 100) glitch = 100;
@@ -907,7 +1212,7 @@ void __cdecl main(void) {
         /* idle animation: on the main menu, with no transition and no input
            for a while, fire an occasional self-glitch. It only writes 'glitch'
            (no screen change), so navigation stays live throughout. */
-        if (screen == SCR_MAIN && trans == 0) {
+        if (screen == SCR_MAIN && trans == 0 && !Jukebox_IsOpen()) {
             if (idleGlitchAt != 0) {
                 DWORD ge = t - idleGlitchAt;
                 if (ge >= IDLE_GLITCH_MS) {
@@ -935,7 +1240,8 @@ void __cdecl main(void) {
            bare main menu (no transition, no overlay). 0 = disabled. */
         if (!saverOn) {
             int ssMin = Data_Get()->screensaverMin;
-            if (ssMin > 0 && screen == SCR_MAIN && trans == 0 && !recOpen && !powOpen && !CustomAdd_IsOpen() &&
+            if (ssMin > 0 && screen == SCR_MAIN && trans == 0 && !Jukebox_IsOpen() &&
+                !recOpen && !powOpen && !CustomAdd_IsOpen() &&
                 (t - lastInputMs) > (DWORD)ssMin * 60000u) {
                 Saver_Enter();
                 saverOn = 1;
@@ -949,7 +1255,7 @@ void __cdecl main(void) {
         {
             int ssCd = -1, ssMin2 = Data_Get()->screensaverMin;
             if (saverOn) ssCd = 0;
-            else if (ssMin2 > 0 && screen == SCR_MAIN && trans == 0 &&
+            else if (ssMin2 > 0 && screen == SCR_MAIN && trans == 0 && !Jukebox_IsOpen() &&
                 !recOpen && !powOpen && !CustomAdd_IsOpen()) {
                 DWORD thr = (DWORD)ssMin2 * 60000u, idle = t - lastInputMs;
                 ssCd = (idle >= thr) ? 0 : (int)(thr - idle);
@@ -960,8 +1266,12 @@ void __cdecl main(void) {
         TRACE("frame", "audio>");
         Audio_Update();   /* service Xbox DS mixer every frame */
         TRACE("frame", "music>");
-        Settings_MusicTick();   /* advance Shuffle to the next track when one ends */
+        if (!Jukebox_IsOpen())
+            Settings_MusicTick();   /* BGM Shuffle yields while Jukebox owns the stream */
         TRACED("frame", "render>");
+#if DD_PERF_HUD
+        perfDrawBegin = GetTickCount();
+#endif
         Gfx_BeginFrame(Theme_BG());
         TRACEDU("r.begin<", saverOn ? "saver" : "screen", (unsigned long)screen);
         if (saverOn) {
@@ -973,27 +1283,41 @@ void __cdecl main(void) {
             else if (screen == SCR_SETTINGS) Settings_Render();
             else if (screen == SCR_SAVEMGR) SaveMgr_Render();
             else                            DrawSplash(sel, glowA, glitch);
-            if (screen == SCR_MAIN && recOpen) DrawRecents(recSel);
-            if (screen == SCR_MAIN && powOpen) DrawPowerMenu(powSel);
+            if (screen == SCR_MAIN && Jukebox_IsOpen()) Jukebox_Render();
+            if (screen == SCR_MAIN && recOpen) DrawRecents(recSel, recOpenAt, recClosing, recCloseAt);
+            if (screen == SCR_MAIN && powOpen) DrawPowerMenu(powSel, powOpenAt, powClosing, powCloseAt);
             if (screen == SCR_MAIN && CustomAdd_IsOpen()) CustomAdd_Draw(Gfx_Device());
         }
         TRACED("r.draw<", "");
+        if (!saverOn && screen != SCR_MAIN) DrawScreenReveal(revealAt);
         /* ambient overlays, over all content: CRT scanlines + roll, then the
            SFX-synced edge flash. The boot intro (if active) tops everything.
            Each gated by its DD_FX_* toggle. */
         if (Data_FxOn(DD_FX_SCANLINES)) { TRACE("r.fx", "scan>");  Fx_DrawScanlines(); }
         if (Data_FxOn(DD_FX_EDGE)) { TRACE("r.fx", "edge>");  Fx_DrawEdgeGlow(); }
         if (Fx_BootActive()) { TRACE("r.fx", "boot>");  Fx_DrawBoot(); }
+#if DD_PERF_HUD
+        /* Last in the scene: overlay never changes normal dashboard layout. */
+        Perf_DrawHud();
+        Perf_RecordCost(GetTickCount() - perfDrawBegin, &s_perfDrawTotal, &s_perfDrawPeak);
+        perfPresentBegin = GetTickCount();
+#endif
         TRACED("r.present", ">");
         Gfx_EndFrame();
+#if DD_PERF_HUD
+        Perf_RecordCost(GetTickCount() - perfPresentBegin,
+            &s_perfPresentTotal, &s_perfPresentPeak);
+#endif
         TRACED("frame", "end");
     }
 
     Smbsvc_Stop();           /* stop the SMBus service thread before tearing down */
+    Ntp_AsyncCancel();       /* release a boot-time DNS/socket attempt, if any     */
     XView_Stop();            /* outro + shut down the X-View panel thread          */
     Ftp_Stop();
     Fx_Shutdown();
     Egg_Shutdown();
+    Jukebox_Shutdown();
     Audio_Shutdown();
     Backdrop_Shutdown();
     Theme_Unload();

@@ -79,6 +79,31 @@ void Recents_Init(void) {
     CloseHandle(h);
 }
 
+int Recents_PruneMissing(void) {
+    int i, out = 0, oldCount = s_rc.count;
+    if (oldCount < 0) oldCount = 0;
+    if (oldCount > RECENTS_MAX) oldCount = RECENTS_MAX;
+
+    for (i = 0; i < oldCount; i++) {
+        DWORD attr;
+        if (!s_rc.e[i].path[0]) continue;
+        attr = GetFileAttributesA(s_rc.e[i].path);
+        if (attr == 0xFFFFFFFF || (attr & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (out != i) s_rc.e[out] = s_rc.e[i];
+        out++;
+    }
+
+    if (out != oldCount) {
+        for (i = out; i < RECENTS_MAX; i++) {
+            s_rc.e[i].name[0] = 0;
+            s_rc.e[i].path[0] = 0;
+        }
+        s_rc.count = out;
+        RcSave();
+    }
+    return oldCount - out;
+}
+
 /* ---- list ops ---------------------------------------------------------- */
 
 void Recents_Add(const char* label, const char* xbePath) {
